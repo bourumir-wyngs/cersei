@@ -10,6 +10,7 @@
 
 pub mod claudemd;
 pub mod graph;
+pub mod graph_migrate;
 pub mod manager;
 pub mod memdir;
 pub mod session_storage;

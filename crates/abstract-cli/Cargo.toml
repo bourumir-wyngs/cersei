@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [features]
 default = ["graph"]
-graph = ["cersei-memory/graph"]
+graph = ["cersei-memory/graph", "dep:grafeo"]
 
 [dependencies]
 # Cersei SDK
@@ -64,6 +64,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 tempfile = { workspace = true }
+grafeo = { path = "/Users/adib/Desktop/atlas/_inspirations/grafeo/crates/grafeo", features = ["gql", "grafeo-file", "wal"], optional = true }
 
 [[example]]
 name = "memory_bench"

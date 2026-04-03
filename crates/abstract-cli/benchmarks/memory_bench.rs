@@ -508,6 +508,80 @@ fn main() {
         println!("    Context: graph ON is {:+.1}% vs OFF", ctx_delta);
     }
 
+    // ═══ SECTION 9: SCHEMA VERSION & MIGRATION ════════════════════════
+
+    section("9. Schema Version & Migration");
+
+    #[cfg(feature = "graph")]
+    {
+        use cersei_memory::graph::{effective_confidence, VersionCheck, CURRENT_SCHEMA_VERSION};
+        use cersei_memory::graph_migrate;
+
+        // Version check on already-migrated graph
+        let ver_dir = root.join("ver_bench");
+        std::fs::create_dir_all(&ver_dir).unwrap();
+        let ver_path = ver_dir.join("ver.grafeo");
+        {
+            // Open once to trigger migration
+            let _ = cersei_memory::graph::GraphMemory::open(&ver_path);
+        }
+
+        let r = bench("Version check (migrated graph)", 200, || {
+            let db = grafeo::GrafeoDB::open(&ver_path).unwrap();
+            let _ = graph_migrate::check_version(&db);
+        });
+        print_result(&r);
+
+        // Migration on fresh graph (v0→v2)
+        let r = bench("Migration v0→v2 (fresh graph)", 50, || {
+            let db = grafeo::GrafeoDB::new_in_memory();
+            let _ = graph_migrate::run_migrations(&db, 0, 2);
+        });
+        print_result(&r);
+
+        // Migration with 100 existing nodes
+        let r = bench("Migration v0→v2 (100 nodes)", 10, || {
+            let db = grafeo::GrafeoDB::new_in_memory();
+            let session = db.session();
+            for i in 0..100 {
+                let _ = session.execute(&format!(
+                    "INSERT (:Memory {{id: 'bench-{i}', content: 'test {i}', mem_type: 'User', \
+                     confidence: 0.8, created_at: '2024-01-01T00:00:00Z', updated_at: '2024-01-01T00:00:00Z'}})"
+                ));
+            }
+            let _ = graph_migrate::run_migrations(&db, 0, 2);
+        });
+        print_result(&r);
+
+        // Idempotent re-run
+        let r = bench("Migration re-run (idempotent)", 100, || {
+            let db = grafeo::GrafeoDB::new_in_memory();
+            let _ = graph_migrate::run_migrations(&db, 0, 2);
+            let _ = graph_migrate::run_migrations(&db, 0, 2); // second run
+        });
+        print_result(&r);
+
+        // Effective confidence calculation
+        let now = chrono::Utc::now().to_rfc3339();
+        let r = bench("effective_confidence() calc", 1000, || {
+            let _ = effective_confidence(0.9, 0.01, &now);
+        });
+        print_result(&r);
+
+        let old = "2024-01-01T00:00:00Z";
+        let r = bench("effective_confidence() (old)", 1000, || {
+            let _ = effective_confidence(0.9, 0.01, old);
+        });
+        print_result(&r);
+
+        println!("\n  Schema version: v{}", CURRENT_SCHEMA_VERSION);
+    }
+
+    #[cfg(not(feature = "graph"))]
+    {
+        println!("  \x1b[33mGraph feature not enabled — skipping migration benchmarks\x1b[0m");
+    }
+
     // ═══ SUMMARY ═════════════════════════════════════════════════════════
 
     println!("\n\x1b[32;1m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
