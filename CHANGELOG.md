@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.1.2] - 2026-04-04
+
+### Added
+
+- **Multi-provider model router** (`registry.rs`, `router.rs`). 13 providers supported out of the box via `provider/model` string format. Most providers reuse the existing OpenAI-compatible client with a different base URL — zero new SSE parsing per provider.
+- **Provider registry** with API base URLs, env var names, default models, context windows, and capabilities for: Anthropic, OpenAI, Google (Gemini), Mistral, Groq, DeepSeek, xAI (Grok), Together, Fireworks, Perplexity, Cerebras, Ollama, OpenRouter.
+- **`from_model_string()`** top-level function on `cersei-provider` — parses `"groq/llama-3.1-70b-versatile"` into a configured `Box<dyn Provider>`.
+- **Auto-detection** from bare model names — `"gpt-4o"` routes to OpenAI, `"claude-sonnet-4-6"` to Anthropic, `"gemini-2.0-flash"` to Google.
+- **Model aliases** in Abstract CLI — `--model llama`, `--model deepseek`, `--model grok`, `--model gemini`, `--model mistral`, `--model 4o`.
+- **`abstract login status`** now shows all 13 providers with auth detection from environment variables.
+- **Providers documentation page** (`docs/content/docs/providers.mdx`) covering every provider with env vars, models, context windows, and usage examples.
+
+### Changed
+
+- Abstract CLI provider resolution replaced with the model router. The `provider` config field is now optional — the model string is the source of truth.
+- Default model format changed to `provider/model` (e.g., `anthropic/claude-sonnet-4-6`).
+
+### Removed
+
+- `resolve_provider()` and `resolve_provider_name()` from Abstract CLI — replaced by `cersei_provider::from_model_string()`.
+
 ## [0.1.1] - 2026-04-03
 
 ### Added

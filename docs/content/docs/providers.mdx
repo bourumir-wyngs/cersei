@@ -1,0 +1,436 @@
+---
+title: Providers
+description: 13 built-in LLM providers — Anthropic, OpenAI, Google, Mistral, Groq, DeepSeek, xAI, Together, Fireworks, Perplexity, Cerebras, Ollama, OpenRouter.
+---
+
+import { Callout } from 'fumadocs-ui/components/callout';
+import { TypeTable } from 'fumadocs-ui/components/type-table';
+
+# Providers
+
+Cersei supports 13 providers out of the box. Most use the OpenAI-compatible API format, which means adding a provider is just an env var — no new code.
+
+## Model String Format
+
+```
+provider/model
+```
+
+Pass this to the Agent builder or the Abstract CLI:
+
+```rust
+Agent::builder()
+    .provider(cersei_provider::from_model_string("groq/llama-3.1-70b-versatile")?.0)
+```
+
+```bash
+abstract "fix the tests" --model groq/llama-3.1-70b-versatile
+```
+
+Bare model names auto-detect the provider from known prefixes:
+
+```bash
+abstract "fix the tests" --model gpt-4o          # → openai
+abstract "fix the tests" --model claude-sonnet-4-6  # → anthropic
+abstract "fix the tests" --model gemini-2.0-flash   # → google
+```
+
+## Model Router
+
+```rust
+use cersei_provider::from_model_string;
+
+// Explicit: provider/model
+let (provider, model) = from_model_string("openai/gpt-4o")?;
+
+// Auto-detect from prefix
+let (provider, model) = from_model_string("gpt-4o")?;
+
+// List providers with valid auth
+let available = cersei_provider::router::available_providers();
+
+// List all known providers
+let all = cersei_provider::router::all_providers();
+```
+
+<TypeTable
+  type={{
+    'from_model_string(model)': {
+      type: 'Result<(Box<dyn Provider>, String)>',
+      description: 'Parse a model string, construct the provider, return (provider, resolved_model_name).',
+      required: true,
+    },
+    'available_providers()': {
+      type: "Vec<&'static ProviderEntry>",
+      description: 'Providers with valid auth configured in the environment.',
+    },
+    'all_providers()': {
+      type: "&'static [ProviderEntry]",
+      description: 'All 13 known providers regardless of auth.',
+    },
+  }}
+/>
+
+---
+
+## Anthropic
+
+Claude models. Uses Anthropic's native API format (different from OpenAI).
+
+| | |
+|---|---|
+| API Base | `https://api.anthropic.com` |
+| Env Var | `ANTHROPIC_API_KEY` or `ANTHROPIC_KEY` |
+| Format | Anthropic (native) |
+| Default Model | `claude-sonnet-4-6` |
+
+**Models:**
+
+| Model | Context Window | Vision | Thinking | Tool Use |
+|-------|---------------|--------|----------|----------|
+| `claude-opus-4-6` | 200K | Yes | Yes | Yes |
+| `claude-sonnet-4-6` | 200K | Yes | Yes | Yes |
+| `claude-haiku-4-5` | 200K | Yes | No | Yes |
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+abstract "fix the tests" --model anthropic/claude-sonnet-4-6
+abstract "fix the tests" --model sonnet   # alias
+```
+
+```rust
+let (provider, model) = from_model_string("anthropic/claude-sonnet-4-6")?;
+```
+
+---
+
+## OpenAI
+
+GPT and o-series models.
+
+| | |
+|---|---|
+| API Base | `https://api.openai.com/v1` |
+| Env Var | `OPENAI_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `gpt-4o` |
+
+**Models:**
+
+| Model | Context Window |
+|-------|---------------|
+| `gpt-4o` | 128K |
+| `gpt-4-turbo` | 128K |
+| `o1` | 200K |
+| `o3` | 200K |
+
+```bash
+export OPENAI_API_KEY=sk-...
+abstract "fix the tests" --model openai/gpt-4o
+abstract "fix the tests" --model 4o   # alias
+```
+
+---
+
+## Google
+
+Gemini models via the OpenAI-compatible endpoint.
+
+| | |
+|---|---|
+| API Base | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| Env Var | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `gemini-2.0-flash` |
+
+**Models:**
+
+| Model | Context Window |
+|-------|---------------|
+| `gemini-2.0-flash` | 1M |
+| `gemini-2.0-pro` | 1M |
+| `gemini-1.5-pro` | 2M |
+
+```bash
+export GOOGLE_API_KEY=AIza...
+abstract "fix the tests" --model google/gemini-2.0-flash
+abstract "fix the tests" --model gemini   # alias
+```
+
+---
+
+## Mistral
+
+Mistral and Codestral models.
+
+| | |
+|---|---|
+| API Base | `https://api.mistral.ai/v1` |
+| Env Var | `MISTRAL_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `mistral-large-latest` |
+
+**Models:**
+
+| Model | Context Window |
+|-------|---------------|
+| `mistral-large-latest` | 128K |
+| `codestral-latest` | 256K |
+
+```bash
+export MISTRAL_API_KEY=...
+abstract "fix the tests" --model mistral/mistral-large-latest
+abstract "fix the tests" --model mistral   # alias
+```
+
+---
+
+## Groq
+
+Llama, Mixtral, and other open models on Groq's inference hardware.
+
+| | |
+|---|---|
+| API Base | `https://api.groq.com/openai/v1` |
+| Env Var | `GROQ_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `llama-3.1-70b-versatile` |
+
+**Models:**
+
+| Model | Context Window |
+|-------|---------------|
+| `llama-3.1-70b-versatile` | 128K |
+| `llama-3.1-8b-instant` | 128K |
+| `mixtral-8x7b-32768` | 32K |
+
+```bash
+export GROQ_API_KEY=gsk_...
+abstract "fix the tests" --model groq/llama-3.1-70b-versatile
+abstract "fix the tests" --model llama   # alias
+```
+
+---
+
+## DeepSeek
+
+DeepSeek Chat and Coder models.
+
+| | |
+|---|---|
+| API Base | `https://api.deepseek.com/v1` |
+| Env Var | `DEEPSEEK_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `deepseek-chat` |
+
+**Models:**
+
+| Model | Context Window |
+|-------|---------------|
+| `deepseek-chat` | 64K |
+| `deepseek-coder` | 64K |
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+abstract "fix the tests" --model deepseek/deepseek-chat
+abstract "fix the tests" --model deepseek   # alias
+```
+
+---
+
+## xAI
+
+Grok models.
+
+| | |
+|---|---|
+| API Base | `https://api.x.ai/v1` |
+| Env Var | `XAI_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `grok-2` |
+
+```bash
+export XAI_API_KEY=xai-...
+abstract "fix the tests" --model xai/grok-2
+abstract "fix the tests" --model grok   # alias
+```
+
+---
+
+## Together
+
+Open-source models hosted by Together AI.
+
+| | |
+|---|---|
+| API Base | `https://api.together.xyz/v1` |
+| Env Var | `TOGETHER_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo` |
+
+```bash
+export TOGETHER_API_KEY=...
+abstract "fix the tests" --model together/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo
+```
+
+---
+
+## Fireworks
+
+Fast inference for open models.
+
+| | |
+|---|---|
+| API Base | `https://api.fireworks.ai/inference/v1` |
+| Env Var | `FIREWORKS_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `accounts/fireworks/models/llama-v3p1-70b-instruct` |
+
+```bash
+export FIREWORKS_API_KEY=fw_...
+abstract "fix the tests" --model fireworks/accounts/fireworks/models/llama-v3p1-70b-instruct
+```
+
+---
+
+## Perplexity
+
+Search-augmented models.
+
+| | |
+|---|---|
+| API Base | `https://api.perplexity.ai` |
+| Env Var | `PERPLEXITY_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `llama-3.1-sonar-large-128k-online` |
+
+```bash
+export PERPLEXITY_API_KEY=pplx-...
+abstract "fix the tests" --model perplexity/llama-3.1-sonar-large-128k-online
+```
+
+---
+
+## Cerebras
+
+Wafer-scale inference.
+
+| | |
+|---|---|
+| API Base | `https://api.cerebras.ai/v1` |
+| Env Var | `CEREBRAS_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `llama3.1-70b` |
+
+```bash
+export CEREBRAS_API_KEY=csk-...
+abstract "fix the tests" --model cerebras/llama3.1-70b
+```
+
+---
+
+## Ollama
+
+Local models. No API key needed.
+
+| | |
+|---|---|
+| API Base | `http://localhost:11434/v1` |
+| Env Var | (none) |
+| Format | OpenAI-compatible |
+| Default Model | `llama3.1` |
+
+```bash
+ollama pull llama3.1
+abstract "fix the tests" --model ollama/llama3.1
+```
+
+<Callout>
+Ollama must be running locally on port 11434. No API key is required.
+</Callout>
+
+---
+
+## OpenRouter
+
+Aggregator that proxies to multiple providers with a single key.
+
+| | |
+|---|---|
+| API Base | `https://openrouter.ai/api/v1` |
+| Env Var | `OPENROUTER_API_KEY` |
+| Format | OpenAI-compatible |
+| Default Model | `anthropic/claude-3.5-sonnet` |
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+abstract "fix the tests" --model openrouter/anthropic/claude-3.5-sonnet
+```
+
+---
+
+## Auto-Detection
+
+When you pass a bare model name (no `/`), the router auto-detects the provider:
+
+| Prefix | Provider |
+|--------|----------|
+| `claude-*` | anthropic |
+| `gpt-*`, `o1*`, `o3*` | openai |
+| `gemini-*` | google |
+| `mistral-*`, `codestral-*` | mistral |
+| `deepseek-*` | deepseek |
+| `grok-*` | xai |
+| `llama*` | groq (if `GROQ_API_KEY` set), else together, else ollama |
+
+If no prefix matches, the router picks the first provider with a valid API key in the environment.
+
+## Aliases
+
+The Abstract CLI supports short aliases:
+
+| Alias | Resolves To |
+|-------|-------------|
+| `opus` | `anthropic/claude-opus-4-6` |
+| `sonnet` | `anthropic/claude-sonnet-4-6` |
+| `haiku` | `anthropic/claude-haiku-4-5` |
+| `4o`, `gpt4o` | `openai/gpt-4o` |
+| `gemini` | `google/gemini-2.0-flash` |
+| `llama` | `groq/llama-3.1-70b-versatile` |
+| `deepseek` | `deepseek/deepseek-chat` |
+| `grok` | `xai/grok-2` |
+| `mistral` | `mistral/mistral-large-latest` |
+
+---
+
+## Adding Custom Providers
+
+Any OpenAI-compatible endpoint works with the OpenAI provider directly:
+
+```rust
+let provider = OpenAi::builder()
+    .base_url("https://my-custom-api.com/v1")
+    .api_key("my-key")
+    .model("my-model")
+    .build()?;
+
+let output = Agent::builder()
+    .provider(provider)
+    .tools(cersei::tools::coding())
+    .run_with("fix the tests")
+    .await?;
+```
+
+For the CLI, set a custom base URL in config:
+
+```toml
+# .abstract/config.toml
+model = "gpt-4o"
+provider = "openai"
+```
+
+Then override via environment:
+
+```bash
+OPENAI_API_KEY=my-key OPENAI_BASE_URL=https://my-custom-api.com/v1 abstract "fix the tests"
+```

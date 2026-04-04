@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub permissions_mode: String,
     pub working_dir: PathBuf,
     #[serde(default)]
+    pub fallback_models: Vec<String>,
+    #[serde(default)]
     pub mcp_servers: Vec<McpServerEntry>,
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
@@ -46,6 +48,7 @@ impl Default for AppConfig {
             graph_memory: true,
             permissions_mode: "interactive".into(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            fallback_models: Vec::new(),
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
         }
@@ -163,6 +166,9 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     if overlay.permissions_mode != AppConfig::default().permissions_mode {
         base.permissions_mode = overlay.permissions_mode;
     }
+    if !overlay.fallback_models.is_empty() {
+        base.fallback_models = overlay.fallback_models;
+    }
     if !overlay.mcp_servers.is_empty() {
         base.mcp_servers = overlay.mcp_servers;
     }
@@ -183,6 +189,9 @@ fn apply_env(config: &mut AppConfig) {
     }
     if let Ok(v) = std::env::var("ABSTRACT_THEME") {
         config.theme = v;
+    }
+    if let Ok(v) = std::env::var("ABSTRACT_FALLBACK_MODELS") {
+        config.fallback_models = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     }
     if let Ok(v) = std::env::var("ABSTRACT_MAX_TURNS") {
         if let Ok(n) = v.parse() {

@@ -1,9 +1,10 @@
 [package]
 name = "abstract-cli"
-version = "0.1.0"
-edition = "2021"
-authors = ["Cersei Contributors"]
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "A high-performance Rust-native CLI coding agent"
 default-run = "abstract"
 

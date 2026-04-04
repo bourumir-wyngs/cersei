@@ -54,6 +54,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "fast")]
     pub max: bool,
 
+    /// Fallback models (comma-separated) for provider switching on error
+    #[arg(long, value_delimiter = ',', value_name = "MODELS")]
+    pub fallback: Vec<String>,
+
     /// Auto-approve all tool permissions (CI/headless mode)
     #[arg(long)]
     pub no_permissions: bool,
@@ -261,13 +265,22 @@ fn apply_cli_overrides(cli: &Cli, config: &mut config::AppConfig) {
     if let Some(dir) = &cli.directory {
         config.working_dir = std::path::PathBuf::from(dir);
     }
+    if !cli.fallback.is_empty() {
+        config.fallback_models = cli.fallback.clone();
+    }
 }
 
 fn resolve_model_alias(alias: &str) -> String {
     match alias {
-        "opus" => "claude-opus-4-6".into(),
-        "sonnet" => "claude-sonnet-4-6".into(),
-        "haiku" => "claude-haiku-4-5".into(),
+        "opus" => "anthropic/claude-opus-4-6".into(),
+        "sonnet" => "anthropic/claude-sonnet-4-6".into(),
+        "haiku" => "anthropic/claude-haiku-4-5".into(),
+        "gpt4o" | "4o" => "openai/gpt-4o".into(),
+        "gemini" => "google/gemini-2.0-flash".into(),
+        "llama" => "groq/llama-3.1-70b-versatile".into(),
+        "deepseek" => "deepseek/deepseek-chat".into(),
+        "grok" => "xai/grok-2".into(),
+        "mistral" => "mistral/mistral-large-latest".into(),
         other => other.into(),
     }
 }

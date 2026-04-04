@@ -509,64 +509,23 @@ pub fn run_logout() -> anyhow::Result<()> {
 }
 
 fn show_status() -> anyhow::Result<()> {
-    let creds = Credentials::load();
-
     eprintln!("\x1b[36;1mAuthentication Status\x1b[0m\n");
 
-    // Anthropic — show what will actually be used (OAuth > env > saved)
-    // Check OAuth first (matches resolve_anthropic_auth priority)
-    let has_own_oauth = creds.anthropic_oauth.as_ref()
-        .map(|o| !o.is_expired() && o.uses_bearer())
-        .unwrap_or(false);
-    let has_cc_oauth = load_claude_code_oauth()
-        .map(|o| !o.is_expired() && o.uses_bearer())
-        .unwrap_or(false);
-
-    // Check if env var exists (for display even when OAuth overrides it)
-    let anthropic_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_KEY"]
-        .iter()
-        .find_map(|v| std::env::var(v).ok().filter(|k| !k.is_empty()).map(|k| (*v, k)));
-
-    if has_own_oauth {
-        let oauth = creds.anthropic_oauth.as_ref().unwrap();
-        let email = oauth.email.as_deref().unwrap_or("unknown");
-        eprintln!("  Anthropic: \x1b[32mOAuth Bearer (Max/Pro)\x1b[0m — {email}  \x1b[90m[active]\x1b[0m");
-        if let Some((var_name, _)) = &anthropic_env {
-            eprintln!("             \x1b[90m{var_name} set but OAuth takes priority\x1b[0m");
-        }
-    } else if has_cc_oauth {
-        let oauth = load_claude_code_oauth().unwrap();
-        let email = oauth.email.as_deref().unwrap_or("unknown");
-        eprintln!("  Anthropic: \x1b[32mClaude Code OAuth (Max/Pro)\x1b[0m — {email}  \x1b[90m[active]\x1b[0m");
-        if let Some((var_name, _)) = &anthropic_env {
-            eprintln!("             \x1b[90m{var_name} set but OAuth takes priority\x1b[0m");
-        }
-    } else if let Some(oauth) = &creds.anthropic_oauth {
-        let email = oauth.email.as_deref().unwrap_or("unknown");
-        let status = if oauth.is_expired() {
-            "\x1b[33mexpired\x1b[0m"
+    // Show all providers from the registry
+    for entry in cersei_provider::registry::all() {
+        let status = if !entry.requires_key() {
+            // Ollama — no key needed
+            "\x1b[32mavailable (local)\x1b[0m".to_string()
+        } else if let Some(key) = entry.api_key_from_env() {
+            let env_name = entry.env_keys.iter()
+                .find(|v| std::env::var(v).ok().filter(|k| !k.is_empty()).is_some())
+                .unwrap_or(&"?");
+            format!("\x1b[32mENV\x1b[0m ({}={})", env_name, mask_key(&key))
         } else {
-            "\x1b[32mvalid\x1b[0m"
+            "\x1b[90mnot configured\x1b[0m".to_string()
         };
-        let mode = if oauth.uses_bearer() { "Bearer" } else { "API Key" };
-        eprintln!("  Anthropic: \x1b[32mOAuth {mode}\x1b[0m ({email}, {status})");
-    } else if let Some(key) = &creds.anthropic_api_key {
-        eprintln!("  Anthropic: \x1b[32mAPI Key\x1b[0m ({})", mask_key(key));
-    } else if let Some(cc) = load_claude_code_oauth() {
-        let email = cc.email.as_deref().unwrap_or("unknown");
-        eprintln!("  Anthropic: \x1b[32mClaude Code OAuth\x1b[0m ({email})");
-    } else {
-        eprintln!("  Anthropic: \x1b[31mnot configured\x1b[0m");
-    }
 
-    // OpenAI
-    let openai_env = std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.is_empty());
-    if let Some(key) = openai_env {
-        eprintln!("  OpenAI:    \x1b[32mENV\x1b[0m (OPENAI_API_KEY={})", mask_key(&key));
-    } else if let Some(key) = &creds.openai_api_key {
-        eprintln!("  OpenAI:    \x1b[32mAPI Key\x1b[0m ({})", mask_key(key));
-    } else {
-        eprintln!("  OpenAI:    \x1b[90mnot configured\x1b[0m");
+        eprintln!("  {:<14} {}", format!("{}:", entry.id), status);
     }
 
     eprintln!("\n  Credentials: {}", credentials_path().display());

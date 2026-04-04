@@ -111,7 +111,8 @@ pub async fn run_agent_streaming(
     event_tx: mpsc::Sender<AgentEvent>,
     _control_rx: mpsc::Receiver<AgentControl>,
 ) -> Result<AgentOutput> {
-    // Load session history
+    // Load session history (skip if messages were pre-populated via with_messages)
+    if agent.messages.lock().is_empty() {
     if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
         let history = memory.load(session_id).await?;
         if !history.is_empty() {
@@ -129,6 +130,7 @@ pub async fn run_agent_streaming(
             });
         }
     }
+    } // end session load guard
 
     // Add user prompt
     agent.messages.lock().push(Message::user(prompt));

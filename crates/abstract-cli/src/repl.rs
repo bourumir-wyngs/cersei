@@ -1,8 +1,9 @@
-//! REPL loop and single-shot execution.
+//! REPL loop and single-shot execution with provider continuity.
 //!
-//! Drives the agent via `run_stream()`, consuming `AgentEvent`s and dispatching
-//! them to the renderer, status line, and permission handler.
+//! On provider errors (rate limits, overloaded, etc.), shows an interactive
+//! prompt letting the user retry, switch providers, wait, or skip.
 
+use crate::app;
 use crate::commands;
 use crate::config::AppConfig;
 use crate::input::InputReader;
@@ -11,37 +12,135 @@ use crate::status::StatusLine;
 use crate::theme::Theme;
 use cersei::Agent;
 use cersei::events::AgentEvent;
+use cersei_memory::manager::MemoryManager;
+use cersei_types::Role;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+// ─── Recovery prompt ───────────────────────────────────────────────────────
+
+enum Recovery {
+    Retry,
+    Switch(String),
+    Wait(u64),
+    Skip,
+}
+
+fn is_provider_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("429")
+        || lower.contains("529")
+        || lower.contains("503")
+        || lower.contains("rate limit")
+        || lower.contains("overloaded")
+        || lower.contains("capacity")
+        || lower.contains("too many requests")
+}
+
+fn prompt_recovery(current_model: &str, config: &AppConfig) -> Recovery {
+    // Build options list
+    let mut options: Vec<(String, String)> = Vec::new(); // (key, model_string)
+
+    // Configured fallbacks
+    for (i, model) in config.fallback_models.iter().enumerate() {
+        options.push((format!("{}", i + 1), model.clone()));
+    }
+
+    // Other available providers not already listed
+    let available = cersei_provider::router::available_providers();
+    for entry in &available {
+        let model_str = format!("{}/{}", entry.id, entry.default_model);
+        if model_str != current_model
+            && !config.fallback_models.contains(&model_str)
+            && !config.fallback_models.iter().any(|f| f.starts_with(entry.id))
+        {
+            let key = format!("{}", options.len() + 1);
+            options.push((key, model_str));
+        }
+    }
+
+    eprintln!();
+    eprintln!("  \x1b[33mOptions:\x1b[0m");
+    eprintln!("    \x1b[36m[r]\x1b[0m Retry with {current_model}");
+    for (key, model) in &options {
+        eprintln!("    \x1b[36m[{key}]\x1b[0m Switch to {model}");
+    }
+    eprintln!("    \x1b[36m[w]\x1b[0m Wait 30s then retry");
+    eprintln!("    \x1b[90m[Enter]\x1b[0m Skip, return to prompt");
+    eprint!("\n  Choice: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    // Read single keypress
+    let choice = read_choice();
+
+    match choice.as_str() {
+        "r" | "R" => Recovery::Retry,
+        "w" | "W" => Recovery::Wait(30),
+        "" => Recovery::Skip,
+        key => {
+            // Check if it's a numbered option
+            if let Some((_, model)) = options.iter().find(|(k, _)| k == key) {
+                Recovery::Switch(model.clone())
+            } else {
+                Recovery::Skip
+            }
+        }
+    }
+}
+
+fn read_choice() -> String {
+    use crossterm::event::{self, Event, KeyCode, KeyEvent};
+    use crossterm::terminal;
+
+    if terminal::enable_raw_mode().is_ok() {
+        let result = loop {
+            if let Ok(Event::Key(KeyEvent { code, .. })) = event::read() {
+                break match code {
+                    KeyCode::Char(c) => c.to_string(),
+                    KeyCode::Enter => String::new(),
+                    KeyCode::Esc => String::new(),
+                    _ => continue,
+                };
+            }
+        };
+        let _ = terminal::disable_raw_mode();
+        eprint!("\n");
+        result
+    } else {
+        let mut input = String::new();
+        let _ = std::io::stdin().read_line(&mut input);
+        input.trim().to_string()
+    }
+}
+
+// ─── REPL ──────────────────────────────────────────────────────────────────
 
 /// Run the interactive REPL.
 pub async fn run_repl(
-    agent: &Agent,
+    mut agent: Agent,
     theme: &Theme,
     session_id: &str,
     config: &AppConfig,
+    memory_manager: &MemoryManager,
     json_mode: bool,
     running: Arc<AtomicBool>,
-    _cancel_token: CancellationToken,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut input_reader = InputReader::new()?;
     let mut renderer = StreamRenderer::new(theme, json_mode);
     let mut status = StatusLine::new(theme, &config.model, session_id, !json_mode);
     let mut cmd_registry = commands::CommandRegistry::new();
     let mut is_first_turn = true;
+    let mut current_model = config.model.clone();
 
     loop {
-        let prompt_str = if is_first_turn {
-            "\x1b[36m> \x1b[0m"
-        } else {
-            "\x1b[36m> \x1b[0m"
-        };
+        let prompt_str = "\x1b[36m> \x1b[0m";
 
         let input = match input_reader.readline(prompt_str) {
             Some(line) => line,
             None => {
-                // EOF or Ctrl-D
                 input_reader.save_history();
                 break;
             }
@@ -60,33 +159,79 @@ pub async fn run_repl(
                     break;
                 }
                 _ => {
-                    cmd_registry
-                        .execute(cmd, args, config, session_id)
-                        .await;
+                    cmd_registry.execute(cmd, args, config, session_id).await;
                     continue;
                 }
             }
         }
 
-        // Run agent
-        running.store(true, Ordering::Relaxed);
-        let result = run_agent_streaming(
-            agent,
-            &input,
-            &mut renderer,
-            &mut status,
-            json_mode,
-            is_first_turn,
-        )
-        .await;
-        running.store(false, Ordering::Relaxed);
+        // Run agent with retry/recovery loop
+        let mut should_retry = true;
+        while should_retry {
+            should_retry = false;
 
-        match result {
-            Ok(_) => {
-                is_first_turn = false;
-            }
-            Err(e) => {
-                renderer.error(&e.to_string());
+            running.store(true, Ordering::Relaxed);
+            let result = run_agent_streaming(
+                &agent,
+                &input,
+                &mut renderer,
+                &mut status,
+                json_mode,
+                is_first_turn,
+            )
+            .await;
+            running.store(false, Ordering::Relaxed);
+
+            match result {
+                Ok(_) => {
+                    is_first_turn = false;
+                }
+                Err(err_msg) => {
+                    renderer.error(&err_msg);
+
+                    if is_provider_error(&err_msg) {
+                        match prompt_recovery(&current_model, config) {
+                            Recovery::Retry => {
+                                should_retry = true;
+                            }
+                            Recovery::Switch(new_model) => {
+                                // Snapshot messages, pop the last user msg (runner already added it)
+                                let mut msgs = agent.messages();
+                                if msgs.last().map(|m| m.role == Role::User).unwrap_or(false) {
+                                    msgs.pop();
+                                }
+
+                                match app::build_agent(
+                                    &new_model,
+                                    config,
+                                    memory_manager,
+                                    session_id,
+                                    cancel_token.clone(),
+                                    Some(msgs),
+                                ) {
+                                    Ok((new_agent, resolved)) => {
+                                        agent = new_agent;
+                                        current_model = format!("{}/{}", new_model.split('/').next().unwrap_or(""), &resolved);
+                                        if current_model.starts_with('/') {
+                                            current_model = resolved.clone();
+                                        }
+                                        renderer.model_switched(&resolved);
+                                        should_retry = true;
+                                    }
+                                    Err(e) => {
+                                        renderer.error(&format!("Switch failed: {e}"));
+                                    }
+                                }
+                            }
+                            Recovery::Wait(secs) => {
+                                eprintln!("\x1b[90m  Waiting {secs}s...\x1b[0m");
+                                tokio::time::sleep(Duration::from_secs(secs)).await;
+                                should_retry = true;
+                            }
+                            Recovery::Skip => {}
+                        }
+                    }
+                }
             }
         }
     }
@@ -97,48 +242,45 @@ pub async fn run_repl(
 
 /// Run a single prompt (non-interactive).
 pub async fn run_single_shot(
-    agent: &Agent,
+    agent: Agent,
     prompt: &str,
     theme: &Theme,
     session_id: &str,
     config: &AppConfig,
+    memory_manager: &MemoryManager,
     json_mode: bool,
     running: Arc<AtomicBool>,
+    _cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut renderer = StreamRenderer::new(theme, json_mode);
     let mut status = StatusLine::new(theme, &config.model, session_id, false);
 
     running.store(true, Ordering::Relaxed);
-    let result = run_agent_streaming(agent, prompt, &mut renderer, &mut status, json_mode, true).await;
+    let result = run_agent_streaming(&agent, prompt, &mut renderer, &mut status, json_mode, true).await;
     running.store(false, Ordering::Relaxed);
 
     match result {
         Ok(_) => Ok(()),
-        Err(e) => {
-            renderer.error(&e.to_string());
-            Err(e)
+        Err(msg) => {
+            renderer.error(&msg);
+            Err(anyhow::anyhow!("{msg}"))
         }
     }
 }
 
 /// Core event loop: stream agent events and render them.
+/// Returns Ok(()) on success or Err(error_message) on failure.
 async fn run_agent_streaming(
     agent: &Agent,
     prompt: &str,
     renderer: &mut StreamRenderer,
     status: &mut StatusLine,
     json_mode: bool,
-    is_first: bool,
-) -> anyhow::Result<()> {
-    let mut stream = if is_first {
-        agent.run_stream(prompt)
-    } else {
-        // For multi-turn, we use run_stream which internally accesses shared messages
-        agent.run_stream(prompt)
-    };
+    _is_first: bool,
+) -> Result<(), String> {
+    let mut stream = agent.run_stream(prompt);
 
     while let Some(event) = stream.next().await {
-        // JSON mode: print raw events
         if json_mode {
             render::print_json_event(&event);
         }
@@ -162,13 +304,7 @@ async fn run_agent_streaming(
             } => {
                 renderer.tool_end(&name, &result, is_error, duration);
             }
-            AgentEvent::PermissionRequired(_request) => {
-                // The interactive permission policy handles this synchronously
-                // via the PermissionPolicy trait. The stream will get the response
-                // from the policy's check() method.
-                // If using StreamDeferredPolicy, we'd respond here:
-                // stream.respond_permission(request.id, decision);
-            }
+            AgentEvent::PermissionRequired(_request) => {}
             AgentEvent::CostUpdate {
                 cumulative_cost,
                 input_tokens,
@@ -222,16 +358,14 @@ async fn run_agent_streaming(
                 }
             }
             AgentEvent::Error(msg) => {
-                renderer.error(&msg);
-                break;
+                renderer.flush();
+                return Err(msg);
             }
             AgentEvent::Complete(_output) => {
                 renderer.complete();
-                break;
+                return Ok(());
             }
-            _ => {
-                // Other events: Status, HookFired, etc. — ignore in CLI
-            }
+            _ => {}
         }
     }
 

@@ -179,6 +179,20 @@ impl StreamRenderer {
         let _ = io::stderr().flush();
     }
 
+    /// Notify that the model was switched.
+    pub fn model_switched(&mut self, model: &str) {
+        if !self.json_mode {
+            let _ = execute!(
+                io::stderr(),
+                Print("\n"),
+                SetForegroundColor(self.theme.success),
+                Print(format!("  Switched to {model}")),
+                ResetColor,
+                Print("\n\n"),
+            );
+        }
+    }
+
     /// Print a completion separator.
     pub fn complete(&mut self) {
         self.flush();

@@ -5,6 +5,8 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod registry;
+pub mod router;
 mod stream;
 
 use async_trait::async_trait;
@@ -17,6 +19,7 @@ use tokio::sync::mpsc;
 pub use anthropic::Anthropic;
 pub use openai::OpenAi;
 pub use stream::StreamAccumulator;
+pub use router::from_model_string;
 
 // ─── Provider trait ──────────────────────────────────────────────────────────
 

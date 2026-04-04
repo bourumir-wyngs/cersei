@@ -80,15 +80,88 @@ impl Provider for OpenAi {
         }
 
         for msg in &request.messages {
-            let role = match msg.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::System => "system",
-            };
-            api_messages.push(serde_json::json!({
-                "role": role,
-                "content": msg.get_all_text(),
-            }));
+            match msg.role {
+                Role::User => {
+                    // Check if this is a tool result message
+                    if let MessageContent::Blocks(blocks) = &msg.content {
+                        for block in blocks {
+                            if let ContentBlock::ToolResult { tool_use_id, content, is_error } = block {
+                                api_messages.push(serde_json::json!({
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": content,
+                                }));
+                            }
+                        }
+                        // Also include any text blocks as a user message
+                        let text: String = blocks.iter().filter_map(|b| {
+                            if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
+                        }).collect::<Vec<_>>().join("\n");
+                        if !text.is_empty() {
+                            api_messages.push(serde_json::json!({
+                                "role": "user",
+                                "content": text,
+                            }));
+                        }
+                    } else {
+                        api_messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": msg.get_all_text(),
+                        }));
+                    }
+                }
+                Role::Assistant => {
+                    // Check for tool_use blocks — serialize as tool_calls
+                    if let MessageContent::Blocks(blocks) = &msg.content {
+                        let tool_uses: Vec<&ContentBlock> = blocks.iter().filter(|b| matches!(b, ContentBlock::ToolUse { .. })).collect();
+                        if !tool_uses.is_empty() {
+                            let tool_calls: Vec<serde_json::Value> = tool_uses.iter().map(|b| {
+                                if let ContentBlock::ToolUse { id, name, input } = b {
+                                    serde_json::json!({
+                                        "id": id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": input.to_string(),
+                                        }
+                                    })
+                                } else {
+                                    serde_json::json!({})
+                                }
+                            }).collect();
+
+                            let text_content: String = blocks.iter().filter_map(|b| {
+                                if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
+                            }).collect::<Vec<_>>().join("");
+
+                            let mut asst_msg = serde_json::json!({
+                                "role": "assistant",
+                                "tool_calls": tool_calls,
+                            });
+                            if !text_content.is_empty() {
+                                asst_msg["content"] = serde_json::json!(text_content);
+                            }
+                            api_messages.push(asst_msg);
+                        } else {
+                            api_messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": msg.get_all_text(),
+                            }));
+                        }
+                    } else {
+                        api_messages.push(serde_json::json!({
+                            "role": "assistant",
+                            "content": msg.get_all_text(),
+                        }));
+                    }
+                }
+                Role::System => {
+                    api_messages.push(serde_json::json!({
+                        "role": "system",
+                        "content": msg.get_all_text(),
+                    }));
+                }
+            }
         }
 
         let mut body = serde_json::json!({
@@ -160,15 +233,14 @@ impl Provider for OpenAi {
                             model: String::new(),
                         })
                         .await;
-                    let _ = tx
-                        .send(StreamEvent::ContentBlockStart { id: None, name: None,
-                            index: 0,
-                            block_type: "text".into(),
-                        })
-                        .await;
-
                     let mut stream = response.bytes_stream();
                     let mut buffer = String::new();
+                    let mut text_started = false;
+                    // Track tool calls being assembled across chunks
+                    // OpenAI sends: tool_calls[i].id, tool_calls[i].function.name (first chunk)
+                    //               tool_calls[i].function.arguments (subsequent chunks, accumulated)
+                    let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new(); // index -> (id, name, args_json)
+                    let mut has_tool_calls = false;
 
                     while let Some(chunk) = stream.next().await {
                         match chunk {
@@ -181,28 +253,103 @@ impl Provider for OpenAi {
                                     if let Some(data) = line.strip_prefix("data: ") {
                                         let data = data.trim();
                                         if data == "[DONE]" {
-                                            let _ = tx
-                                                .send(StreamEvent::ContentBlockStop { index: 0 })
-                                                .await;
-                                            let _ = tx
-                                                .send(StreamEvent::MessageDelta {
-                                                    stop_reason: Some(StopReason::EndTurn),
-                                                    usage: None,
-                                                })
-                                                .await;
+                                            // Emit accumulated tool calls
+                                            for (idx, (id, name, args)) in &tool_calls {
+                                                let input: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+                                                let _ = tx.send(StreamEvent::ContentBlockStart {
+                                                    index: *idx + 1,
+                                                    block_type: "tool_use".into(),
+                                                    id: Some(id.clone()),
+                                                    name: Some(name.clone()),
+                                                }).await;
+                                                // Send full args as InputJsonDelta
+                                                let _ = tx.send(StreamEvent::InputJsonDelta {
+                                                    index: *idx + 1,
+                                                    partial_json: args.clone(),
+                                                }).await;
+                                                let _ = tx.send(StreamEvent::ContentBlockStop { index: *idx + 1 }).await;
+                                            }
+
+                                            if text_started {
+                                                let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                                            }
+
+                                            let stop = if has_tool_calls {
+                                                StopReason::ToolUse
+                                            } else {
+                                                StopReason::EndTurn
+                                            };
+
+                                            // Extract usage if available
+                                            let _ = tx.send(StreamEvent::MessageDelta {
+                                                stop_reason: Some(stop),
+                                                usage: None,
+                                            }).await;
                                             let _ = tx.send(StreamEvent::MessageStop).await;
                                             return;
                                         }
-                                        if let Ok(json) =
-                                            serde_json::from_str::<serde_json::Value>(data)
-                                        {
-                                            if let Some(delta) = json["choices"][0]["delta"]["content"].as_str() {
-                                                let _ = tx
-                                                    .send(StreamEvent::TextDelta {
+
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                            let delta = &json["choices"][0]["delta"];
+                                            let finish_reason = json["choices"][0]["finish_reason"].as_str();
+
+                                            // Text content
+                                            if let Some(text) = delta["content"].as_str() {
+                                                if !text_started {
+                                                    text_started = true;
+                                                    let _ = tx.send(StreamEvent::ContentBlockStart {
                                                         index: 0,
-                                                        text: delta.to_string(),
-                                                    })
-                                                    .await;
+                                                        block_type: "text".into(),
+                                                        id: None,
+                                                        name: None,
+                                                    }).await;
+                                                }
+                                                let _ = tx.send(StreamEvent::TextDelta {
+                                                    index: 0,
+                                                    text: text.to_string(),
+                                                }).await;
+                                            }
+
+                                            // Tool calls (accumulated across chunks)
+                                            if let Some(tc_array) = delta["tool_calls"].as_array() {
+                                                has_tool_calls = true;
+                                                for tc in tc_array {
+                                                    let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                                                    let entry = tool_calls.entry(idx).or_insert_with(|| {
+                                                        (String::new(), String::new(), String::new())
+                                                    });
+
+                                                    // First chunk has id and function.name
+                                                    if let Some(id) = tc["id"].as_str() {
+                                                        entry.0 = id.to_string();
+                                                    }
+                                                    if let Some(name) = tc["function"]["name"].as_str() {
+                                                        entry.1 = name.to_string();
+                                                    }
+                                                    // Arguments accumulate across chunks
+                                                    if let Some(args) = tc["function"]["arguments"].as_str() {
+                                                        entry.2.push_str(args);
+                                                    }
+                                                }
+                                            }
+
+                                            // Usage from the final chunk
+                                            if let Some(usage) = json["usage"].as_object() {
+                                                let input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                let output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                let _ = tx.send(StreamEvent::MessageDelta {
+                                                    stop_reason: finish_reason.and_then(|r| match r {
+                                                        "stop" => Some(StopReason::EndTurn),
+                                                        "tool_calls" => Some(StopReason::ToolUse),
+                                                        "length" => Some(StopReason::MaxTokens),
+                                                        _ => None,
+                                                    }),
+                                                    usage: Some(Usage {
+                                                        input_tokens,
+                                                        output_tokens,
+                                                        ..Default::default()
+                                                    }),
+                                                }).await;
                                             }
                                         }
                                     }
