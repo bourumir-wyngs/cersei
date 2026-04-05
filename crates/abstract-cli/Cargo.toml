@@ -65,7 +65,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 tempfile = { workspace = true }
-grafeo = { path = "/Users/adib/Desktop/atlas/_inspirations/grafeo/crates/grafeo", features = ["gql", "grafeo-file", "wal"], optional = true }
+grafeo = { version = "0.5", features = ["gql", "grafeo-file", "wal"], optional = true }
 
 [[example]]
 name = "memory_bench"

@@ -12,14 +12,30 @@
 - **`abstract login status`** now shows all 13 providers with auth detection from environment variables.
 - **Providers documentation page** (`docs/content/docs/providers.mdx`) covering every provider with env vars, models, context windows, and usage examples.
 
+- **Provider continuity** — interactive model switching on provider errors. On rate limit or outage, the REPL shows options to retry, switch to a fallback model, wait, or skip. Conversation history transfers across provider switches via `AgentBuilder::with_messages()`.
+- **`--fallback` CLI flag** — configure fallback models for provider switching (e.g., `--fallback groq/llama-3.1-70b-versatile,google/gemini-2.0-flash`).
+- **`fallback_models`** config field and `ABSTRACT_FALLBACK_MODELS` environment variable.
+- **OpenAI tool calling** — full streaming tool call support for OpenAI-compatible providers. Accumulates `delta.tool_calls` chunks across SSE events, emits proper `ContentBlockStart`/`InputJsonDelta`/`ContentBlockStop` events. Previously tool calls were silently dropped.
+- **OpenAI message serialization** — assistant messages with tool calls now serialize as `tool_calls` array. Tool results serialize as `role: "tool"` with `tool_call_id`. Previously all messages were flattened to text, breaking the tool call loop.
+- **`AgentBuilder::with_messages()`** — pre-populate conversation history when building an agent. Used for provider switching mid-session.
+- **Session load guard** — runner skips loading session history from memory when messages are pre-populated via `with_messages()`, preventing duplicates.
+
 ### Changed
 
 - Abstract CLI provider resolution replaced with the model router. The `provider` config field is now optional — the model string is the source of truth.
 - Default model format changed to `provider/model` (e.g., `anthropic/claude-sonnet-4-6`).
+- REPL now owns the Agent (instead of borrowing), enabling mid-session provider swaps.
+- `build_agent()` extracted as a standalone reusable function in `app.rs`, called on both startup and provider switch.
+
+### Fixed
+
+- Grafeo graph database dependency now uses crates.io (`grafeo = "0.5"`) instead of local filesystem paths. `cargo install` no longer fails on machines without the author's directory layout.
+- OpenAI tool calling loop — the agent no longer repeats the same tool call indefinitely. Tool results are now correctly serialized in OpenAI's expected format (`role: "tool"`, `tool_call_id`), allowing the model to see results and proceed.
 
 ### Removed
 
 - `resolve_provider()` and `resolve_provider_name()` from Abstract CLI — replaced by `cersei_provider::from_model_string()`.
+- Hardcoded local filesystem paths from all `Cargo.toml` files.
 
 ## [0.1.1] - 2026-04-03
 

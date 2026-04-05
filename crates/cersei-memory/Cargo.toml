@@ -25,7 +25,7 @@ default = []
 graph = ["grafeo"]
 
 [dependencies.grafeo]
-path = "/Users/adib/Desktop/atlas/_inspirations/grafeo/crates/grafeo"
+version = "0.5"
 optional = true
 default-features = false
 features = ["gql", "grafeo-file", "wal"]
