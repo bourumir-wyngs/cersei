@@ -7,7 +7,8 @@ pub fn run() -> anyhow::Result<()> {
     eprintln!("  /commit           Generate a git commit with AI message");
     eprintln!("  /review           AI code review of current changes");
     eprintln!("  /memory, /mem     Show memory status");
-    eprintln!("  /model <name>     Switch model (opus, sonnet, haiku)");
+    eprintln!("  /model <name>     Switch model immediately");
+    eprintln!("  /provider [p] [m] Show or switch provider");
     eprintln!("  /config [key val] Show or set config");
     eprintln!("  /diff             Show git diff");
     eprintln!("  /resume [id]      Resume a previous session");

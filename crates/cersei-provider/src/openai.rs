@@ -69,6 +69,10 @@ impl Provider for OpenAi {
             request.model.clone()
         };
 
+        if requires_responses_api(&model) {
+            return self.complete_via_responses(request, model).await;
+        }
+
         // Build OpenAI-format messages
         let mut api_messages: Vec<serde_json::Value> = Vec::new();
 
@@ -167,7 +171,7 @@ impl Provider for OpenAi {
         let mut body = serde_json::json!({
             "model": model,
             "messages": api_messages,
-            "max_tokens": request.max_tokens,
+            "max_completion_tokens": request.max_tokens,
             "stream": true,
         });
 
@@ -380,6 +384,308 @@ impl Provider for OpenAi {
     }
 }
 
+impl OpenAi {
+    async fn complete_via_responses(
+        &self,
+        request: CompletionRequest,
+        model: String,
+    ) -> Result<CompletionStream> {
+        let input = build_responses_input(&request.messages);
+        let mut body = serde_json::json!({
+            "model": model,
+            "input": input,
+            "stream": true,
+            "max_output_tokens": request.max_tokens,
+        });
+
+        if let Some(system) = &request.system {
+            body["instructions"] = serde_json::json!(system);
+        }
+
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::Value::Array(tools);
+        }
+
+        let url = format!("{}/responses", self.base_url);
+        let auth_header = match &self.auth {
+            Auth::ApiKey(key) | Auth::Bearer(key) => format!("Bearer {}", key),
+            Auth::OAuth { token, .. } => format!("Bearer {}", token.access_token),
+            Auth::Custom(_) => String::new(),
+        };
+
+        let (tx, rx) = mpsc::channel(256);
+        let req = self
+            .client
+            .post(&url)
+            .header("authorization", &auth_header)
+            .header("content-type", "application/json")
+            .json(&body)
+            .build()
+            .map_err(CerseiError::Http)?;
+
+        let client = self.client.clone();
+
+        tokio::spawn(async move {
+            match client.execute(req).await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let body = response.text().await.unwrap_or_default();
+                        let _ = tx
+                            .send(StreamEvent::Error {
+                                message: format!("HTTP {}: {}", status, body),
+                            })
+                            .await;
+                        return;
+                    }
+
+                    let mut stream = response.bytes_stream();
+                    let mut buffer = String::new();
+                    let mut open_text_blocks = std::collections::HashSet::new();
+                    let mut open_tool_blocks = std::collections::HashSet::new();
+                    let mut stop_reason = StopReason::EndTurn;
+                    let mut usage: Option<Usage> = None;
+
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(bytes) => {
+                                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                while let Some(pos) = buffer.find("\n") {
+                                    let line = buffer[..pos].to_string();
+                                    buffer = buffer[pos + 1..].to_string();
+
+                                    if let Some(data) = line.strip_prefix("data: ") {
+                                        let data = data.trim();
+                                        if data == "[DONE]" {
+                                            for index in open_text_blocks.drain() {
+                                                let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                            }
+                                            for index in open_tool_blocks.drain() {
+                                                let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                            }
+                                            let _ = tx
+                                                .send(StreamEvent::MessageDelta {
+                                                    stop_reason: Some(stop_reason),
+                                                    usage,
+                                                })
+                                                .await;
+                                            let _ = tx.send(StreamEvent::MessageStop).await;
+                                            return;
+                                        }
+
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                            let event_type = json["type"].as_str().unwrap_or_default();
+                                            match event_type {
+                                                "response.created" => {
+                                                    let id = json["response"]["id"].as_str().unwrap_or_default().to_string();
+                                                    let model = json["response"]["model"].as_str().unwrap_or_default().to_string();
+                                                    let _ = tx.send(StreamEvent::MessageStart { id, model }).await;
+                                                }
+                                                "response.output_item.added" => {
+                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let item = &json["item"];
+                                                    match item["type"].as_str().unwrap_or_default() {
+                                                        "function_call" => {
+                                                            open_tool_blocks.insert(index);
+                                                            let id = item["call_id"]
+                                                                .as_str()
+                                                                .or_else(|| item["id"].as_str())
+                                                                .unwrap_or_default()
+                                                                .to_string();
+                                                            let name = item["name"].as_str().unwrap_or_default().to_string();
+                                                            let _ = tx.send(StreamEvent::ContentBlockStart {
+                                                                index,
+                                                                block_type: "tool_use".into(),
+                                                                id: Some(id),
+                                                                name: Some(name),
+                                                            }).await;
+                                                        }
+                                                        "message" => {
+                                                            open_text_blocks.insert(index);
+                                                            let _ = tx.send(StreamEvent::ContentBlockStart {
+                                                                index,
+                                                                block_type: "text".into(),
+                                                                id: None,
+                                                                name: None,
+                                                            }).await;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                                "response.output_text.delta" => {
+                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    if !open_text_blocks.contains(&index) {
+                                                        open_text_blocks.insert(index);
+                                                        let _ = tx.send(StreamEvent::ContentBlockStart {
+                                                            index,
+                                                            block_type: "text".into(),
+                                                            id: None,
+                                                            name: None,
+                                                        }).await;
+                                                    }
+                                                    if let Some(delta) = json["delta"].as_str() {
+                                                        let _ = tx.send(StreamEvent::TextDelta {
+                                                            index,
+                                                            text: delta.to_string(),
+                                                        }).await;
+                                                    }
+                                                }
+                                                "response.output_text.done" => {
+                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    if open_text_blocks.remove(&index) {
+                                                        let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                                    }
+                                                }
+                                                "response.function_call_arguments.delta" => {
+                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    if let Some(delta) = json["delta"].as_str() {
+                                                        let _ = tx.send(StreamEvent::InputJsonDelta {
+                                                            index,
+                                                            partial_json: delta.to_string(),
+                                                        }).await;
+                                                    }
+                                                }
+                                                "response.function_call_arguments.done" => {
+                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    stop_reason = StopReason::ToolUse;
+                                                    if open_tool_blocks.remove(&index) {
+                                                        let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                                    }
+                                                }
+                                                "response.completed" => {
+                                                    let output = json["response"]["output"].as_array().cloned().unwrap_or_default();
+                                                    if output.iter().any(|item| item["type"].as_str() == Some("function_call")) {
+                                                        stop_reason = StopReason::ToolUse;
+                                                    }
+
+                                                    let usage_json = &json["response"]["usage"];
+                                                    usage = Some(Usage {
+                                                        input_tokens: usage_json["input_tokens"].as_u64().unwrap_or(0),
+                                                        output_tokens: usage_json["output_tokens"].as_u64().unwrap_or(0),
+                                                        total_tokens: usage_json["total_tokens"].as_u64().unwrap_or(0),
+                                                        ..Default::default()
+                                                    });
+                                                }
+                                                "response.failed" | "error" => {
+                                                    let message = json["error"]["message"]
+                                                        .as_str()
+                                                        .or_else(|| json["message"].as_str())
+                                                        .unwrap_or("Responses API error")
+                                                        .to_string();
+                                                    let _ = tx.send(StreamEvent::Error { message }).await;
+                                                    return;
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                }
+            }
+        });
+
+        Ok(CompletionStream::new(rx))
+    }
+}
+
+fn requires_responses_api(model: &str) -> bool {
+    let lower = model.to_lowercase();
+    lower.contains("codex") || lower.contains("-pro")
+}
+
+fn build_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
+    let mut input = Vec::new();
+
+    for msg in messages {
+        match &msg.content {
+            MessageContent::Text(text) => {
+                input.push(response_message_item(msg.role, text));
+            }
+            MessageContent::Blocks(blocks) => {
+                let mut text_parts = Vec::new();
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            if !text.is_empty() {
+                                text_parts.push(text.clone());
+                            }
+                        }
+                        ContentBlock::ToolUse { id, name, input: tool_input } => {
+                            input.push(serde_json::json!({
+                                "type": "function_call",
+                                "call_id": id,
+                                "name": name,
+                                "arguments": tool_input.to_string(),
+                            }));
+                        }
+                        ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                            let output = match content {
+                                ToolResultContent::Text(text) => text.clone(),
+                                ToolResultContent::Blocks(blocks) => serde_json::to_string(blocks).unwrap_or_default(),
+                            };
+                            input.push(serde_json::json!({
+                                "type": "function_call_output",
+                                "call_id": tool_use_id,
+                                "output": output,
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+
+                if !text_parts.is_empty() {
+                    input.push(response_message_item(msg.role, &text_parts.join("")));
+                }
+            }
+        }
+    }
+
+    input
+}
+
+fn response_message_item(role: Role, text: &str) -> serde_json::Value {
+    let content_type = if role == Role::Assistant {
+        "output_text"
+    } else {
+        "input_text"
+    };
+
+    serde_json::json!({
+        "type": "message",
+        "role": match role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::System => "system",
+        },
+        "content": [{
+            "type": content_type,
+            "text": text,
+        }],
+    })
+}
+
 // ─── Builder ─────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -420,5 +726,64 @@ impl OpenAiBuilder {
             default_model: self.model.unwrap_or_else(|| "gpt-4o".to_string()),
             client: reqwest::Client::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live_test_provider() -> Option<OpenAi> {
+        OpenAi::from_env().ok()
+    }
+
+    fn env_or_default(key: &str, default: &str) -> String {
+        std::env::var(key).unwrap_or_else(|_| default.to_string())
+    }
+
+    async fn explain_pi(model: &str) -> std::result::Result<String, String> {
+        let provider = match live_test_provider() {
+            Some(provider) => provider,
+            None => return Err("OPENAI_API_KEY not set".into()),
+        };
+
+        let mut request = CompletionRequest::new(model);
+        request.messages.push(Message::user("Explain Pi in one sentence."));
+        request.max_tokens = 128;
+
+        let response = provider
+            .complete_blocking(request)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(response.message.get_all_text())
+    }
+
+    fn assert_pi_response(text: &str) {
+        let lower = text.to_lowercase();
+        assert!(!text.trim().is_empty(), "response should not be empty");
+        assert!(
+            lower.contains("pi") || lower.contains("3.14") || lower.contains("ratio") || lower.contains("circle"),
+            "expected a Pi-related answer, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENAI_API_KEY and a live OpenAI API call"]
+    async fn live_gpt_5_4_pro_explains_pi() {
+        let model = env_or_default("OPENAI_TEST_MODEL_PRO", "gpt-5.4-pro-2026-03-05");
+        let text = explain_pi(&model)
+            .await
+            .unwrap_or_else(|err| panic!("live completion failed for {model}: {err}"));
+        assert_pi_response(&text);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires OPENAI_API_KEY and a live OpenAI API call"]
+    async fn live_gpt_5_4_explains_pi() {
+        let model = env_or_default("OPENAI_TEST_MODEL_CHAT", "gpt-5.4");
+        let text = explain_pi(&model)
+            .await
+            .unwrap_or_else(|err| panic!("live completion failed for {model}: {err}"));
+        assert_pi_response(&text);
     }
 }

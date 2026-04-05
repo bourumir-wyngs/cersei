@@ -60,7 +60,9 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     }
 
     // Dispatch to REPL or single-shot
-    if let Some(prompt_text) = &cli.prompt {
+    let one_shot_prompt = cli.command_prompt.as_deref().or(cli.prompt.as_deref());
+
+    if let Some(prompt_text) = one_shot_prompt {
         repl::run_single_shot(
             agent,
             prompt_text,
@@ -180,7 +182,7 @@ fn print_banner(config: &AppConfig, session_id: &str, effort: &EffortLevel) {
     };
 
     eprintln!(
-        "\x1b[36;1mabstract\x1b[0m \x1b[90mv{} | {} | {:?} effort | session {}\x1b[0m",
+        "\x1b[36;1mcersei\x1b[0m \x1b[90mv{} | {} | {:?} effort | session {}\x1b[0m",
         env!("CARGO_PKG_VERSION"),
         config.model,
         effort,

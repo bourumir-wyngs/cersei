@@ -45,18 +45,19 @@ Cersei is built from the architecture of Claude Code (reverse-engineered Rust po
 
 ## Abstract — The CLI
 
-**Abstract** is a complete CLI coding agent built on Cersei. One binary, zero runtime dependencies, graph memory by default.
+**Cersei CLI** is a complete CLI coding agent built on Cersei. One binary, zero runtime dependencies, graph memory by default.
 
 ```bash
 # Install
-cargo install --path crates/abstract-cli
+cargo install --path .
 
 # Use
-abstract                           # Interactive REPL
-abstract "fix the failing tests"   # Single-shot
-abstract --resume                  # Resume last session
-abstract --model opus --max        # Opus with max thinking
-abstract --no-permissions --json   # CI mode with NDJSON output
+cersei                           # Interactive REPL
+cersei -c "fix the failing tests" # Single-shot, explicit
+cersei "fix the failing tests"   # Single-shot
+cersei --resume                  # Resume last session
+cersei --model gpt-4o --max      # GPT-4o with max thinking
+cersei --no-permissions --json   # CI mode with NDJSON output
 ```
 
 ### Abstract vs Claude Code

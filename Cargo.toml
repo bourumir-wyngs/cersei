@@ -1,7 +1,25 @@
+[package]
+name = "cersei-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cersei CLI coding agent"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+default-run = "cersei"
+
+[[bin]]
+name = "cersei"
+path = "src/main.rs"
+
 [workspace]
 resolver = "2"
 exclude = ["examples/benchmark"]
 members = [
+    ".",
     "crates/cersei",
     "crates/cersei-types",
     "crates/cersei-provider",
@@ -94,6 +112,11 @@ cersei-agent = { path = "crates/cersei-agent" }
 cersei-memory = { path = "crates/cersei-memory" }
 cersei-hooks = { path = "crates/cersei-hooks" }
 cersei-mcp = { path = "crates/cersei-mcp" }
+
+[dependencies]
+abstract-cli = { path = "crates/abstract-cli" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
 
 [profile.release]
 strip = true

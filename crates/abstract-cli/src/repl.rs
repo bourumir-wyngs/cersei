@@ -128,12 +128,13 @@ pub async fn run_repl(
     running: Arc<AtomicBool>,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let mut repl_config = config.clone();
     let mut input_reader = InputReader::new()?;
     let mut renderer = StreamRenderer::new(theme, json_mode);
-    let mut status = StatusLine::new(theme, &config.model, session_id, !json_mode);
+    let mut status = StatusLine::new(theme, &repl_config.model, session_id, !json_mode);
     let mut cmd_registry = commands::CommandRegistry::new();
     let mut is_first_turn = true;
-    let mut current_model = config.model.clone();
+    let mut current_model = repl_config.model.clone();
 
     loop {
         let prompt_str = "\x1b[36m> \x1b[0m";
@@ -159,7 +160,37 @@ pub async fn run_repl(
                     break;
                 }
                 _ => {
-                    cmd_registry.execute(cmd, args, config, session_id).await;
+                    match cmd_registry.execute(cmd, args, &repl_config, session_id).await {
+                        Ok(commands::CommandAction::None) => {}
+                        Ok(commands::CommandAction::SwitchAgent { model, provider }) => {
+                            let msgs = agent.messages();
+                            match app::build_agent(
+                                &model,
+                                &repl_config,
+                                memory_manager,
+                                session_id,
+                                cancel_token.clone(),
+                                Some(msgs),
+                            ) {
+                                Ok((new_agent, resolved)) => {
+                                    agent = new_agent;
+                                    current_model = if model.contains('/') {
+                                        model.clone()
+                                    } else {
+                                        resolved.clone()
+                                    };
+                                    repl_config.model = current_model.clone();
+                                    if let Some(provider) = provider {
+                                        repl_config.provider = provider;
+                                    }
+                                    status.set_model(&current_model);
+                                    renderer.model_switched(&current_model);
+                                }
+                                Err(e) => renderer.error(&format!("Switch failed: {e}")),
+                            }
+                        }
+                        Err(e) => eprintln!("\x1b[31mCommand error: {e}\x1b[0m"),
+                    }
                     continue;
                 }
             }
@@ -190,7 +221,7 @@ pub async fn run_repl(
                     renderer.error(&err_msg);
 
                     if is_provider_error(&err_msg) {
-                        match prompt_recovery(&current_model, config) {
+                        match prompt_recovery(&current_model, &repl_config) {
                             Recovery::Retry => {
                                 should_retry = true;
                             }
@@ -203,7 +234,7 @@ pub async fn run_repl(
 
                                 match app::build_agent(
                                     &new_model,
-                                    config,
+                                    &repl_config,
                                     memory_manager,
                                     session_id,
                                     cancel_token.clone(),
@@ -215,6 +246,11 @@ pub async fn run_repl(
                                         if current_model.starts_with('/') {
                                             current_model = resolved.clone();
                                         }
+                                        repl_config.model = current_model.clone();
+                                        if let Some((provider, _)) = new_model.split_once('/') {
+                                            repl_config.provider = provider.to_string();
+                                        }
+                                        status.set_model(&current_model);
                                         renderer.model_switched(&resolved);
                                         should_retry = true;
                                     }
