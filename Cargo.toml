@@ -98,6 +98,9 @@ nix = { version = "0.29", features = ["process", "signal", "user"] }
 # JSON Schema
 schemars = { version = "0.8", features = ["derive"] }
 
+# Computer Algebra System
+giacrs = "0.1.3"
+
 # Proc macro
 syn = { version = "2", features = ["full"] }
 quote = "1"
@@ -112,6 +115,10 @@ cersei-agent = { path = "crates/cersei-agent" }
 cersei-memory = { path = "crates/cersei-memory" }
 cersei-hooks = { path = "crates/cersei-hooks" }
 cersei-mcp = { path = "crates/cersei-mcp" }
+
+[features]
+default = ["cas"]
+cas = ["abstract-cli/cas"]
 
 [dependencies]
 abstract-cli = { path = "crates/abstract-cli" }

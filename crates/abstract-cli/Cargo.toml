@@ -15,6 +15,7 @@ path = "src/main.rs"
 [features]
 default = ["graph"]
 graph = ["cersei-memory/graph", "dep:grafeo"]
+cas = ["cersei-tools/cas"]
 
 [dependencies]
 # Cersei SDK

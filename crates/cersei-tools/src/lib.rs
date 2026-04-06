@@ -1,5 +1,7 @@
 //! cersei-tools: Tool trait, built-in tool implementations, and permission system.
 
+#[cfg(feature = "cas")]
+pub mod cas;
 pub mod ask_user;
 pub mod bash;
 pub mod bash_classifier;
@@ -233,6 +235,8 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     tools.push(Box::new(ask_user::AskUserQuestionTool));
     tools.push(Box::new(synthetic_output::SyntheticOutputTool));
     tools.push(Box::new(config_tool::ConfigTool));
+    #[cfg(feature = "cas")]
+    tools.extend(math());
     tools
 }
 
@@ -306,6 +310,12 @@ pub fn orchestration() -> Vec<Box<dyn Tool>> {
         Box::new(worktree::EnterWorktreeTool),
         Box::new(worktree::ExitWorktreeTool),
     ]
+}
+
+/// Math / CAS tools (requires `cas` feature and system giac library).
+#[cfg(feature = "cas")]
+pub fn math() -> Vec<Box<dyn Tool>> {
+    vec![Box::new(cas::CasTool)]
 }
 
 /// No tools (for pure chat agents).

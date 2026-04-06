@@ -31,3 +31,7 @@ reqwest = { workspace = true }
 html2text = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+giacrs = { workspace = true, optional = true }
+
+[features]
+cas = ["giacrs"]

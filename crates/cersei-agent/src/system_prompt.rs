@@ -309,6 +309,7 @@ You have access to powerful tools for software engineering tasks:
 - **Memory**: Persistent notes across sessions via the memory system
 - **MCP servers**: Connect to external tools and APIs via Model Context Protocol
 - **Jupyter notebooks**: Read and edit notebook cells
+- **Computer Algebra**: Symbolic math via the CAS tool (factor, solve, integrate, differentiate, linear algebra, number theory)
 
 ## How to approach tasks
 
