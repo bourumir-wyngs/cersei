@@ -69,7 +69,7 @@ impl Provider for OpenAi {
             request.model.clone()
         };
 
-        if requires_responses_api(&model) {
+        if uses_responses_api(&self.base_url, &model) {
             return self.complete_via_responses(request, model).await;
         }
 
@@ -89,7 +89,12 @@ impl Provider for OpenAi {
                     // Check if this is a tool result message
                     if let MessageContent::Blocks(blocks) = &msg.content {
                         for block in blocks {
-                            if let ContentBlock::ToolResult { tool_use_id, content, is_error } = block {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } = block
+                            {
                                 api_messages.push(serde_json::json!({
                                     "role": "tool",
                                     "tool_call_id": tool_use_id,
@@ -98,9 +103,17 @@ impl Provider for OpenAi {
                             }
                         }
                         // Also include any text blocks as a user message
-                        let text: String = blocks.iter().filter_map(|b| {
-                            if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
-                        }).collect::<Vec<_>>().join("\n");
+                        let text: String = blocks
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text { text } = b {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         if !text.is_empty() {
                             api_messages.push(serde_json::json!({
                                 "role": "user",
@@ -117,26 +130,40 @@ impl Provider for OpenAi {
                 Role::Assistant => {
                     // Check for tool_use blocks — serialize as tool_calls
                     if let MessageContent::Blocks(blocks) = &msg.content {
-                        let tool_uses: Vec<&ContentBlock> = blocks.iter().filter(|b| matches!(b, ContentBlock::ToolUse { .. })).collect();
+                        let tool_uses: Vec<&ContentBlock> = blocks
+                            .iter()
+                            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                            .collect();
                         if !tool_uses.is_empty() {
-                            let tool_calls: Vec<serde_json::Value> = tool_uses.iter().map(|b| {
-                                if let ContentBlock::ToolUse { id, name, input } = b {
-                                    serde_json::json!({
-                                        "id": id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": name,
-                                            "arguments": input.to_string(),
-                                        }
-                                    })
-                                } else {
-                                    serde_json::json!({})
-                                }
-                            }).collect();
+                            let tool_calls: Vec<serde_json::Value> = tool_uses
+                                .iter()
+                                .map(|b| {
+                                    if let ContentBlock::ToolUse { id, name, input } = b {
+                                        serde_json::json!({
+                                            "id": id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": name,
+                                                "arguments": input.to_string(),
+                                            }
+                                        })
+                                    } else {
+                                        serde_json::json!({})
+                                    }
+                                })
+                                .collect();
 
-                            let text_content: String = blocks.iter().filter_map(|b| {
-                                if let ContentBlock::Text { text } = b { Some(text.as_str()) } else { None }
-                            }).collect::<Vec<_>>().join("");
+                            let text_content: String = blocks
+                                .iter()
+                                .filter_map(|b| {
+                                    if let ContentBlock::Text { text } = b {
+                                        Some(text.as_str())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("");
 
                             let mut asst_msg = serde_json::json!({
                                 "role": "assistant",
@@ -243,7 +270,8 @@ impl Provider for OpenAi {
                     // Track tool calls being assembled across chunks
                     // OpenAI sends: tool_calls[i].id, tool_calls[i].function.name (first chunk)
                     //               tool_calls[i].function.arguments (subsequent chunks, accumulated)
-                    let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> = std::collections::HashMap::new(); // index -> (id, name, args_json)
+                    let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> =
+                        std::collections::HashMap::new(); // index -> (id, name, args_json)
                     let mut has_tool_calls = false;
 
                     while let Some(chunk) = stream.next().await {
@@ -259,23 +287,37 @@ impl Provider for OpenAi {
                                         if data == "[DONE]" {
                                             // Emit accumulated tool calls
                                             for (idx, (id, name, args)) in &tool_calls {
-                                                let input: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
-                                                let _ = tx.send(StreamEvent::ContentBlockStart {
-                                                    index: *idx + 1,
-                                                    block_type: "tool_use".into(),
-                                                    id: Some(id.clone()),
-                                                    name: Some(name.clone()),
-                                                }).await;
+                                                let input: serde_json::Value =
+                                                    serde_json::from_str(args)
+                                                        .unwrap_or(serde_json::Value::Null);
+                                                let _ = tx
+                                                    .send(StreamEvent::ContentBlockStart {
+                                                        index: *idx + 1,
+                                                        block_type: "tool_use".into(),
+                                                        id: Some(id.clone()),
+                                                        name: Some(name.clone()),
+                                                    })
+                                                    .await;
                                                 // Send full args as InputJsonDelta
-                                                let _ = tx.send(StreamEvent::InputJsonDelta {
-                                                    index: *idx + 1,
-                                                    partial_json: args.clone(),
-                                                }).await;
-                                                let _ = tx.send(StreamEvent::ContentBlockStop { index: *idx + 1 }).await;
+                                                let _ = tx
+                                                    .send(StreamEvent::InputJsonDelta {
+                                                        index: *idx + 1,
+                                                        partial_json: args.clone(),
+                                                    })
+                                                    .await;
+                                                let _ = tx
+                                                    .send(StreamEvent::ContentBlockStop {
+                                                        index: *idx + 1,
+                                                    })
+                                                    .await;
                                             }
 
                                             if text_started {
-                                                let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                                                let _ = tx
+                                                    .send(StreamEvent::ContentBlockStop {
+                                                        index: 0,
+                                                    })
+                                                    .await;
                                             }
 
                                             let stop = if has_tool_calls {
@@ -285,53 +327,73 @@ impl Provider for OpenAi {
                                             };
 
                                             // Extract usage if available
-                                            let _ = tx.send(StreamEvent::MessageDelta {
-                                                stop_reason: Some(stop),
-                                                usage: None,
-                                            }).await;
+                                            let _ = tx
+                                                .send(StreamEvent::MessageDelta {
+                                                    stop_reason: Some(stop),
+                                                    usage: None,
+                                                })
+                                                .await;
                                             let _ = tx.send(StreamEvent::MessageStop).await;
                                             return;
                                         }
 
-                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                        if let Ok(json) =
+                                            serde_json::from_str::<serde_json::Value>(data)
+                                        {
                                             let delta = &json["choices"][0]["delta"];
-                                            let finish_reason = json["choices"][0]["finish_reason"].as_str();
+                                            let finish_reason =
+                                                json["choices"][0]["finish_reason"].as_str();
 
                                             // Text content
                                             if let Some(text) = delta["content"].as_str() {
                                                 if !text_started {
                                                     text_started = true;
-                                                    let _ = tx.send(StreamEvent::ContentBlockStart {
-                                                        index: 0,
-                                                        block_type: "text".into(),
-                                                        id: None,
-                                                        name: None,
-                                                    }).await;
+                                                    let _ = tx
+                                                        .send(StreamEvent::ContentBlockStart {
+                                                            index: 0,
+                                                            block_type: "text".into(),
+                                                            id: None,
+                                                            name: None,
+                                                        })
+                                                        .await;
                                                 }
-                                                let _ = tx.send(StreamEvent::TextDelta {
-                                                    index: 0,
-                                                    text: text.to_string(),
-                                                }).await;
+                                                let _ = tx
+                                                    .send(StreamEvent::TextDelta {
+                                                        index: 0,
+                                                        text: text.to_string(),
+                                                    })
+                                                    .await;
                                             }
 
                                             // Tool calls (accumulated across chunks)
                                             if let Some(tc_array) = delta["tool_calls"].as_array() {
                                                 has_tool_calls = true;
                                                 for tc in tc_array {
-                                                    let idx = tc["index"].as_u64().unwrap_or(0) as usize;
-                                                    let entry = tool_calls.entry(idx).or_insert_with(|| {
-                                                        (String::new(), String::new(), String::new())
-                                                    });
+                                                    let idx =
+                                                        tc["index"].as_u64().unwrap_or(0) as usize;
+                                                    let entry = tool_calls
+                                                        .entry(idx)
+                                                        .or_insert_with(|| {
+                                                            (
+                                                                String::new(),
+                                                                String::new(),
+                                                                String::new(),
+                                                            )
+                                                        });
 
                                                     // First chunk has id and function.name
                                                     if let Some(id) = tc["id"].as_str() {
                                                         entry.0 = id.to_string();
                                                     }
-                                                    if let Some(name) = tc["function"]["name"].as_str() {
+                                                    if let Some(name) =
+                                                        tc["function"]["name"].as_str()
+                                                    {
                                                         entry.1 = name.to_string();
                                                     }
                                                     // Arguments accumulate across chunks
-                                                    if let Some(args) = tc["function"]["arguments"].as_str() {
+                                                    if let Some(args) =
+                                                        tc["function"]["arguments"].as_str()
+                                                    {
                                                         entry.2.push_str(args);
                                                     }
                                                 }
@@ -339,21 +401,35 @@ impl Provider for OpenAi {
 
                                             // Usage from the final chunk
                                             if let Some(usage) = json["usage"].as_object() {
-                                                let input_tokens = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                                let output_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                                                let _ = tx.send(StreamEvent::MessageDelta {
-                                                    stop_reason: finish_reason.and_then(|r| match r {
-                                                        "stop" => Some(StopReason::EndTurn),
-                                                        "tool_calls" => Some(StopReason::ToolUse),
-                                                        "length" => Some(StopReason::MaxTokens),
-                                                        _ => None,
-                                                    }),
-                                                    usage: Some(Usage {
-                                                        input_tokens,
-                                                        output_tokens,
-                                                        ..Default::default()
-                                                    }),
-                                                }).await;
+                                                let input_tokens = usage
+                                                    .get("prompt_tokens")
+                                                    .and_then(|v| v.as_u64())
+                                                    .unwrap_or(0);
+                                                let output_tokens = usage
+                                                    .get("completion_tokens")
+                                                    .and_then(|v| v.as_u64())
+                                                    .unwrap_or(0);
+                                                let _ = tx
+                                                    .send(StreamEvent::MessageDelta {
+                                                        stop_reason: finish_reason.and_then(|r| {
+                                                            match r {
+                                                                "stop" => Some(StopReason::EndTurn),
+                                                                "tool_calls" => {
+                                                                    Some(StopReason::ToolUse)
+                                                                }
+                                                                "length" => {
+                                                                    Some(StopReason::MaxTokens)
+                                                                }
+                                                                _ => None,
+                                                            }
+                                                        }),
+                                                        usage: Some(Usage {
+                                                            input_tokens,
+                                                            output_tokens,
+                                                            ..Default::default()
+                                                        }),
+                                                    })
+                                                    .await;
                                             }
                                         }
                                     }
@@ -470,10 +546,14 @@ impl OpenAi {
                                         let data = data.trim();
                                         if data == "[DONE]" {
                                             for index in open_text_blocks.drain() {
-                                                let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                                let _ = tx
+                                                    .send(StreamEvent::ContentBlockStop { index })
+                                                    .await;
                                             }
                                             for index in open_tool_blocks.drain() {
-                                                let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                                let _ = tx
+                                                    .send(StreamEvent::ContentBlockStop { index })
+                                                    .await;
                                             }
                                             let _ = tx
                                                 .send(StreamEvent::MessageDelta {
@@ -485,18 +565,35 @@ impl OpenAi {
                                             return;
                                         }
 
-                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                                            let event_type = json["type"].as_str().unwrap_or_default();
+                                        if let Ok(json) =
+                                            serde_json::from_str::<serde_json::Value>(data)
+                                        {
+                                            let event_type =
+                                                json["type"].as_str().unwrap_or_default();
                                             match event_type {
                                                 "response.created" => {
-                                                    let id = json["response"]["id"].as_str().unwrap_or_default().to_string();
-                                                    let model = json["response"]["model"].as_str().unwrap_or_default().to_string();
-                                                    let _ = tx.send(StreamEvent::MessageStart { id, model }).await;
+                                                    let id = json["response"]["id"]
+                                                        .as_str()
+                                                        .unwrap_or_default()
+                                                        .to_string();
+                                                    let model = json["response"]["model"]
+                                                        .as_str()
+                                                        .unwrap_or_default()
+                                                        .to_string();
+                                                    let _ = tx
+                                                        .send(StreamEvent::MessageStart {
+                                                            id,
+                                                            model,
+                                                        })
+                                                        .await;
                                                 }
                                                 "response.output_item.added" => {
-                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let index =
+                                                        json["output_index"].as_u64().unwrap_or(0)
+                                                            as usize;
                                                     let item = &json["item"];
-                                                    match item["type"].as_str().unwrap_or_default() {
+                                                    match item["type"].as_str().unwrap_or_default()
+                                                    {
                                                         "function_call" => {
                                                             open_tool_blocks.insert(index);
                                                             let id = item["call_id"]
@@ -504,7 +601,10 @@ impl OpenAi {
                                                                 .or_else(|| item["id"].as_str())
                                                                 .unwrap_or_default()
                                                                 .to_string();
-                                                            let name = item["name"].as_str().unwrap_or_default().to_string();
+                                                            let name = item["name"]
+                                                                .as_str()
+                                                                .unwrap_or_default()
+                                                                .to_string();
                                                             let _ = tx.send(StreamEvent::ContentBlockStart {
                                                                 index,
                                                                 block_type: "tool_use".into(),
@@ -525,56 +625,90 @@ impl OpenAi {
                                                     }
                                                 }
                                                 "response.output_text.delta" => {
-                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let index =
+                                                        json["output_index"].as_u64().unwrap_or(0)
+                                                            as usize;
                                                     if !open_text_blocks.contains(&index) {
                                                         open_text_blocks.insert(index);
-                                                        let _ = tx.send(StreamEvent::ContentBlockStart {
-                                                            index,
-                                                            block_type: "text".into(),
-                                                            id: None,
-                                                            name: None,
-                                                        }).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::ContentBlockStart {
+                                                                index,
+                                                                block_type: "text".into(),
+                                                                id: None,
+                                                                name: None,
+                                                            })
+                                                            .await;
                                                     }
                                                     if let Some(delta) = json["delta"].as_str() {
-                                                        let _ = tx.send(StreamEvent::TextDelta {
-                                                            index,
-                                                            text: delta.to_string(),
-                                                        }).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::TextDelta {
+                                                                index,
+                                                                text: delta.to_string(),
+                                                            })
+                                                            .await;
                                                     }
                                                 }
                                                 "response.output_text.done" => {
-                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let index =
+                                                        json["output_index"].as_u64().unwrap_or(0)
+                                                            as usize;
                                                     if open_text_blocks.remove(&index) {
-                                                        let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::ContentBlockStop {
+                                                                index,
+                                                            })
+                                                            .await;
                                                     }
                                                 }
                                                 "response.function_call_arguments.delta" => {
-                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let index =
+                                                        json["output_index"].as_u64().unwrap_or(0)
+                                                            as usize;
                                                     if let Some(delta) = json["delta"].as_str() {
-                                                        let _ = tx.send(StreamEvent::InputJsonDelta {
-                                                            index,
-                                                            partial_json: delta.to_string(),
-                                                        }).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::InputJsonDelta {
+                                                                index,
+                                                                partial_json: delta.to_string(),
+                                                            })
+                                                            .await;
                                                     }
                                                 }
                                                 "response.function_call_arguments.done" => {
-                                                    let index = json["output_index"].as_u64().unwrap_or(0) as usize;
+                                                    let index =
+                                                        json["output_index"].as_u64().unwrap_or(0)
+                                                            as usize;
                                                     stop_reason = StopReason::ToolUse;
                                                     if open_tool_blocks.remove(&index) {
-                                                        let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+                                                        let _ = tx
+                                                            .send(StreamEvent::ContentBlockStop {
+                                                                index,
+                                                            })
+                                                            .await;
                                                     }
                                                 }
                                                 "response.completed" => {
-                                                    let output = json["response"]["output"].as_array().cloned().unwrap_or_default();
-                                                    if output.iter().any(|item| item["type"].as_str() == Some("function_call")) {
+                                                    let output = json["response"]["output"]
+                                                        .as_array()
+                                                        .cloned()
+                                                        .unwrap_or_default();
+                                                    if output.iter().any(|item| {
+                                                        item["type"].as_str()
+                                                            == Some("function_call")
+                                                    }) {
                                                         stop_reason = StopReason::ToolUse;
                                                     }
 
                                                     let usage_json = &json["response"]["usage"];
                                                     usage = Some(Usage {
-                                                        input_tokens: usage_json["input_tokens"].as_u64().unwrap_or(0),
-                                                        output_tokens: usage_json["output_tokens"].as_u64().unwrap_or(0),
-                                                        total_tokens: usage_json["total_tokens"].as_u64().unwrap_or(0),
+                                                        input_tokens: usage_json["input_tokens"]
+                                                            .as_u64()
+                                                            .unwrap_or(0),
+                                                        output_tokens: usage_json["output_tokens"]
+                                                            .as_u64()
+                                                            .unwrap_or(0),
+                                                        total_tokens: usage_json["total_tokens"]
+                                                            .as_u64()
+                                                            .unwrap_or(0),
                                                         ..Default::default()
                                                     });
                                                 }
@@ -584,7 +718,9 @@ impl OpenAi {
                                                         .or_else(|| json["message"].as_str())
                                                         .unwrap_or("Responses API error")
                                                         .to_string();
-                                                    let _ = tx.send(StreamEvent::Error { message }).await;
+                                                    let _ = tx
+                                                        .send(StreamEvent::Error { message })
+                                                        .await;
                                                     return;
                                                 }
                                                 _ => {}
@@ -594,14 +730,22 @@ impl OpenAi {
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                                let _ = tx
+                                    .send(StreamEvent::Error {
+                                        message: e.to_string(),
+                                    })
+                                    .await;
                                 return;
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(StreamEvent::Error { message: e.to_string() }).await;
+                    let _ = tx
+                        .send(StreamEvent::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
                 }
             }
         });
@@ -613,6 +757,10 @@ impl OpenAi {
 fn requires_responses_api(model: &str) -> bool {
     let lower = model.to_lowercase();
     lower.contains("codex") || lower.contains("-pro")
+}
+
+fn uses_responses_api(base_url: &str, model: &str) -> bool {
+    base_url.trim_end_matches('/') == OPENAI_API_BASE && requires_responses_api(model)
 }
 
 fn build_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
@@ -632,7 +780,11 @@ fn build_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
                                 text_parts.push(text.clone());
                             }
                         }
-                        ContentBlock::ToolUse { id, name, input: tool_input } => {
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input: tool_input,
+                        } => {
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "call_id": id,
@@ -640,10 +792,16 @@ fn build_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
                                 "arguments": tool_input.to_string(),
                             }));
                         }
-                        ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
                             let output = match content {
                                 ToolResultContent::Text(text) => text.clone(),
-                                ToolResultContent::Blocks(blocks) => serde_json::to_string(blocks).unwrap_or_default(),
+                                ToolResultContent::Blocks(blocks) => {
+                                    serde_json::to_string(blocks).unwrap_or_default()
+                                }
                             };
                             input.push(serde_json::json!({
                                 "type": "function_call_output",
@@ -737,6 +895,19 @@ mod tests {
         OpenAi::from_env().ok()
     }
 
+    #[test]
+    fn google_pro_models_stay_on_chat_completions() {
+        assert!(!uses_responses_api(
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini-3.1-pro-preview"
+        ));
+    }
+
+    #[test]
+    fn openai_pro_models_use_responses_api() {
+        assert!(uses_responses_api(OPENAI_API_BASE, "gpt-5.4-pro"));
+    }
+
     fn env_or_default(key: &str, default: &str) -> String {
         std::env::var(key).unwrap_or_else(|_| default.to_string())
     }
@@ -748,7 +919,9 @@ mod tests {
         };
 
         let mut request = CompletionRequest::new(model);
-        request.messages.push(Message::user("Explain Pi in one sentence."));
+        request
+            .messages
+            .push(Message::user("Explain Pi in one sentence."));
         request.max_tokens = 128;
 
         let response = provider
@@ -762,7 +935,10 @@ mod tests {
         let lower = text.to_lowercase();
         assert!(!text.trim().is_empty(), "response should not be empty");
         assert!(
-            lower.contains("pi") || lower.contains("3.14") || lower.contains("ratio") || lower.contains("circle"),
+            lower.contains("pi")
+                || lower.contains("3.14")
+                || lower.contains("ratio")
+                || lower.contains("circle"),
             "expected a Pi-related answer, got: {text}"
         );
     }

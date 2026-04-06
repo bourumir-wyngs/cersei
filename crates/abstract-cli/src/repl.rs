@@ -10,8 +10,8 @@ use crate::input::InputReader;
 use crate::render::{self, StreamRenderer};
 use crate::status::StatusLine;
 use crate::theme::Theme;
-use cersei::Agent;
 use cersei::events::AgentEvent;
+use cersei::Agent;
 use cersei_memory::manager::MemoryManager;
 use cersei_types::Role;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,7 +54,10 @@ fn prompt_recovery(current_model: &str, config: &AppConfig) -> Recovery {
         let model_str = format!("{}/{}", entry.id, entry.default_model);
         if model_str != current_model
             && !config.fallback_models.contains(&model_str)
-            && !config.fallback_models.iter().any(|f| f.starts_with(entry.id))
+            && !config
+                .fallback_models
+                .iter()
+                .any(|f| f.starts_with(entry.id))
         {
             let key = format!("{}", options.len() + 1);
             options.push((key, model_str));
@@ -160,9 +163,12 @@ pub async fn run_repl(
                     break;
                 }
                 _ => {
-                    match cmd_registry.execute(cmd, args, &repl_config, session_id).await {
+                    match cmd_registry
+                        .execute(cmd, args, &repl_config, session_id)
+                        .await
+                    {
                         Ok(commands::CommandAction::None) => {}
-                        Ok(commands::CommandAction::SwitchAgent { model, provider }) => {
+                        Ok(commands::CommandAction::SwitchAgent { model }) => {
                             let msgs = agent.messages();
                             match app::build_agent(
                                 &model,
@@ -174,14 +180,15 @@ pub async fn run_repl(
                             ) {
                                 Ok((new_agent, resolved)) => {
                                     agent = new_agent;
-                                    current_model = if model.contains('/') {
-                                        model.clone()
-                                    } else {
-                                        resolved.clone()
-                                    };
+                                    current_model =
+                                        if let Some((provider, _)) = model.split_once('/') {
+                                            format!("{provider}/{resolved}")
+                                        } else {
+                                            resolved.clone()
+                                        };
                                     repl_config.model = current_model.clone();
-                                    if let Some(provider) = provider {
-                                        repl_config.provider = provider;
+                                    if let Some((provider, _)) = current_model.split_once('/') {
+                                        repl_config.provider = provider.to_string();
                                     }
                                     status.set_model(&current_model);
                                     renderer.model_switched(&current_model);
@@ -242,7 +249,11 @@ pub async fn run_repl(
                                 ) {
                                     Ok((new_agent, resolved)) => {
                                         agent = new_agent;
-                                        current_model = format!("{}/{}", new_model.split('/').next().unwrap_or(""), &resolved);
+                                        current_model = format!(
+                                            "{}/{}",
+                                            new_model.split('/').next().unwrap_or(""),
+                                            &resolved
+                                        );
                                         if current_model.starts_with('/') {
                                             current_model = resolved.clone();
                                         }
@@ -292,7 +303,8 @@ pub async fn run_single_shot(
     let mut status = StatusLine::new(theme, &config.model, session_id, false);
 
     running.store(true, Ordering::Relaxed);
-    let result = run_agent_streaming(&agent, prompt, &mut renderer, &mut status, json_mode, true).await;
+    let result =
+        run_agent_streaming(&agent, prompt, &mut renderer, &mut status, json_mode, true).await;
     running.store(false, Ordering::Relaxed);
 
     match result {
@@ -390,7 +402,10 @@ async fn run_agent_streaming(
             } => {
                 if !json_mode {
                     let preview: String = prompt.chars().take(60).collect();
-                    eprintln!("\x1b[90m  Sub-agent {}: {preview}...\x1b[0m", &agent_id[..8.min(agent_id.len())]);
+                    eprintln!(
+                        "\x1b[90m  Sub-agent {}: {preview}...\x1b[0m",
+                        &agent_id[..8.min(agent_id.len())]
+                    );
                 }
             }
             AgentEvent::Error(msg) => {

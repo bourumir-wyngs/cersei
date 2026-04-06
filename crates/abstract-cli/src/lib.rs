@@ -1,5 +1,6 @@
 //! Reusable CLI entrypoint for the Cersei coding agent.
 
+mod agent_filter;
 mod app;
 mod commands;
 mod config;
@@ -22,7 +23,7 @@ use clap::{Parser, Subcommand};
     name = "cersei",
     about = "A high-performance AI coding agent",
     version,
-    after_help = "Examples:\n  cersei                        Start interactive REPL\n  cersei \"fix the tests\"        Single-shot mode\n  cersei --resume               Resume last session\n  cersei --model gpt-4o --max   Use GPT-4o with max thinking"
+    after_help = "Examples:\n  cersei                        Start interactive REPL\n  cersei \"fix the tests\"        Single-shot mode\n  cersei --resume               Resume last session\n  cersei --model gpt-5.4 --max  Use GPT-5.4 with max thinking"
 )]
 pub struct Cli {
     /// Prompt to run in single-shot mode (omit for REPL)
@@ -30,7 +31,12 @@ pub struct Cli {
     pub prompt: Option<String>,
 
     /// Run a single prompt and exit
-    #[arg(short = 'c', long = "command", value_name = "PROMPT", conflicts_with = "prompt")]
+    #[arg(
+        short = 'c',
+        long = "command",
+        value_name = "PROMPT",
+        conflicts_with = "prompt"
+    )]
     pub command_prompt: Option<String>,
 
     /// Resume a previous session
@@ -264,9 +270,10 @@ fn apply_cli_overrides(cli: &Cli, config: &mut config::AppConfig) {
 
 fn resolve_model_alias(model: &str) -> String {
     match model {
-        "opus" => "anthropic/claude-opus-4-1".into(),
+        "opus" => "anthropic/claude-opus-4-6".into(),
         "sonnet" => "anthropic/claude-sonnet-4-6".into(),
         "haiku" => "anthropic/claude-3-5-haiku-latest".into(),
+        "gemini" => "google/gemini-3-flash-preview".into(),
         other if other.contains('/') => other.into(),
         other => other.into(),
     }

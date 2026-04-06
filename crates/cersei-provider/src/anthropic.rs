@@ -7,8 +7,6 @@ use tokio::sync::mpsc;
 
 const ANTHROPIC_API_BASE: &str = "https://api.anthropic.com";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-const ANTHROPIC_BETA_HEADER: &str =
-    "interleaved-thinking-2025-04-14,token-efficient-tools-2025-02-19";
 
 // ─── Anthropic provider ──────────────────────────────────────────────────────
 
@@ -99,9 +97,10 @@ impl Provider for Anthropic {
             .iter()
             .filter(|m| m.role != Role::System)
             .map(|m| {
+                let content = sanitize_anthropic_content(&m.content);
                 serde_json::json!({
                     "role": m.role,
-                    "content": m.content,
+                    "content": content,
                 })
             })
             .collect();
@@ -159,7 +158,6 @@ impl Provider for Anthropic {
             .client
             .post(&url)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("anthropic-beta", ANTHROPIC_BETA_HEADER)
             .header("content-type", "application/json");
 
         for (name, value) in self.auth_headers().await? {
@@ -227,6 +225,58 @@ impl Provider for Anthropic {
         });
 
         Ok(CompletionStream::new(rx))
+    }
+}
+
+fn sanitize_anthropic_content(content: &MessageContent) -> MessageContent {
+    match content {
+        MessageContent::Text(text) => MessageContent::Text(text.clone()),
+        MessageContent::Blocks(blocks) => MessageContent::Blocks(
+            blocks
+                .iter()
+                .filter(|block| {
+                    !matches!(
+                        block,
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                    )
+                })
+                .cloned()
+                .collect(),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_anthropic_content;
+    use cersei_types::{ContentBlock, MessageContent};
+
+    #[test]
+    fn strips_thinking_blocks_from_anthropic_history() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "visible".into(),
+            },
+            ContentBlock::Thinking {
+                thinking: "hidden".into(),
+                signature: String::new(),
+            },
+            ContentBlock::RedactedThinking {
+                data: "secret".into(),
+            },
+        ]);
+
+        let sanitized = sanitize_anthropic_content(&content);
+        match sanitized {
+            MessageContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    ContentBlock::Text { text } => assert_eq!(text, "visible"),
+                    _ => panic!("expected only text block"),
+                }
+            }
+            _ => panic!("expected blocks"),
+        }
     }
 }
 

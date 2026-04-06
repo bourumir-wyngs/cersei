@@ -30,13 +30,15 @@ pub fn from_model_string(model: &str) -> Result<(Box<dyn Provider>, String)> {
                 known.join(", ")
             ))
         })?;
-        let provider = build_provider(entry, model_name)?;
-        Ok((provider, model_name.to_string()))
+        let resolved_model = normalize_model_name(entry.id, model_name);
+        let provider = build_provider(entry, &resolved_model)?;
+        Ok((provider, resolved_model))
     } else {
         // Auto-detect: "gpt-4o" → openai
         let (entry, resolved) = auto_detect(model)?;
-        let provider = build_provider(entry, resolved)?;
-        Ok((provider, resolved.to_string()))
+        let resolved_model = normalize_model_name(entry.id, resolved);
+        let provider = build_provider(entry, &resolved_model)?;
+        Ok((provider, resolved_model))
     }
 }
 
@@ -89,6 +91,27 @@ fn build_provider(entry: &ProviderEntry, model: &str) -> Result<Box<dyn Provider
     }
 }
 
+pub fn normalize_model_name(provider_id: &str, model: &str) -> String {
+    if provider_id == "anthropic" {
+        match model {
+            "claude-opus-4.6" => return "claude-opus-4-6".to_string(),
+            _ => {}
+        }
+    }
+
+    if provider_id == "google" {
+        match model {
+            "gemini-pro" | "gemini-pro-latest" => return "gemini-3.1-pro-preview".to_string(),
+            "gemini-flash" | "gemini-flash-latest" => return "gemini-3-flash-preview".to_string(),
+            "gemini-3-pro-preview" => return "gemini-3.1-pro-preview".to_string(),
+            "gemini-3.1-flash-preview" => return "gemini-3-flash-preview".to_string(),
+            _ => {}
+        }
+    }
+
+    model.to_string()
+}
+
 /// Auto-detect provider from a bare model name.
 fn auto_detect(model: &str) -> Result<(&'static ProviderEntry, &str)> {
     // 1. Check known model prefixes
@@ -102,9 +125,17 @@ fn auto_detect(model: &str) -> Result<(&'static ProviderEntry, &str)> {
         m if m.starts_with("llama") => {
             // llama models could be on Groq, Together, etc.
             // Prefer Groq if key is set, otherwise Together
-            if std::env::var("GROQ_API_KEY").ok().filter(|k| !k.is_empty()).is_some() {
+            if std::env::var("GROQ_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some()
+            {
                 Some("groq")
-            } else if std::env::var("TOGETHER_API_KEY").ok().filter(|k| !k.is_empty()).is_some() {
+            } else if std::env::var("TOGETHER_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .is_some()
+            {
                 Some("together")
             } else {
                 Some("ollama")
@@ -151,7 +182,10 @@ mod tests {
         match result {
             Err(e) => {
                 let msg = e.to_string();
-                assert!(msg.contains("nonexistent"), "Error should mention the provider name: {msg}");
+                assert!(
+                    msg.contains("nonexistent"),
+                    "Error should mention the provider name: {msg}"
+                );
             }
             Ok(_) => panic!("Expected error for unknown provider"),
         }
@@ -193,5 +227,33 @@ mod tests {
         let entry = registry::lookup("anthropic").unwrap();
         assert_eq!(entry.context_window("claude-sonnet-4-6"), 200_000);
         assert_eq!(entry.context_window("unknown-model"), 128_000); // fallback
+    }
+
+    #[test]
+    fn test_google_legacy_aliases_are_normalized() {
+        assert_eq!(
+            normalize_model_name("google", "gemini-pro-latest"),
+            "gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            normalize_model_name("google", "gemini-flash-latest"),
+            "gemini-3-flash-preview"
+        );
+        assert_eq!(
+            normalize_model_name("google", "gemini-3-pro-preview"),
+            "gemini-3.1-pro-preview"
+        );
+        assert_eq!(
+            normalize_model_name("google", "gemini-3.1-flash-preview"),
+            "gemini-3-flash-preview"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_opus_46_is_normalized() {
+        assert_eq!(
+            normalize_model_name("anthropic", "claude-opus-4.6"),
+            "claude-opus-4-6"
+        );
     }
 }

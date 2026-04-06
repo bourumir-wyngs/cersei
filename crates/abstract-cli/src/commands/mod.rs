@@ -9,7 +9,6 @@ mod diff;
 mod help;
 mod memory;
 mod model;
-mod provider;
 mod resume;
 mod review;
 
@@ -19,10 +18,7 @@ pub struct CommandRegistry;
 
 pub enum CommandAction {
     None,
-    SwitchAgent {
-        model: String,
-        provider: Option<String>,
-    },
+    SwitchAgent { model: String },
 }
 
 impl CommandRegistry {
@@ -46,7 +42,6 @@ impl CommandRegistry {
             "review" => review::run(config).await.map(|_| CommandAction::None),
             "memory" | "mem" => memory::run(config).map(|_| CommandAction::None),
             "model" => model::run(args, config).await,
-            "provider" => provider::run(args, config),
             "config" | "cfg" => config_cmd::run(args, config).map(|_| CommandAction::None),
             "diff" => diff::run(config).map(|_| CommandAction::None),
             "resume" => resume::run(args, config).map(|_| CommandAction::None),

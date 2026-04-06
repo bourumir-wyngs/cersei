@@ -103,9 +103,21 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_format: ApiFormat::Anthropic,
         default_model: "claude-sonnet-4-6",
         models: &[
-            ModelEntry { id: "claude-opus-4-6", context_window: 200_000, capabilities: FULL_THINKING },
-            ModelEntry { id: "claude-sonnet-4-6", context_window: 200_000, capabilities: FULL_THINKING },
-            ModelEntry { id: "claude-haiku-4-5", context_window: 200_000, capabilities: FULL },
+            ModelEntry {
+                id: "claude-opus-4-6",
+                context_window: 200_000,
+                capabilities: FULL_THINKING,
+            },
+            ModelEntry {
+                id: "claude-sonnet-4-6",
+                context_window: 200_000,
+                capabilities: FULL_THINKING,
+            },
+            ModelEntry {
+                id: "claude-haiku-4-5",
+                context_window: 200_000,
+                capabilities: FULL,
+            },
         ],
     },
     ProviderEntry {
@@ -116,10 +128,26 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "gpt-4o",
         models: &[
-            ModelEntry { id: "gpt-4o", context_window: 128_000, capabilities: FULL },
-            ModelEntry { id: "gpt-4-turbo", context_window: 128_000, capabilities: FULL },
-            ModelEntry { id: "o1", context_window: 200_000, capabilities: FULL },
-            ModelEntry { id: "o3", context_window: 200_000, capabilities: FULL },
+            ModelEntry {
+                id: "gpt-4o",
+                context_window: 128_000,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "gpt-4-turbo",
+                context_window: 128_000,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "o1",
+                context_window: 200_000,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "o3",
+                context_window: 200_000,
+                capabilities: FULL,
+            },
         ],
     },
     ProviderEntry {
@@ -128,11 +156,18 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_base: "https://generativelanguage.googleapis.com/v1beta/openai",
         env_keys: &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
-        default_model: "gemini-2.0-flash",
+        default_model: "gemini-3-flash-preview",
         models: &[
-            ModelEntry { id: "gemini-2.0-flash", context_window: 1_000_000, capabilities: FULL },
-            ModelEntry { id: "gemini-2.0-pro", context_window: 1_000_000, capabilities: FULL },
-            ModelEntry { id: "gemini-1.5-pro", context_window: 2_000_000, capabilities: FULL },
+            ModelEntry {
+                id: "gemini-3-flash-preview",
+                context_window: 1_048_576,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "gemini-3.1-pro-preview",
+                context_window: 1_048_576,
+                capabilities: FULL,
+            },
         ],
     },
     ProviderEntry {
@@ -143,8 +178,16 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "mistral-large-latest",
         models: &[
-            ModelEntry { id: "mistral-large-latest", context_window: 128_000, capabilities: FULL },
-            ModelEntry { id: "codestral-latest", context_window: 256_000, capabilities: BASIC },
+            ModelEntry {
+                id: "mistral-large-latest",
+                context_window: 128_000,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "codestral-latest",
+                context_window: 256_000,
+                capabilities: BASIC,
+            },
         ],
     },
     ProviderEntry {
@@ -155,9 +198,21 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "llama-3.1-70b-versatile",
         models: &[
-            ModelEntry { id: "llama-3.1-70b-versatile", context_window: 128_000, capabilities: BASIC },
-            ModelEntry { id: "llama-3.1-8b-instant", context_window: 128_000, capabilities: BASIC },
-            ModelEntry { id: "mixtral-8x7b-32768", context_window: 32_768, capabilities: BASIC },
+            ModelEntry {
+                id: "llama-3.1-70b-versatile",
+                context_window: 128_000,
+                capabilities: BASIC,
+            },
+            ModelEntry {
+                id: "llama-3.1-8b-instant",
+                context_window: 128_000,
+                capabilities: BASIC,
+            },
+            ModelEntry {
+                id: "mixtral-8x7b-32768",
+                context_window: 32_768,
+                capabilities: BASIC,
+            },
         ],
     },
     ProviderEntry {
@@ -168,8 +223,16 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "deepseek-chat",
         models: &[
-            ModelEntry { id: "deepseek-chat", context_window: 64_000, capabilities: FULL },
-            ModelEntry { id: "deepseek-coder", context_window: 64_000, capabilities: BASIC },
+            ModelEntry {
+                id: "deepseek-chat",
+                context_window: 64_000,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "deepseek-coder",
+                context_window: 64_000,
+                capabilities: BASIC,
+            },
         ],
     },
     ProviderEntry {
@@ -179,9 +242,11 @@ pub static REGISTRY: &[ProviderEntry] = &[
         env_keys: &["XAI_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "grok-2",
-        models: &[
-            ModelEntry { id: "grok-2", context_window: 128_000, capabilities: FULL },
-        ],
+        models: &[ModelEntry {
+            id: "grok-2",
+            context_window: 128_000,
+            capabilities: FULL,
+        }],
     },
     ProviderEntry {
         id: "together",
@@ -190,9 +255,11 @@ pub static REGISTRY: &[ProviderEntry] = &[
         env_keys: &["TOGETHER_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-        models: &[
-            ModelEntry { id: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo", context_window: 128_000, capabilities: BASIC },
-        ],
+        models: &[ModelEntry {
+            id: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+            context_window: 128_000,
+            capabilities: BASIC,
+        }],
     },
     ProviderEntry {
         id: "fireworks",
@@ -201,9 +268,11 @@ pub static REGISTRY: &[ProviderEntry] = &[
         env_keys: &["FIREWORKS_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "accounts/fireworks/models/llama-v3p1-70b-instruct",
-        models: &[
-            ModelEntry { id: "accounts/fireworks/models/llama-v3p1-70b-instruct", context_window: 128_000, capabilities: BASIC },
-        ],
+        models: &[ModelEntry {
+            id: "accounts/fireworks/models/llama-v3p1-70b-instruct",
+            context_window: 128_000,
+            capabilities: BASIC,
+        }],
     },
     ProviderEntry {
         id: "perplexity",
@@ -212,9 +281,11 @@ pub static REGISTRY: &[ProviderEntry] = &[
         env_keys: &["PERPLEXITY_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "llama-3.1-sonar-large-128k-online",
-        models: &[
-            ModelEntry { id: "llama-3.1-sonar-large-128k-online", context_window: 128_000, capabilities: BASIC },
-        ],
+        models: &[ModelEntry {
+            id: "llama-3.1-sonar-large-128k-online",
+            context_window: 128_000,
+            capabilities: BASIC,
+        }],
     },
     ProviderEntry {
         id: "cerebras",
@@ -223,9 +294,11 @@ pub static REGISTRY: &[ProviderEntry] = &[
         env_keys: &["CEREBRAS_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "llama3.1-70b",
-        models: &[
-            ModelEntry { id: "llama3.1-70b", context_window: 128_000, capabilities: BASIC },
-        ],
+        models: &[ModelEntry {
+            id: "llama3.1-70b",
+            context_window: 128_000,
+            capabilities: BASIC,
+        }],
     },
     ProviderEntry {
         id: "ollama",

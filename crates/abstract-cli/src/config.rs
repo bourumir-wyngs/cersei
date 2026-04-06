@@ -37,7 +37,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            model: "gpt-4o".into(),
+            model: "gpt-5.4".into(),
             provider: "openai".into(),
             max_turns: 20,
             max_tokens: 16384,
@@ -191,7 +191,11 @@ fn apply_env(config: &mut AppConfig) {
         config.theme = v;
     }
     if let Ok(v) = std::env::var("ABSTRACT_FALLBACK_MODELS") {
-        config.fallback_models = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        config.fallback_models = v
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
     }
     if let Ok(v) = std::env::var("ABSTRACT_MAX_TURNS") {
         if let Ok(n) = v.parse() {
