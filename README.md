@@ -83,7 +83,7 @@ Full benchmark: [`crates/abstract-cli/benchmarks/REPORT.md`](crates/abstract-cli
 
 ### Features
 
-- 34 built-in tools (file, shell, web, planning, orchestration, scheduling)
+- 40 built-in tools (file, shell, web, planning, orchestration, scheduling, browser)
 - Multi-provider: Anthropic + OpenAI (+ Ollama, Azure, vLLM)
 - Graph memory (Grafeo) on by default
 - Auto-compact, auto-dream, effort levels (Low/Medium/High/Max)

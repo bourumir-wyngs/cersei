@@ -13,3 +13,12 @@ postgresql:
   password: change_me
   database: app_db
   readonly: true
+
+browser:
+  window:
+    width: 1440
+    height: 1000
+  url: http://localhost:3000/
+  notes: >
+    Open the login screen first and use the local demo account.
+    The app runs only on localhost.

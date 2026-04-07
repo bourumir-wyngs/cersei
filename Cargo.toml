@@ -56,6 +56,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "native-tls"], defau
 reqwest-eventsource = "0.6"
 mysql = "28"
 postgres = "0.19"
+chromiumoxide = "0.9.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

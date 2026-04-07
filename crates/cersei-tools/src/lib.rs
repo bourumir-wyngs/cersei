@@ -3,6 +3,7 @@
 pub mod ask_user;
 pub mod bash;
 pub mod bash_classifier;
+pub mod browser_tool;
 #[cfg(feature = "cas")]
 pub mod cas;
 pub mod config_tool;
@@ -160,6 +161,7 @@ pub struct ToolContext {
 pub struct ToolsConfig {
     pub mysql: Option<MySqlToolConfig>,
     pub postgresql: Option<PostgresToolConfig>,
+    pub browser: Option<BrowserToolConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +208,40 @@ impl Default for PostgresToolConfig {
             password: String::new(),
             database: None,
             readonly: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserToolConfig {
+    pub window: BrowserWindowConfig,
+    pub url: Option<String>,
+    pub notes: Option<String>,
+}
+
+impl Default for BrowserToolConfig {
+    fn default() -> Self {
+        Self {
+            window: BrowserWindowConfig::default(),
+            url: None,
+            notes: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserWindowConfig {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Default for BrowserWindowConfig {
+    fn default() -> Self {
+        Self {
+            width: 1440,
+            height: 1000,
         }
     }
 }
@@ -348,11 +384,17 @@ pub fn shell() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Web tools: WebFetch, WebSearch.
+/// Web tools: WebFetch, WebSearch, and local browser automation.
 pub fn web() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(web_fetch::WebFetchTool),
         Box::new(web_search::WebSearchTool),
+        Box::new(browser_tool::BrowserWindowTool),
+        Box::new(browser_tool::BrowserNavigateTool),
+        Box::new(browser_tool::BrowserConsoleTool),
+        Box::new(browser_tool::BrowserDomTool),
+        Box::new(browser_tool::BrowserClickTool),
+        Box::new(browser_tool::BrowserInputTool),
     ]
 }
 
