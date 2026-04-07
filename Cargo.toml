@@ -105,6 +105,9 @@ schemars = { version = "0.8", features = ["derive"] }
 # Computer Algebra System
 giacrs = "0.1.3"
 
+# Git
+gix = { version = "0.70", features = ["status", "revision", "blob-diff"] }
+
 # Proc macro
 syn = { version = "2", features = ["full"] }
 quote = "1"

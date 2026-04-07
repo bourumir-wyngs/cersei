@@ -37,6 +37,7 @@ postgres = { workspace = true }
 url = { workspace = true }
 chromiumoxide = { workspace = true }
 giacrs = { workspace = true, optional = true }
+gix = { workspace = true }
 
 [features]
 cas = ["giacrs"]

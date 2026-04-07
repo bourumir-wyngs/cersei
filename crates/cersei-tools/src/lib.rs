@@ -12,6 +12,7 @@ pub mod file_history;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
+pub mod git_tool;
 pub mod git_utils;
 pub mod glob_tool;
 pub mod grep_tool;
@@ -335,6 +336,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     tools.extend(shell());
     tools.extend(web());
     tools.extend(data());
+    tools.extend(vcs());
     tools.extend(planning());
     tools.extend(scheduling());
     tools.extend(orchestration());
@@ -353,6 +355,7 @@ pub fn coding() -> Vec<Box<dyn Tool>> {
     tools.extend(shell());
     tools.extend(web());
     tools.extend(data());
+    tools.extend(vcs());
     tools
 }
 
@@ -441,6 +444,11 @@ pub fn orchestration() -> Vec<Box<dyn Tool>> {
 #[cfg(feature = "cas")]
 pub fn math() -> Vec<Box<dyn Tool>> {
     vec![Box::new(cas::CasTool)]
+}
+
+/// Read-only VCS tool: a single `Git` tool with command dispatch.
+pub fn vcs() -> Vec<Box<dyn Tool>> {
+    vec![Box::new(git_tool::GitTool)]
 }
 
 /// No tools (for pure chat agents).
