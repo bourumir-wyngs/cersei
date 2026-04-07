@@ -395,6 +395,10 @@ pub fn web() -> Vec<Box<dyn Tool>> {
         Box::new(browser_tool::BrowserDomTool),
         Box::new(browser_tool::BrowserClickTool),
         Box::new(browser_tool::BrowserInputTool),
+        Box::new(browser_tool::BrowserNetworkTool),
+        Box::new(browser_tool::BrowserCssTool),
+        Box::new(browser_tool::BrowserWaitTool),
+        Box::new(browser_tool::BrowserStorageTool),
     ]
 }
 

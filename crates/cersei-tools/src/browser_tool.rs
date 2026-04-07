@@ -2,6 +2,9 @@
 
 use super::*;
 use chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
+use chromiumoxide::cdp::browser_protocol::network::{
+    self as cdp_network, EventLoadingFailed, EventRequestWillBeSent, EventResponseReceived,
+};
 use chromiumoxide::cdp::js_protocol::runtime::{EventConsoleApiCalled, RemoteObject};
 use chromiumoxide::{Browser, BrowserConfig, Element, Page};
 use futures::StreamExt;
@@ -28,6 +31,10 @@ pub struct BrowserConsoleTool;
 pub struct BrowserDomTool;
 pub struct BrowserClickTool;
 pub struct BrowserInputTool;
+pub struct BrowserNetworkTool;
+pub struct BrowserCssTool;
+pub struct BrowserWaitTool;
+pub struct BrowserStorageTool;
 
 #[derive(Default)]
 struct BrowserSession {
@@ -35,6 +42,7 @@ struct BrowserSession {
     browser: tokio::sync::Mutex<Option<Browser>>,
     page: parking_lot::RwLock<Option<Page>>,
     log_entries: parking_lot::Mutex<Vec<BrowserLogEntry>>,
+    network_entries: parking_lot::Mutex<Vec<NetworkEntry>>,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     profile_dir: parking_lot::Mutex<Option<TempDir>>,
 }
@@ -47,6 +55,21 @@ struct BrowserLogEntry {
     timestamp: f64,
     url: Option<String>,
     line_number: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NetworkEntry {
+    request_id: String,
+    url: String,
+    method: String,
+    resource_type: Option<String>,
+    status: Option<i64>,
+    status_text: Option<String>,
+    mime_type: Option<String>,
+    response_headers: Option<Value>,
+    error_text: Option<String>,
+    timestamp: f64,
+    encoded_data_length: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +109,52 @@ struct BrowserDomInput {
     properties: Option<Vec<String>>,
     all: Option<bool>,
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserNetworkInput {
+    url_filter: Option<String>,
+    resource_type: Option<String>,
+    status_filter: Option<String>,
+    limit: Option<usize>,
+    failed_only: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserCssInput {
+    selector: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserWaitInput {
+    condition: WaitCondition,
+    selector: Option<String>,
+    text: Option<String>,
+    timeout_ms: Option<u64>,
+    poll_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WaitCondition {
+    Selector,
+    SelectorRemoved,
+    Text,
+    NetworkIdle,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserStorageInput {
+    storage: StorageType,
+    name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StorageType {
+    Cookies,
+    LocalStorage,
+    SessionStorage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -595,6 +664,551 @@ impl Tool for BrowserInputTool {
     }
 }
 
+// ─── BrowserNetworkTool ─────────────────────────────────────────────────────
+
+#[async_trait]
+impl Tool for BrowserNetworkTool {
+    fn name(&self) -> &str {
+        "BrowserNetwork"
+    }
+
+    fn description(&self) -> &str {
+        concat!(
+            "Inspect collected network requests and responses from the retained browser window. ",
+            "Shows URL, method, status code, headers, resource type, errors, and timing. ",
+            "Filter by URL substring, resource type (Document, Stylesheet, Script, XHR, Fetch, Image, etc.), ",
+            "status code range (e.g. '4xx', '5xx', '200'), or failed requests only."
+        )
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Web
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url_filter": {
+                    "type": "string",
+                    "description": "Optional substring to filter request URLs, e.g. '/api/' or '.css'."
+                },
+                "resource_type": {
+                    "type": "string",
+                    "description": "Optional resource type filter: Document, Stylesheet, Script, XHR, Fetch, Image, Font, Media, WebSocket, Other."
+                },
+                "status_filter": {
+                    "type": "string",
+                    "description": "Optional status code filter: an exact code like '404', or a range like '4xx' or '5xx'."
+                },
+                "failed_only": {
+                    "type": "boolean",
+                    "description": "If true, only return requests that failed (network error, not HTTP error codes)."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Optional maximum number of entries to return. Most recent entries are returned first."
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let input: BrowserNetworkInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(err) => return ToolResult::error(format!("Invalid input: {err}")),
+        };
+
+        let (session, _) = match require_browser_page(ctx).await {
+            Ok(state) => state,
+            Err(err) => return ToolResult::error(err),
+        };
+
+        let all_entries = session.network_entries.lock().clone();
+        let mut entries: Vec<&NetworkEntry> = all_entries.iter().collect();
+
+        // Apply filters
+        if let Some(ref url_filter) = input.url_filter {
+            entries.retain(|e| e.url.contains(url_filter.as_str()));
+        }
+        if let Some(ref resource_type) = input.resource_type {
+            let rt = resource_type.to_ascii_lowercase();
+            entries.retain(|e| {
+                e.resource_type
+                    .as_ref()
+                    .map(|t| t.to_ascii_lowercase() == rt)
+                    .unwrap_or(false)
+            });
+        }
+        if let Some(ref status_filter) = input.status_filter {
+            entries.retain(|e| matches_status_filter(e.status, status_filter));
+        }
+        if input.failed_only.unwrap_or(false) {
+            entries.retain(|e| e.error_text.is_some());
+        }
+
+        // Most recent first
+        entries.reverse();
+
+        let total = entries.len();
+        if let Some(limit) = input.limit {
+            entries.truncate(limit);
+        }
+
+        success_json(serde_json::json!({
+            "entries": entries.into_iter().cloned().collect::<Vec<_>>(),
+            "returned": std::cmp::min(total, input.limit.unwrap_or(total)),
+            "total_matching": total,
+            "total_collected": all_entries.len(),
+        }))
+    }
+}
+
+// ─── BrowserCssTool ─────────────────────────────────────────────────────────
+
+#[async_trait]
+impl Tool for BrowserCssTool {
+    fn name(&self) -> &str {
+        "BrowserCss"
+    }
+
+    fn description(&self) -> &str {
+        concat!(
+            "Inspect the CSS rules that match an element, including the stylesheet source ",
+            "(file URL and rule text). This reveals which CSS rules apply and where they come from, ",
+            "going beyond computed styles to show rule provenance. ",
+            "Returns matched rules sorted by specificity (most specific last)."
+        )
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Web
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector for the element to inspect, e.g. `.box-content label` or `#main h1`."
+                }
+            },
+            "required": ["selector"]
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let input: BrowserCssInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(err) => return ToolResult::error(format!("Invalid input: {err}")),
+        };
+
+        let (_, page) = match require_browser_page(ctx).await {
+            Ok(state) => state,
+            Err(err) => return ToolResult::error(err),
+        };
+
+        match css_matched_rules(&page, &input.selector).await {
+            Ok(value) => success_json(serde_json::json!({
+                "selector": input.selector,
+                "matched_rules": value,
+            })),
+            Err(err) => ToolResult::error(err),
+        }
+    }
+}
+
+// ─── BrowserWaitTool ────────────────────────────────────────────────────────
+
+const DEFAULT_WAIT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_WAIT_POLL_MS: u64 = 200;
+const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
+
+#[async_trait]
+impl Tool for BrowserWaitTool {
+    fn name(&self) -> &str {
+        "BrowserWait"
+    }
+
+    fn description(&self) -> &str {
+        concat!(
+            "Wait for a condition in the retained browser window before proceeding. ",
+            "Conditions: selector (element appears), selector_removed (element disappears), ",
+            "text (text appears in an element), network_idle (no pending network requests for 500ms). ",
+            "Returns when the condition is met or after timeout."
+        )
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Web
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "condition": {
+                    "type": "string",
+                    "enum": ["selector", "selector_removed", "text", "network_idle"],
+                    "description": "What to wait for."
+                },
+                "selector": {
+                    "type": "string",
+                    "description": "CSS selector to wait for. Required for selector, selector_removed, and text conditions."
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Text substring to wait for inside the matched element. Required for text condition."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Maximum time to wait in milliseconds. Defaults to 10000 (10s), max 60000 (60s)."
+                },
+                "poll_ms": {
+                    "type": "integer",
+                    "description": "Polling interval in milliseconds. Defaults to 200."
+                }
+            },
+            "required": ["condition"]
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let input: BrowserWaitInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(err) => return ToolResult::error(format!("Invalid input: {err}")),
+        };
+
+        let timeout_ms = input
+            .timeout_ms
+            .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
+            .min(MAX_WAIT_TIMEOUT_MS);
+        let poll_ms = input.poll_ms.unwrap_or(DEFAULT_WAIT_POLL_MS).max(50);
+
+        // Validate required fields
+        match input.condition {
+            WaitCondition::Selector | WaitCondition::SelectorRemoved => {
+                if input.selector.is_none() {
+                    return ToolResult::error("selector is required for selector/selector_removed conditions.");
+                }
+            }
+            WaitCondition::Text => {
+                if input.selector.is_none() {
+                    return ToolResult::error("selector is required for text condition.");
+                }
+                if input.text.is_none() {
+                    return ToolResult::error("text is required for text condition.");
+                }
+            }
+            WaitCondition::NetworkIdle => {}
+        }
+
+        let (session, page) = match require_browser_page(ctx).await {
+            Ok(state) => state,
+            Err(err) => return ToolResult::error(err),
+        };
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        let poll_duration = std::time::Duration::from_millis(poll_ms);
+
+        loop {
+            let met = match input.condition {
+                WaitCondition::Selector => {
+                    let sel = input.selector.as_deref().unwrap();
+                    page.find_element(sel).await.is_ok()
+                }
+                WaitCondition::SelectorRemoved => {
+                    let sel = input.selector.as_deref().unwrap();
+                    page.find_element(sel).await.is_err()
+                }
+                WaitCondition::Text => {
+                    let sel = input.selector.as_deref().unwrap();
+                    let needle = input.text.as_deref().unwrap();
+                    match page.find_element(sel).await {
+                        Ok(el) => el
+                            .inner_text()
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|t| t.contains(needle))
+                            .unwrap_or(false),
+                        Err(_) => false,
+                    }
+                }
+                WaitCondition::NetworkIdle => {
+                    check_network_idle(&session, 500).await
+                }
+            };
+
+            if met {
+                return success_json(serde_json::json!({
+                    "condition": input.condition,
+                    "met": true,
+                    "elapsed_ms": (tokio::time::Instant::now() - (deadline - std::time::Duration::from_millis(timeout_ms))).as_millis(),
+                }));
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return success_json(serde_json::json!({
+                    "condition": input.condition,
+                    "met": false,
+                    "timed_out": true,
+                    "timeout_ms": timeout_ms,
+                }));
+            }
+
+            tokio::time::sleep(poll_duration).await;
+        }
+    }
+}
+
+// ─── BrowserStorageTool ─────────────────────────────────────────────────────
+
+#[async_trait]
+impl Tool for BrowserStorageTool {
+    fn name(&self) -> &str {
+        "BrowserStorage"
+    }
+
+    fn description(&self) -> &str {
+        concat!(
+            "Inspect browser storage for the current page: cookies, localStorage, or sessionStorage. ",
+            "For cookies, returns all cookies matching the current URL. ",
+            "For localStorage/sessionStorage, returns all key-value pairs. ",
+            "Optionally filter by name to return a single entry."
+        )
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Web
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "storage": {
+                    "type": "string",
+                    "enum": ["cookies", "local_storage", "session_storage"],
+                    "description": "Which storage to inspect."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional: filter by cookie name or storage key."
+                }
+            },
+            "required": ["storage"]
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let input: BrowserStorageInput = match serde_json::from_value(input) {
+            Ok(value) => value,
+            Err(err) => return ToolResult::error(format!("Invalid input: {err}")),
+        };
+
+        let (_, page) = match require_browser_page(ctx).await {
+            Ok(state) => state,
+            Err(err) => return ToolResult::error(err),
+        };
+
+        match input.storage {
+            StorageType::Cookies => {
+                match page.get_cookies().await {
+                    Ok(cookies) => {
+                        let items: Vec<Value> = cookies
+                            .iter()
+                            .filter(|c| {
+                                input.name.as_ref().map(|n| c.name == *n).unwrap_or(true)
+                            })
+                            .map(|c| {
+                                serde_json::json!({
+                                    "name": c.name,
+                                    "value": c.value,
+                                    "domain": c.domain,
+                                    "path": c.path,
+                                    "expires": c.expires,
+                                    "http_only": c.http_only,
+                                    "secure": c.secure,
+                                    "session": c.session,
+                                    "same_site": c.same_site.as_ref().map(|s| s.as_ref().to_string()),
+                                })
+                            })
+                            .collect();
+                        success_json(serde_json::json!({
+                            "storage": "cookies",
+                            "count": items.len(),
+                            "items": items,
+                        }))
+                    }
+                    Err(err) => ToolResult::error(format!("Failed to get cookies: {err}")),
+                }
+            }
+            StorageType::LocalStorage | StorageType::SessionStorage => {
+                let storage_obj = match input.storage {
+                    StorageType::LocalStorage => "localStorage",
+                    StorageType::SessionStorage => "sessionStorage",
+                    _ => unreachable!(),
+                };
+
+                let script = if let Some(ref name) = input.name {
+                    let key = serde_json::to_string(name)
+                        .map_err(|e| format!("Failed to encode key: {e}"))
+                        .unwrap_or_default();
+                    format!(
+                        r#"() => {{
+                            const val = {storage_obj}.getItem({key});
+                            return val === null ? null : {{ key: {key}, value: val }};
+                        }}"#
+                    )
+                } else {
+                    format!(
+                        r#"() => {{
+                            const items = [];
+                            for (let i = 0; i < {storage_obj}.length; i++) {{
+                                const key = {storage_obj}.key(i);
+                                items.push({{ key, value: {storage_obj}.getItem(key) }});
+                            }}
+                            return items;
+                        }}"#
+                    )
+                };
+
+                match page.evaluate(script.as_str()).await {
+                    Ok(result) => match result.into_value::<Value>() {
+                        Ok(value) => success_json(serde_json::json!({
+                            "storage": storage_obj,
+                            "data": value,
+                        })),
+                        Err(err) => {
+                            ToolResult::error(format!("Failed to decode storage result: {err}"))
+                        }
+                    },
+                    Err(err) => ToolResult::error(format!("Failed to read {storage_obj}: {err}")),
+                }
+            }
+        }
+    }
+}
+
+// ─── Helper functions for new tools ─────────────────────────────────────────
+
+fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
+    let filter = filter.trim();
+    if filter.ends_with("xx") || filter.ends_with("XX") {
+        if let Ok(prefix) = filter[..1].parse::<i64>() {
+            return status.map(|s| s / 100 == prefix).unwrap_or(false);
+        }
+    }
+    if let Ok(code) = filter.parse::<i64>() {
+        return status == Some(code);
+    }
+    false
+}
+
+async fn check_network_idle(session: &BrowserSession, quiet_ms: u64) -> bool {
+    let entries = session.network_entries.lock();
+    if entries.is_empty() {
+        return true;
+    }
+    // Check if the most recent entry has a response/error (i.e., is completed)
+    // and that it's been at least quiet_ms since then
+    let last_timestamp = entries
+        .iter()
+        .map(|e| e.timestamp)
+        .fold(0.0f64, f64::max);
+    drop(entries);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * 1000.0;
+    // Timestamps from CDP are in seconds since epoch
+    let last_ms = last_timestamp * 1000.0;
+    (now_ms - last_ms) >= quiet_ms as f64
+}
+
+async fn css_matched_rules(page: &Page, selector: &str) -> BrowserResult<Value> {
+    let selector_json = serde_json::to_string(selector)
+        .map_err(|err| format!("Failed to encode CSS selector: {err}"))?;
+    let script = format!(
+        r#"() => {{
+            const el = document.querySelector({selector_json});
+            if (!el) throw new Error("Element not found for selector: " + {selector_json});
+
+            const rules = [];
+            try {{
+                for (const sheet of document.styleSheets) {{
+                    let href = null;
+                    try {{ href = sheet.href || (sheet.ownerNode && sheet.ownerNode.tagName === 'STYLE' ? 'inline:<style>' : null); }} catch(_) {{}}
+                    let cssRules;
+                    try {{ cssRules = sheet.cssRules; }} catch(_) {{ continue; }}
+                    for (let i = 0; i < cssRules.length; i++) {{
+                        const rule = cssRules[i];
+                        if (rule.type !== CSSRule.STYLE_RULE) continue;
+                        try {{
+                            if (!el.matches(rule.selectorText)) continue;
+                        }} catch(_) {{ continue; }}
+                        const props = {{}};
+                        for (let j = 0; j < rule.style.length; j++) {{
+                            const prop = rule.style[j];
+                            props[prop] = rule.style.getPropertyValue(prop);
+                        }}
+                        rules.push({{
+                            selector: rule.selectorText,
+                            stylesheet: href,
+                            properties: props,
+                        }});
+                    }}
+                }}
+            }} catch(e) {{
+                // Some cross-origin stylesheets may throw; we skip them
+            }}
+
+            // Also include inline styles
+            const inlineStyle = el.getAttribute('style');
+            if (inlineStyle) {{
+                const props = {{}};
+                for (let j = 0; j < el.style.length; j++) {{
+                    const prop = el.style[j];
+                    props[prop] = el.style.getPropertyValue(prop);
+                }}
+                rules.push({{
+                    selector: "(inline style)",
+                    stylesheet: null,
+                    properties: props,
+                }});
+            }}
+
+            return rules;
+        }}"#
+    );
+
+    page.evaluate(script.as_str())
+        .await
+        .map_err(|err| format!("Failed to get matched CSS rules: {err}"))?
+        .into_value::<Value>()
+        .map_err(|err| format!("Failed to decode CSS rules result: {err}"))
+}
+
 async fn ensure_browser_page(
     ctx: &ToolContext,
     browser_config: &BrowserToolConfig,
@@ -650,6 +1264,17 @@ async fn ensure_browser_page(
         return Err(format!("Failed to enable browser log collection: {err}"));
     }
 
+    // Enable the network domain for request/response tracking.
+    if let Err(err) = page
+        .execute(cdp_network::EnableParams::default())
+        .await
+    {
+        handler_task.abort();
+        let _ = browser.close().await;
+        let _ = browser.wait().await;
+        return Err(format!("Failed to enable network tracking: {err}"));
+    }
+
     let mut tasks = vec![handler_task];
     match spawn_page_listener_tasks(page.clone(), session.clone()).await {
         Ok(listener_tasks) => tasks.extend(listener_tasks),
@@ -663,6 +1288,7 @@ async fn ensure_browser_page(
         }
     }
     session.log_entries.lock().clear();
+    session.network_entries.lock().clear();
     *session.browser.lock().await = Some(browser);
     *session.page.write() = Some(page.clone());
     *session.profile_dir.lock() = Some(profile_dir);
@@ -712,6 +1338,7 @@ async fn close_browser_session(session_id: &str) -> BrowserResult<String> {
     abort_session_tasks(&session);
     *session.page.write() = None;
     session.log_entries.lock().clear();
+    session.network_entries.lock().clear();
     session.profile_dir.lock().take();
 
     Ok("Browser session closed.".into())
@@ -746,7 +1373,7 @@ async fn spawn_page_listener_tasks(
         .event_listener::<EventEntryAdded>()
         .await
         .map_err(|err| format!("Failed to subscribe to log events: {err}"))?;
-    let log_session = session;
+    let log_session = session.clone();
     let log_task = tokio::spawn(async move {
         while let Some(event) = log_events.next().await {
             log_session
@@ -756,7 +1383,66 @@ async fn spawn_page_listener_tasks(
         }
     });
 
-    Ok(vec![console_task, log_task])
+    // Network event listeners
+    let mut request_events = page
+        .event_listener::<EventRequestWillBeSent>()
+        .await
+        .map_err(|err| format!("Failed to subscribe to network request events: {err}"))?;
+    let request_session = session.clone();
+    let request_task = tokio::spawn(async move {
+        while let Some(event) = request_events.next().await {
+            let entry = NetworkEntry {
+                request_id: event.request_id.inner().clone(),
+                url: event.request.url.clone(),
+                method: event.request.method.clone(),
+                resource_type: event.r#type.as_ref().map(|t| t.as_ref().to_string()),
+                status: None,
+                status_text: None,
+                mime_type: None,
+                response_headers: None,
+                error_text: None,
+                timestamp: *event.timestamp.inner(),
+                encoded_data_length: None,
+            };
+            request_session.network_entries.lock().push(entry);
+        }
+    });
+
+    let mut response_events = page
+        .event_listener::<EventResponseReceived>()
+        .await
+        .map_err(|err| format!("Failed to subscribe to network response events: {err}"))?;
+    let response_session = session.clone();
+    let response_task = tokio::spawn(async move {
+        while let Some(event) = response_events.next().await {
+            let req_id = event.request_id.inner().clone();
+            let mut entries = response_session.network_entries.lock();
+            if let Some(entry) = entries.iter_mut().rev().find(|e| e.request_id == req_id) {
+                entry.status = Some(event.response.status);
+                entry.status_text = Some(event.response.status_text.clone());
+                entry.mime_type = Some(event.response.mime_type.clone());
+                entry.response_headers = Some(event.response.headers.inner().clone());
+                entry.encoded_data_length = Some(event.response.encoded_data_length);
+            }
+        }
+    });
+
+    let mut failed_events = page
+        .event_listener::<EventLoadingFailed>()
+        .await
+        .map_err(|err| format!("Failed to subscribe to network failure events: {err}"))?;
+    let failed_session = session;
+    let failed_task = tokio::spawn(async move {
+        while let Some(event) = failed_events.next().await {
+            let req_id = event.request_id.inner().clone();
+            let mut entries = failed_session.network_entries.lock();
+            if let Some(entry) = entries.iter_mut().rev().find(|e| e.request_id == req_id) {
+                entry.error_text = Some(event.error_text.clone());
+            }
+        }
+    });
+
+    Ok(vec![console_task, log_task, request_task, response_task, failed_task])
 }
 
 async fn browser_status_value(
@@ -1209,6 +1895,21 @@ browser:
             clear_first: None,
         };
         validate_browser_input(&key_input).unwrap();
+    }
+
+    #[test]
+    fn status_filter_exact() {
+        assert!(matches_status_filter(Some(404), "404"));
+        assert!(!matches_status_filter(Some(200), "404"));
+        assert!(!matches_status_filter(None, "404"));
+    }
+
+    #[test]
+    fn status_filter_range() {
+        assert!(matches_status_filter(Some(404), "4xx"));
+        assert!(matches_status_filter(Some(500), "5xx"));
+        assert!(!matches_status_filter(Some(200), "4xx"));
+        assert!(matches_status_filter(Some(201), "2xx"));
     }
 
     #[test]
