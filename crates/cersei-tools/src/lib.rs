@@ -3,6 +3,7 @@
 pub mod ask_user;
 pub mod bash;
 pub mod bash_classifier;
+pub mod cargo_tool;
 pub mod browser_tool;
 #[cfg(feature = "cas")]
 pub mod cas;
@@ -17,6 +18,7 @@ pub mod git_utils;
 pub mod glob_tool;
 pub mod grep_tool;
 pub mod mysql_tool;
+pub mod npm_tool;
 pub mod notebook_edit;
 pub mod permissions;
 pub mod plan_mode;
@@ -329,11 +331,12 @@ pub fn clear_session_shell_state(session_id: &str) {
 
 // ─── Built-in tool sets ──────────────────────────────────────────────────────
 
-/// All built-in tools (34 tools).
+/// All built-in tools.
 pub fn all() -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     tools.extend(filesystem());
     tools.extend(shell());
+    tools.extend(package_managers());
     tools.extend(web());
     tools.extend(data());
     tools.extend(vcs());
@@ -353,6 +356,7 @@ pub fn coding() -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     tools.extend(filesystem());
     tools.extend(shell());
+    tools.extend(package_managers());
     tools.extend(web());
     tools.extend(data());
     tools.extend(vcs());
@@ -384,6 +388,14 @@ pub fn shell() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(bash::BashTool),
         Box::new(powershell::PowerShellTool),
+    ]
+}
+
+/// Package manager tools: Npm, Cargo.
+pub fn package_managers() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(npm_tool::NpmTool),
+        Box::new(cargo_tool::CargoTool),
     ]
 }
 
