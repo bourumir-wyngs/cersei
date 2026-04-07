@@ -3,10 +3,12 @@
 use super::*;
 use chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use chromiumoxide::cdp::browser_protocol::network::{
-    self as cdp_network, EventLoadingFailed, EventRequestWillBeSent, EventResponseReceived,
+    self as cdp_network, EventLoadingFailed, EventLoadingFinished, EventRequestWillBeSent,
+    EventResponseReceived,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{EventConsoleApiCalled, RemoteObject};
 use chromiumoxide::{Browser, BrowserConfig, Element, Page};
+use std::collections::HashSet;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -14,6 +16,8 @@ use url::Url;
 
 type BrowserResult<T> = std::result::Result<T, String>;
 const BROWSER_OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const MAX_BROWSER_LOG_ENTRIES: usize = 1000;
+const MAX_BROWSER_NETWORK_ENTRIES: usize = 2000;
 const DEFAULT_COMPUTED_STYLE_PROPERTIES: &[&str] = &[
     "font-size",
     "font-weight",
@@ -33,7 +37,6 @@ pub struct BrowserClickTool;
 pub struct BrowserInputTool;
 pub struct BrowserNetworkTool;
 pub struct BrowserCssTool;
-pub struct BrowserWaitTool;
 pub struct BrowserStorageTool;
 
 #[derive(Default)]
@@ -43,6 +46,9 @@ struct BrowserSession {
     page: parking_lot::RwLock<Option<Page>>,
     log_entries: parking_lot::Mutex<Vec<BrowserLogEntry>>,
     network_entries: parking_lot::Mutex<Vec<NetworkEntry>>,
+    next_network_sequence: std::sync::atomic::AtomicU64,
+    active_request_ids: parking_lot::Mutex<HashSet<String>>,
+    last_network_completion_timestamp: parking_lot::Mutex<Option<f64>>,
     tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     profile_dir: parking_lot::Mutex<Option<TempDir>>,
 }
@@ -60,6 +66,7 @@ struct BrowserLogEntry {
 #[derive(Debug, Clone, Serialize)]
 struct NetworkEntry {
     request_id: String,
+    sequence: u64,
     url: String,
     method: String,
     resource_type: Option<String>,
@@ -125,23 +132,6 @@ struct BrowserCssInput {
     selector: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct BrowserWaitInput {
-    condition: WaitCondition,
-    selector: Option<String>,
-    text: Option<String>,
-    timeout_ms: Option<u64>,
-    poll_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum WaitCondition {
-    Selector,
-    SelectorRemoved,
-    Text,
-    NetworkIdle,
-}
 
 #[derive(Debug, Deserialize)]
 struct BrowserStorageInput {
@@ -191,6 +181,41 @@ impl Default for BrowserWindowAction {
 
 static BROWSER_SESSION_REGISTRY: once_cell::sync::Lazy<dashmap::DashMap<String, Arc<BrowserSession>>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
+
+fn trim_vec_to_limit<T>(items: &mut Vec<T>, max_entries: usize) {
+    if items.len() > max_entries {
+        let overflow = items.len() - max_entries;
+        items.drain(0..overflow);
+    }
+}
+
+fn push_log_entry(session: &BrowserSession, entry: BrowserLogEntry) {
+    let mut entries = session.log_entries.lock();
+    entries.push(entry);
+    trim_vec_to_limit(&mut entries, MAX_BROWSER_LOG_ENTRIES);
+}
+
+fn push_network_entry(session: &BrowserSession, entry: NetworkEntry) {
+    let mut entries = session.network_entries.lock();
+    entries.push(entry);
+    trim_vec_to_limit(&mut entries, MAX_BROWSER_NETWORK_ENTRIES);
+}
+
+fn mark_network_completion(session: &BrowserSession, request_id: &str, timestamp: f64) {
+    session.active_request_ids.lock().remove(request_id);
+    *session.last_network_completion_timestamp.lock() = Some(timestamp);
+}
+
+fn clear_network_tracking(session: &BrowserSession) {
+    session.network_entries.lock().clear();
+    session.active_request_ids.lock().clear();
+    *session.last_network_completion_timestamp.lock() = None;
+}
+
+fn should_track_request_as_active(url: &str) -> bool {
+    let trimmed = url.trim();
+    !trimmed.is_empty() && !trimmed.starts_with("data:")
+}
 
 fn browser_session(session_id: &str) -> Arc<BrowserSession> {
     BROWSER_SESSION_REGISTRY
@@ -260,7 +285,7 @@ impl Tool for BrowserWindowTool {
                     ),
                 }
             }
-            BrowserWindowAction::Status => match current_browser_page(ctx) {
+            BrowserWindowAction::Status => match current_browser_page(ctx).await {
                 Some((session, page)) => {
                     success_json(browser_status_value(&session, &page, &browser_config).await)
                 }
@@ -827,154 +852,6 @@ impl Tool for BrowserCssTool {
     }
 }
 
-// ─── BrowserWaitTool ────────────────────────────────────────────────────────
-
-const DEFAULT_WAIT_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_WAIT_POLL_MS: u64 = 200;
-const MAX_WAIT_TIMEOUT_MS: u64 = 60_000;
-
-#[async_trait]
-impl Tool for BrowserWaitTool {
-    fn name(&self) -> &str {
-        "BrowserWait"
-    }
-
-    fn description(&self) -> &str {
-        concat!(
-            "Wait for a condition in the retained browser window before proceeding. ",
-            "Conditions: selector (element appears), selector_removed (element disappears), ",
-            "text (text appears in an element), network_idle (no pending network requests for 500ms). ",
-            "Returns when the condition is met or after timeout."
-        )
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::ReadOnly
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Web
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "condition": {
-                    "type": "string",
-                    "enum": ["selector", "selector_removed", "text", "network_idle"],
-                    "description": "What to wait for."
-                },
-                "selector": {
-                    "type": "string",
-                    "description": "CSS selector to wait for. Required for selector, selector_removed, and text conditions."
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Text substring to wait for inside the matched element. Required for text condition."
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Maximum time to wait in milliseconds. Defaults to 10000 (10s), max 60000 (60s)."
-                },
-                "poll_ms": {
-                    "type": "integer",
-                    "description": "Polling interval in milliseconds. Defaults to 200."
-                }
-            },
-            "required": ["condition"]
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let input: BrowserWaitInput = match serde_json::from_value(input) {
-            Ok(value) => value,
-            Err(err) => return ToolResult::error(format!("Invalid input: {err}")),
-        };
-
-        let timeout_ms = input
-            .timeout_ms
-            .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS)
-            .min(MAX_WAIT_TIMEOUT_MS);
-        let poll_ms = input.poll_ms.unwrap_or(DEFAULT_WAIT_POLL_MS).max(50);
-
-        // Validate required fields
-        match input.condition {
-            WaitCondition::Selector | WaitCondition::SelectorRemoved => {
-                if input.selector.is_none() {
-                    return ToolResult::error("selector is required for selector/selector_removed conditions.");
-                }
-            }
-            WaitCondition::Text => {
-                if input.selector.is_none() {
-                    return ToolResult::error("selector is required for text condition.");
-                }
-                if input.text.is_none() {
-                    return ToolResult::error("text is required for text condition.");
-                }
-            }
-            WaitCondition::NetworkIdle => {}
-        }
-
-        let (session, page) = match require_browser_page(ctx).await {
-            Ok(state) => state,
-            Err(err) => return ToolResult::error(err),
-        };
-
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        let poll_duration = std::time::Duration::from_millis(poll_ms);
-
-        loop {
-            let met = match input.condition {
-                WaitCondition::Selector => {
-                    let sel = input.selector.as_deref().unwrap();
-                    page.find_element(sel).await.is_ok()
-                }
-                WaitCondition::SelectorRemoved => {
-                    let sel = input.selector.as_deref().unwrap();
-                    page.find_element(sel).await.is_err()
-                }
-                WaitCondition::Text => {
-                    let sel = input.selector.as_deref().unwrap();
-                    let needle = input.text.as_deref().unwrap();
-                    match page.find_element(sel).await {
-                        Ok(el) => el
-                            .inner_text()
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|t| t.contains(needle))
-                            .unwrap_or(false),
-                        Err(_) => false,
-                    }
-                }
-                WaitCondition::NetworkIdle => {
-                    check_network_idle(&session, 500).await
-                }
-            };
-
-            if met {
-                return success_json(serde_json::json!({
-                    "condition": input.condition,
-                    "met": true,
-                    "elapsed_ms": (tokio::time::Instant::now() - (deadline - std::time::Duration::from_millis(timeout_ms))).as_millis(),
-                }));
-            }
-
-            if tokio::time::Instant::now() >= deadline {
-                return success_json(serde_json::json!({
-                    "condition": input.condition,
-                    "met": false,
-                    "timed_out": true,
-                    "timeout_ms": timeout_ms,
-                }));
-            }
-
-            tokio::time::sleep(poll_duration).await;
-        }
-    }
-}
-
 // ─── BrowserStorageTool ─────────────────────────────────────────────────────
 
 #[async_trait]
@@ -1123,29 +1000,6 @@ fn matches_status_filter(status: Option<i64>, filter: &str) -> bool {
     false
 }
 
-async fn check_network_idle(session: &BrowserSession, quiet_ms: u64) -> bool {
-    let entries = session.network_entries.lock();
-    if entries.is_empty() {
-        return true;
-    }
-    // Check if the most recent entry has a response/error (i.e., is completed)
-    // and that it's been at least quiet_ms since then
-    let last_timestamp = entries
-        .iter()
-        .map(|e| e.timestamp)
-        .fold(0.0f64, f64::max);
-    drop(entries);
-
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-        * 1000.0;
-    // Timestamps from CDP are in seconds since epoch
-    let last_ms = last_timestamp * 1000.0;
-    (now_ms - last_ms) >= quiet_ms as f64
-}
-
 async fn css_matched_rules(page: &Page, selector: &str) -> BrowserResult<Value> {
     let selector_json = serde_json::to_string(selector)
         .map_err(|err| format!("Failed to encode CSS selector: {err}"))?;
@@ -1288,7 +1142,7 @@ async fn ensure_browser_page(
         }
     }
     session.log_entries.lock().clear();
-    session.network_entries.lock().clear();
+    clear_network_tracking(&session);
     *session.browser.lock().await = Some(browser);
     *session.page.write() = Some(page.clone());
     *session.profile_dir.lock() = Some(profile_dir);
@@ -1303,7 +1157,7 @@ async fn ensure_browser_page(
 }
 
 async fn require_browser_page(ctx: &ToolContext) -> BrowserResult<(Arc<BrowserSession>, Page)> {
-    match current_browser_page(ctx) {
+    match current_browser_page(ctx).await {
         Some(page) => Ok(page),
         None => Err(
             "No browser window is open for this session. Open window first with BrowserWindow action=open.".into()
@@ -1311,10 +1165,15 @@ async fn require_browser_page(ctx: &ToolContext) -> BrowserResult<(Arc<BrowserSe
     }
 }
 
-fn current_browser_page(ctx: &ToolContext) -> Option<(Arc<BrowserSession>, Page)> {
+async fn current_browser_page(ctx: &ToolContext) -> Option<(Arc<BrowserSession>, Page)> {
     let session = browser_session(&ctx.session_id);
-    let page = session.page.read().clone();
-    page.map(|page| (session, page))
+    let page = session.page.read().clone()?;
+    if is_page_alive(&page).await {
+        Some((session, page))
+    } else {
+        clear_stale_browser_session(&ctx.session_id).await;
+        None
+    }
 }
 
 fn browser_config_from_context(ctx: &ToolContext) -> BrowserToolConfig {
@@ -1322,6 +1181,21 @@ fn browser_config_from_context(ctx: &ToolContext) -> BrowserToolConfig {
         .get::<ToolsConfig>()
         .and_then(|config| config.browser.clone())
         .unwrap_or_default()
+}
+
+async fn is_page_alive(page: &Page) -> bool {
+    page.url().await.is_ok()
+}
+
+async fn clear_stale_browser_session(session_id: &str) {
+    if let Some(session) = BROWSER_SESSION_REGISTRY.get(session_id) {
+        abort_session_tasks(session.value());
+        *session.page.write() = None;
+        session.log_entries.lock().clear();
+        clear_network_tracking(session.value());
+        session.profile_dir.lock().take();
+        let _ = session.browser.lock().await.take();
+    }
 }
 
 async fn close_browser_session(session_id: &str) -> BrowserResult<String> {
@@ -1338,7 +1212,7 @@ async fn close_browser_session(session_id: &str) -> BrowserResult<String> {
     abort_session_tasks(&session);
     *session.page.write() = None;
     session.log_entries.lock().clear();
-    session.network_entries.lock().clear();
+    clear_network_tracking(&session);
     session.profile_dir.lock().take();
 
     Ok("Browser session closed.".into())
@@ -1362,10 +1236,7 @@ async fn spawn_page_listener_tasks(
     let console_session = session.clone();
     let console_task = tokio::spawn(async move {
         while let Some(event) = console_events.next().await {
-            console_session
-                .log_entries
-                .lock()
-                .push(console_event_to_entry(event.as_ref()));
+            push_log_entry(console_session.as_ref(), console_event_to_entry(event.as_ref()));
         }
     });
 
@@ -1376,10 +1247,7 @@ async fn spawn_page_listener_tasks(
     let log_session = session.clone();
     let log_task = tokio::spawn(async move {
         while let Some(event) = log_events.next().await {
-            log_session
-                .log_entries
-                .lock()
-                .push(log_event_to_entry(event.as_ref()));
+            push_log_entry(log_session.as_ref(), log_event_to_entry(event.as_ref()));
         }
     });
 
@@ -1391,8 +1259,18 @@ async fn spawn_page_listener_tasks(
     let request_session = session.clone();
     let request_task = tokio::spawn(async move {
         while let Some(event) = request_events.next().await {
+            let request_id = event.request_id.inner().clone();
+            if should_track_request_as_active(&event.request.url) {
+                request_session
+                    .active_request_ids
+                    .lock()
+                    .insert(request_id.clone());
+            }
             let entry = NetworkEntry {
-                request_id: event.request_id.inner().clone(),
+                request_id,
+                sequence: request_session
+                    .next_network_sequence
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 url: event.request.url.clone(),
                 method: event.request.method.clone(),
                 resource_type: event.r#type.as_ref().map(|t| t.as_ref().to_string()),
@@ -1404,7 +1282,7 @@ async fn spawn_page_listener_tasks(
                 timestamp: *event.timestamp.inner(),
                 encoded_data_length: None,
             };
-            request_session.network_entries.lock().push(entry);
+            push_network_entry(request_session.as_ref(), entry);
         }
     });
 
@@ -1416,14 +1294,46 @@ async fn spawn_page_listener_tasks(
     let response_task = tokio::spawn(async move {
         while let Some(event) = response_events.next().await {
             let req_id = event.request_id.inner().clone();
+            let event_timestamp = *event.timestamp.inner();
+            let redirect_url = event.response.url.clone();
             let mut entries = response_session.network_entries.lock();
-            if let Some(entry) = entries.iter_mut().rev().find(|e| e.request_id == req_id) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .rev()
+                .find(|e| e.request_id == req_id && e.status.is_none() && e.error_text.is_none())
+            {
+                entry.url = redirect_url;
                 entry.status = Some(event.response.status);
                 entry.status_text = Some(event.response.status_text.clone());
                 entry.mime_type = Some(event.response.mime_type.clone());
                 entry.response_headers = Some(event.response.headers.inner().clone());
                 entry.encoded_data_length = Some(event.response.encoded_data_length);
+                entry.timestamp = entry.timestamp.max(event_timestamp);
             }
+            drop(entries);
+        }
+    });
+
+    let mut finished_events = page
+        .event_listener::<EventLoadingFinished>()
+        .await
+        .map_err(|err| format!("Failed to subscribe to network completion events: {err}"))?;
+    let finished_session = session.clone();
+    let finished_task = tokio::spawn(async move {
+        while let Some(event) = finished_events.next().await {
+            let req_id = event.request_id.inner().clone();
+            let event_timestamp = *event.timestamp.inner();
+            let mut entries = finished_session.network_entries.lock();
+            if let Some(entry) = entries
+                .iter_mut()
+                .rev()
+                .find(|e| e.request_id == req_id && e.error_text.is_none())
+            {
+                entry.encoded_data_length = Some(event.encoded_data_length);
+                entry.timestamp = entry.timestamp.max(event_timestamp);
+            }
+            drop(entries);
+            mark_network_completion(finished_session.as_ref(), &req_id, event_timestamp);
         }
     });
 
@@ -1435,14 +1345,22 @@ async fn spawn_page_listener_tasks(
     let failed_task = tokio::spawn(async move {
         while let Some(event) = failed_events.next().await {
             let req_id = event.request_id.inner().clone();
+            let event_timestamp = *event.timestamp.inner();
             let mut entries = failed_session.network_entries.lock();
-            if let Some(entry) = entries.iter_mut().rev().find(|e| e.request_id == req_id) {
+            if let Some(entry) = entries
+                .iter_mut()
+                .rev()
+                .find(|e| e.request_id == req_id && e.error_text.is_none())
+            {
                 entry.error_text = Some(event.error_text.clone());
+                entry.timestamp = entry.timestamp.max(event_timestamp);
             }
+            drop(entries);
+            mark_network_completion(failed_session.as_ref(), &req_id, event_timestamp);
         }
     });
 
-    Ok(vec![console_task, log_task, request_task, response_task, failed_task])
+    Ok(vec![console_task, log_task, request_task, response_task, finished_task, failed_task])
 }
 
 async fn browser_status_value(
@@ -1799,6 +1717,87 @@ fn success_json(value: Value) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_urls_are_not_tracked_as_active_requests() {
+        assert!(!should_track_request_as_active(
+            "data:image/svg+xml,%3Csvg%20xmlns%3D%27http://www.w3.org/2000/svg%27%3E"
+        ));
+        assert!(should_track_request_as_active("http://localhost:3000/api/v1/experiments"));
+    }
+
+    #[test]
+    fn trim_vec_to_limit_keeps_most_recent_entries() {
+        let mut items = vec![1, 2, 3, 4, 5];
+        trim_vec_to_limit(&mut items, 3);
+        assert_eq!(items, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn clear_network_tracking_resets_active_requests_and_timestamps() {
+        let session = BrowserSession::default();
+        session.active_request_ids.lock().insert("req-1".into());
+        session.network_entries.lock().push(NetworkEntry {
+            request_id: "req-1".into(),
+            sequence: 0,
+            url: "http://localhost/".into(),
+            method: "GET".into(),
+            resource_type: Some("Document".into()),
+            status: Some(200),
+            status_text: Some("OK".into()),
+            mime_type: Some("text/html".into()),
+            response_headers: None,
+            error_text: None,
+            timestamp: 1.0,
+            encoded_data_length: None,
+        });
+        *session.last_network_completion_timestamp.lock() = Some(1.0);
+
+        clear_network_tracking(&session);
+
+        assert!(session.active_request_ids.lock().is_empty());
+        assert!(session.network_entries.lock().is_empty());
+        assert!(session.last_network_completion_timestamp.lock().is_none());
+    }
+
+    #[test]
+    fn network_entries_can_represent_multiple_lifecycles_for_same_request_id() {
+        let entries = vec![
+            NetworkEntry {
+                request_id: "req-1".into(),
+                sequence: 0,
+                url: "http://localhost/start".into(),
+                method: "GET".into(),
+                resource_type: Some("Document".into()),
+                status: Some(302),
+                status_text: Some("Found".into()),
+                mime_type: Some("text/html".into()),
+                response_headers: None,
+                error_text: None,
+                timestamp: 1.0,
+                encoded_data_length: None,
+            },
+            NetworkEntry {
+                request_id: "req-1".into(),
+                sequence: 1,
+                url: "http://localhost/final".into(),
+                method: "GET".into(),
+                resource_type: Some("Document".into()),
+                status: Some(200),
+                status_text: Some("OK".into()),
+                mime_type: Some("text/html".into()),
+                response_headers: None,
+                error_text: None,
+                timestamp: 2.0,
+                encoded_data_length: None,
+            },
+        ];
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].request_id, entries[1].request_id);
+        assert_ne!(entries[0].sequence, entries[1].sequence);
+        assert_ne!(entries[0].url, entries[1].url);
+    }
 
     #[test]
     fn normalize_localhost_url_without_scheme() {
