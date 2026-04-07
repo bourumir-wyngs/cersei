@@ -15,6 +15,7 @@ mod sessions;
 mod signals;
 mod status;
 mod theme;
+mod tools_config;
 
 use clap::{Parser, Subcommand};
 

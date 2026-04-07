@@ -6,12 +6,14 @@ use crate::prompt;
 use crate::repl;
 use crate::sessions;
 use crate::theme::Theme;
+use crate::tools_config;
 use crate::Cli;
 
 use cersei_agent::effort::EffortLevel;
 use cersei_memory::manager::MemoryManager;
 use cersei_mcp::McpServerConfig;
 use cersei_tools::permissions::AllowAll;
+use cersei_tools::Extensions;
 use cersei_types::Message;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -20,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 /// Run the application (REPL or single-shot).
 pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     let theme = Theme::from_name(&config.theme);
+    let tool_extensions = tools_config::load_extensions_from_start_dir()?;
 
     // Resolve or create session ID
     let session_id = if let Some(ref resume) = cli.resume {
@@ -50,6 +53,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
         &session_id,
         cancel_token.clone(),
         None,
+        tool_extensions.clone(),
     )?;
     config.model = resolved_model;
 
@@ -70,6 +74,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
             &session_id,
             &config,
             &memory_manager,
+            &tool_extensions,
             cli.json,
             running,
             cancel_token,
@@ -82,6 +87,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
             &session_id,
             &config,
             &memory_manager,
+            &tool_extensions,
             cli.json,
             running,
             cancel_token,
@@ -98,6 +104,7 @@ pub fn build_agent(
     session_id: &str,
     cancel_token: CancellationToken,
     existing_messages: Option<Vec<Message>>,
+    tool_extensions: Extensions,
 ) -> anyhow::Result<(cersei::Agent, String)> {
     let (provider, resolved_model) = cersei_provider::from_model_string(model_string)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -127,7 +134,8 @@ pub fn build_agent(
         .enable_broadcast(512)
         .cancel_token(cancel_token)
         .session_id(session_id)
-        .working_dir(&config.working_dir);
+        .working_dir(&config.working_dir)
+        .tool_extensions(tool_extensions);
 
     // Permission policy
     if config.permissions_mode == "allow_all" {

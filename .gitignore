@@ -10,3 +10,5 @@ Cargo.lock
 
 _inspirations
 /.idea
+/tools.yaml
+/.run/

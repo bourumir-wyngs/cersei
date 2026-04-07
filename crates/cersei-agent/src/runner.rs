@@ -113,23 +113,23 @@ pub async fn run_agent_streaming(
 ) -> Result<AgentOutput> {
     // Load session history (skip if messages were pre-populated via with_messages)
     if agent.messages.lock().is_empty() {
-    if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
-        let history = memory.load(session_id).await?;
-        if !history.is_empty() {
-            let count = history.len();
-            agent.messages.lock().extend(history);
-            let _ = event_tx
-                .send(AgentEvent::SessionLoaded {
+        if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
+            let history = memory.load(session_id).await?;
+            if !history.is_empty() {
+                let count = history.len();
+                agent.messages.lock().extend(history);
+                let _ = event_tx
+                    .send(AgentEvent::SessionLoaded {
+                        session_id: session_id.clone(),
+                        message_count: count,
+                    })
+                    .await;
+                agent.emit(AgentEvent::SessionLoaded {
                     session_id: session_id.clone(),
                     message_count: count,
-                })
-                .await;
-            agent.emit(AgentEvent::SessionLoaded {
-                session_id: session_id.clone(),
-                message_count: count,
-            });
+                });
+            }
         }
-    }
     } // end session load guard
 
     // Add user prompt
@@ -150,7 +150,7 @@ pub async fn run_agent_streaming(
         permissions: Arc::clone(&agent.permission_policy),
         cost_tracker: Arc::clone(&agent.cost_tracker),
         mcp_manager: agent.mcp_manager.clone(),
-        extensions: cersei_tools::Extensions::default(),
+        extensions: agent.tool_extensions.clone(),
     };
 
     // Agentic loop

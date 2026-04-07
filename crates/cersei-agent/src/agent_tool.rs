@@ -136,7 +136,8 @@ impl Tool for AgentTool {
             .tools(sub_tools)
             .max_turns(input.max_turns.unwrap_or(10))
             .permission_policy(AllowAll)
-            .working_dir(&ctx.working_dir);
+            .working_dir(&ctx.working_dir)
+            .tool_extensions(ctx.extensions.clone());
 
         if let Some(sys) = input.system_prompt {
             builder = builder.system_prompt(sys);

@@ -31,7 +31,12 @@ reqwest = { workspace = true }
 html2text = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
+mysql = { workspace = true }
+postgres = { workspace = true }
 giacrs = { workspace = true, optional = true }
 
 [features]
 cas = ["giacrs"]
+
+[dev-dependencies]
+serde-saphyr = { workspace = true }

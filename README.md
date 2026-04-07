@@ -1,8 +1,7 @@
 # Cersei
 
 The complete Rust SDK for building coding agents.
-
-Cersei gives you every building block of a production coding agent — tool execution, LLM streaming, sub-agent orchestration, persistent memory, skills, MCP integration — as composable library functions. Build a Claude Code replacement, embed an agent in your app, or create something entirely new.
+/moCersei gives you every building block of a production coding agent — tool execution, LLM streaming, sub-agent orchestration, persistent memory, skills, MCP integration — as composable library functions. Build a Claude Code replacement, embed an agent in your app, or create something entirely new.
 
 ```rust
 use cersei::prelude::*;
@@ -110,6 +109,21 @@ anyhow = "1"
 For graph-backed memory (optional):
 ```toml
 cersei-memory = { git = "https://github.com/pacifio/cersei", features = ["graph"] }
+```
+
+For the default CLI build on Ubuntu/Debian, install the GIAC development library first. The default feature set enables CAS support and requires the system header `giac/config.h`:
+
+```bash
+sudo apt update
+sudo apt install libgiac-dev
+```
+
+If the package is unavailable, enable the `universe` repository and retry:
+
+```bash
+sudo add-apt-repository universe
+sudo apt update
+sudo apt install libgiac-dev
 ```
 
 ---

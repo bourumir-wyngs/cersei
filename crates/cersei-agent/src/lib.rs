@@ -21,7 +21,7 @@ use cersei_memory::Memory;
 use cersei_mcp::McpServerConfig;
 use cersei_provider::Provider;
 use cersei_tools::permissions::{AllowAll, PermissionPolicy};
-use cersei_tools::{CostTracker, Tool};
+use cersei_tools::{CostTracker, Extensions, Tool};
 use cersei_types::*;
 use events::AgentEvent;
 use std::path::PathBuf;
@@ -90,6 +90,7 @@ pub struct Agent {
     messages: Arc<parking_lot::Mutex<Vec<Message>>>,
     cumulative_usage: Arc<parking_lot::Mutex<Usage>>,
     cancel_token: tokio_util::sync::CancellationToken,
+    tool_extensions: Extensions,
 }
 
 impl Agent {
@@ -211,6 +212,7 @@ pub struct AgentBuilder {
     compact_threshold: f64,
     tool_result_budget: usize,
     initial_messages: Option<Vec<Message>>,
+    tool_extensions: Extensions,
 }
 
 impl Default for AgentBuilder {
@@ -240,6 +242,7 @@ impl Default for AgentBuilder {
             compact_threshold: 0.9,
             tool_result_budget: 50_000,
             initial_messages: None,
+            tool_extensions: Extensions::default(),
         }
     }
 }
@@ -374,6 +377,11 @@ impl AgentBuilder {
         self
     }
 
+    pub fn tool_extensions(mut self, extensions: Extensions) -> Self {
+        self.tool_extensions = extensions;
+        self
+    }
+
     pub fn build(self) -> cersei_types::Result<Agent> {
         let provider = self
             .provider
@@ -419,6 +427,7 @@ impl AgentBuilder {
             cancel_token: self
                 .cancel_token
                 .unwrap_or_else(tokio_util::sync::CancellationToken::new),
+            tool_extensions: self.tool_extensions,
         })
     }
 

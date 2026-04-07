@@ -13,6 +13,7 @@ use crate::theme::Theme;
 use cersei::events::AgentEvent;
 use cersei::Agent;
 use cersei_memory::manager::MemoryManager;
+use cersei_tools::Extensions;
 use cersei_types::Role;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -127,6 +128,7 @@ pub async fn run_repl(
     session_id: &str,
     config: &AppConfig,
     memory_manager: &MemoryManager,
+    tool_extensions: &Extensions,
     json_mode: bool,
     running: Arc<AtomicBool>,
     cancel_token: CancellationToken,
@@ -177,6 +179,7 @@ pub async fn run_repl(
                                 session_id,
                                 cancel_token.clone(),
                                 Some(msgs),
+                                tool_extensions.clone(),
                             ) {
                                 Ok((new_agent, resolved)) => {
                                     agent = new_agent;
@@ -246,6 +249,7 @@ pub async fn run_repl(
                                     session_id,
                                     cancel_token.clone(),
                                     Some(msgs),
+                                    tool_extensions.clone(),
                                 ) {
                                     Ok((new_agent, resolved)) => {
                                         agent = new_agent;
@@ -294,7 +298,8 @@ pub async fn run_single_shot(
     theme: &Theme,
     session_id: &str,
     config: &AppConfig,
-    memory_manager: &MemoryManager,
+    _memory_manager: &MemoryManager,
+    _tool_extensions: &Extensions,
     json_mode: bool,
     running: Arc<AtomicBool>,
     _cancel_token: CancellationToken,

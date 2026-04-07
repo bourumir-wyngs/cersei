@@ -1,22 +1,24 @@
 //! cersei-tools: Tool trait, built-in tool implementations, and permission system.
 
-#[cfg(feature = "cas")]
-pub mod cas;
 pub mod ask_user;
 pub mod bash;
 pub mod bash_classifier;
+#[cfg(feature = "cas")]
+pub mod cas;
 pub mod config_tool;
 pub mod cron;
 pub mod file_history;
-pub mod git_utils;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
+pub mod git_utils;
 pub mod glob_tool;
 pub mod grep_tool;
+pub mod mysql_tool;
 pub mod notebook_edit;
 pub mod permissions;
 pub mod plan_mode;
+pub mod postgres_tool;
 pub mod powershell;
 pub mod remote_trigger;
 pub mod send_message;
@@ -34,6 +36,7 @@ pub mod worktree;
 use async_trait::async_trait;
 use cersei_mcp::McpManager;
 use cersei_types::*;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -152,6 +155,72 @@ pub struct ToolContext {
     pub extensions: Extensions,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    pub mysql: Option<MySqlToolConfig>,
+    pub postgresql: Option<PostgresToolConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MySqlToolConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: Option<String>,
+    pub readonly: bool,
+}
+
+impl Default for MySqlToolConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: "root".into(),
+            password: String::new(),
+            database: None,
+            readonly: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PostgresToolConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: Option<String>,
+    pub readonly: bool,
+}
+
+impl Default for PostgresToolConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".into(),
+            port: 5432,
+            user: "postgres".into(),
+            password: String::new(),
+            database: None,
+            readonly: true,
+        }
+    }
+}
+
+static GLOBAL_TOOLS_CONFIG: once_cell::sync::Lazy<parking_lot::RwLock<ToolsConfig>> =
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(ToolsConfig::default()));
+
+pub fn set_global_tools_config(config: ToolsConfig) {
+    *GLOBAL_TOOLS_CONFIG.write() = config;
+}
+
+pub fn global_tools_config() -> ToolsConfig {
+    GLOBAL_TOOLS_CONFIG.read().clone()
+}
+
 /// Type-map for injecting custom data into the tool context.
 #[derive(Clone, Default)]
 pub struct Extensions {
@@ -229,6 +298,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     tools.extend(filesystem());
     tools.extend(shell());
     tools.extend(web());
+    tools.extend(data());
     tools.extend(planning());
     tools.extend(scheduling());
     tools.extend(orchestration());
@@ -246,7 +316,16 @@ pub fn coding() -> Vec<Box<dyn Tool>> {
     tools.extend(filesystem());
     tools.extend(shell());
     tools.extend(web());
+    tools.extend(data());
     tools
+}
+
+/// Data tools: SQL/database access.
+pub fn data() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(mysql_tool::MySqlTool),
+        Box::new(postgres_tool::PostgresTool),
+    ]
 }
 
 /// File system tools: Read, Write, Edit, Glob, Grep, NotebookEdit.

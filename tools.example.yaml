@@ -1,0 +1,15 @@
+mysql:
+  host: localhost
+  port: 3307
+  user: mysql_user
+  password: change_me
+  database: app_db
+  readonly: true
+
+postgresql:
+  host: localhost
+  port: 5460
+  user: postgres_user
+  password: change_me
+  database: app_db
+  readonly: true
