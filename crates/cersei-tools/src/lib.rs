@@ -24,6 +24,7 @@ pub mod permissions;
 pub mod plan_mode;
 pub mod postgres_tool;
 pub mod powershell;
+pub mod process_tool;
 pub mod remote_trigger;
 pub mod send_message;
 pub mod skill_tool;
@@ -383,11 +384,12 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Shell tools: Bash, PowerShell.
+/// Shell tools: Bash, PowerShell, Process.
 pub fn shell() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(bash::BashTool),
         Box::new(powershell::PowerShellTool),
+        Box::new(process_tool::ProcessTool),
     ]
 }
 
