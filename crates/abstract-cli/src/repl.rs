@@ -142,9 +142,10 @@ pub async fn run_repl(
     let mut current_model = repl_config.model.clone();
 
     loop {
-        let prompt_str = "\x1b[36m> \x1b[0m";
+        let token_estimate = cersei_agent::compact::estimate_messages_tokens(&agent.messages());
+        let prompt_str = format!("\x1b[90m{token_estimate}\x1b[0m\x1b[36m> \x1b[0m");
 
-        let input = match input_reader.readline(prompt_str) {
+        let input = match input_reader.readline(&prompt_str) {
             Some(line) => line,
             None => {
                 input_reader.save_history();
@@ -170,6 +171,40 @@ pub async fn run_repl(
                         .await
                     {
                         Ok(commands::CommandAction::None) => {}
+                        Ok(commands::CommandAction::ClearHistory) => {
+                            agent.clear_messages();
+                            is_first_turn = true;
+                        }
+                        Ok(commands::CommandAction::SaveSession { name }) => {
+                            let msgs = agent.messages();
+                            match crate::sessions::save_named(&repl_config, &name, &msgs) {
+                                Ok(_) => eprintln!("\x1b[90m  Session saved as '{}'\x1b[0m", name),
+                                Err(e) => eprintln!("\x1b[31m  Save failed: {e}\x1b[0m"),
+                            }
+                        }
+                        Ok(commands::CommandAction::LoadSession { messages, session_id: loaded_id }) => {
+                            agent.clear_messages();
+                            agent.set_messages(messages);
+                            is_first_turn = true;
+                            status = StatusLine::new(theme, &repl_config.model, &loaded_id, !json_mode);
+                        }
+                        Ok(commands::CommandAction::Compact) => {
+                            let before = agent.messages().len();
+                            let before_tokens = before * 500; // rough estimate for display
+                            eprintln!("\x1b[90m  Compacting {} messages...\x1b[0m", before);
+                            match agent.compact_now().await {
+                                Ok(result) => {
+                                    eprintln!(
+                                        "\x1b[90m  Compacted: {} → {} messages (~{} tokens freed)\x1b[0m",
+                                        result.messages_before,
+                                        result.messages_after,
+                                        result.tokens_freed_estimate,
+                                    );
+                                    let _ = before_tokens; // suppress warning
+                                }
+                                Err(e) => eprintln!("\x1b[31m  Compaction failed: {e}\x1b[0m"),
+                            }
+                        }
                         Ok(commands::CommandAction::SwitchAgent { model }) => {
                             let msgs = agent.messages();
                             match app::build_agent(

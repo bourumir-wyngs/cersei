@@ -205,6 +205,30 @@ pub fn show_memory(config: &AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Save messages under a named session file.
+pub fn save_named(config: &AppConfig, name: &str, messages: &[cersei_types::Message]) -> anyhow::Result<()> {
+    use cersei_memory::session_storage;
+
+    // Reject names that would escape the sessions dir or cause fs issues
+    if name.contains('/') || name.contains('\\') || name.contains('\0') || name.is_empty() {
+        anyhow::bail!("Invalid session name: '{name}'");
+    }
+
+    let path = session_storage::transcript_path(&config.working_dir, name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut content = String::new();
+    for msg in messages {
+        let line = serde_json::to_string(msg)?;
+        content.push_str(&line);
+        content.push('\n');
+    }
+    std::fs::write(&path, content)?;
+    Ok(())
+}
+
 /// Clear all memory.
 pub fn clear_memory(config: &AppConfig) -> anyhow::Result<()> {
     let memory_dir = config.working_dir.join(".claude").join("memory");

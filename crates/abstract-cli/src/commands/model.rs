@@ -3,31 +3,54 @@ use crate::agent_filter::filter_agent_names;
 use crate::config::AppConfig;
 use cersei_provider::registry::{self, ApiFormat, ProviderEntry};
 use serde::Deserialize;
+use std::collections::HashMap;
+
+// Stores last-displayed number → "provider/model" mapping for quick selection.
+static MODEL_INDEX: std::sync::OnceLock<parking_lot::Mutex<HashMap<usize, String>>> =
+    std::sync::OnceLock::new();
+
+fn model_index() -> &'static parking_lot::Mutex<HashMap<usize, String>> {
+    MODEL_INDEX.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
 
 pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction> {
     if args.is_empty() {
         eprintln!("Current model: {}", config.model);
-        eprintln!("\x1b[90mUsage: /model <name>\x1b[0m");
+        eprintln!("\x1b[90mUsage: /model <name|number>\x1b[0m");
         eprintln!(
-            "\x1b[90mExamples: /model gpt-5.4, /model gemini-3.1-pro-preview, /model google/gemini-3-flash-preview\x1b[0m"
+            "\x1b[90mExamples: /model gpt-5.4, /model gemini-3.1-pro-preview, /model 3\x1b[0m"
         );
         eprintln!("\x1b[90mAliases: opus, sonnet, haiku, gemini\x1b[0m");
         eprintln!();
 
+        let mut new_index: HashMap<usize, String> = HashMap::new();
+        let mut counter = 1usize;
         for provider in display_providers() {
-            render_provider_models(provider, &config.model).await;
+            render_provider_models(provider, &config.model, &mut counter, &mut new_index).await;
             eprintln!();
         }
+        *model_index().lock() = new_index;
 
         return Ok(CommandAction::None);
     }
 
-    let resolved = match args.trim() {
-        "opus" => "anthropic/claude-opus-4-6".to_string(),
-        "sonnet" => "anthropic/claude-sonnet-4-6".to_string(),
-        "haiku" => "anthropic/claude-3-5-haiku-latest".to_string(),
-        "gemini" => "google/gemini-3-flash-preview".to_string(),
-        other => other.to_string(),
+    // Resolve numeric shortcut from the last listing
+    let resolved_from_index = if let Ok(n) = args.trim().parse::<usize>() {
+        model_index().lock().get(&n).cloned()
+    } else {
+        None
+    };
+
+    let resolved = if let Some(indexed) = resolved_from_index {
+        indexed
+    } else {
+        match args.trim() {
+            "opus" => "anthropic/claude-opus-4-6".to_string(),
+            "sonnet" => "anthropic/claude-sonnet-4-6".to_string(),
+            "haiku" => "anthropic/claude-3-5-haiku-latest".to_string(),
+            "gemini" => "google/gemini-3-flash-preview".to_string(),
+            other => other.to_string(),
+        }
     };
 
     let provider_id = selected_provider_id(config, &resolved);
@@ -103,11 +126,16 @@ fn selected_provider_id<'a>(config: &'a AppConfig, model: &'a str) -> &'a str {
     }
 }
 
-async fn render_provider_models(provider: &ProviderEntry, current_model: &str) {
+async fn render_provider_models(
+    provider: &ProviderEntry,
+    current_model: &str,
+    counter: &mut usize,
+    index: &mut HashMap<usize, String>,
+) {
     match fetch_models(provider).await {
         Ok(models) if !models.is_empty() => {
             eprintln!("\x1b[36;1mAvailable models ({})\x1b[0m", provider.name);
-            print_models(&models, current_model);
+            print_models(provider.id, &models, current_model, counter, index);
         }
         Ok(_) => {
             eprintln!("\x1b[33mNo models returned by {}.\x1b[0m", provider.name);
@@ -120,7 +148,7 @@ async fn render_provider_models(provider: &ProviderEntry, current_model: &str) {
             let fallback_models = fallback_models(provider);
             if !fallback_models.is_empty() {
                 eprintln!("\x1b[36;1mKnown models ({})\x1b[0m", provider.name);
-                print_models(&fallback_models, current_model);
+                print_models(provider.id, &fallback_models, current_model, counter, index);
             }
         }
     }
@@ -166,14 +194,24 @@ fn normalize_provider_model_id(provider_id: &str, model_id: &str) -> String {
     cersei_provider::router::normalize_model_name(provider_id, model_id)
 }
 
-fn print_models(models: &[String], current_model: &str) {
+fn print_models(
+    provider_id: &str,
+    models: &[String],
+    current_model: &str,
+    counter: &mut usize,
+    index: &mut HashMap<usize, String>,
+) {
     for model in models {
         let marker = if model == current_model || current_model.ends_with(&format!("/{model}")) {
             "*"
         } else {
             " "
         };
-        eprintln!("  {marker} {model}");
+        let n = *counter;
+        let qualified = format!("{provider_id}/{model}");
+        index.insert(n, qualified);
+        eprintln!("  {marker} {:2}. {model}", n);
+        *counter += 1;
     }
 }
 

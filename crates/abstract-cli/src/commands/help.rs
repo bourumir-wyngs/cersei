@@ -11,6 +11,7 @@ pub fn run() -> anyhow::Result<()> {
     eprintln!("  /config [key val] Show or set config");
     eprintln!("  /diff             Show git diff");
     eprintln!("  /resume [id]      Resume a previous session");
+    eprintln!("  /save <name>      Save current session under a named file");
     eprintln!("  /exit, /quit, /q  Exit");
     Ok(())
 }

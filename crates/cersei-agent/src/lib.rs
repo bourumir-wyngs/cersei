@@ -140,6 +140,41 @@ impl Agent {
         self.messages.lock().clone()
     }
 
+    /// Clear the conversation history.
+    pub fn clear_messages(&self) {
+        self.messages.lock().clear();
+    }
+
+    /// Replace the conversation history.
+    pub fn set_messages(&self, msgs: Vec<Message>) {
+        *self.messages.lock() = msgs;
+    }
+
+    /// Manually compact the conversation by summarizing it via an LLM call.
+    /// Returns (messages_before, messages_after, tokens_freed_estimate) on success.
+    pub async fn compact_now(&self) -> cersei_types::Result<crate::compact::CompactResult> {
+        let messages = self.messages.lock().clone();
+        let model = self.model.as_deref().unwrap_or("unknown");
+        let result = crate::compact::compact_conversation(
+            self.provider.as_ref(),
+            &messages,
+            model,
+            crate::compact::KEEP_RECENT_MESSAGES,
+            None,
+        )
+        .await?;
+
+        // Replace messages with summary + recent
+        let split_idx = messages.len().saturating_sub(crate::compact::KEEP_RECENT_MESSAGES);
+        let recent = messages[split_idx..].to_vec();
+        let summary_msg = cersei_types::Message::user(result.summary.clone());
+        let mut new_messages = vec![summary_msg];
+        new_messages.extend(recent);
+        *self.messages.lock() = new_messages;
+
+        Ok(result)
+    }
+
     /// Get cumulative usage/cost.
     pub fn usage(&self) -> Usage {
         self.cumulative_usage.lock().clone()
