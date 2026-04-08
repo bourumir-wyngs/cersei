@@ -25,7 +25,7 @@ impl Tool for NpmTool {
             "properties": {
                 "args": {
                     "type": "string",
-                    "description": "Arguments to pass to npm, e.g. \"install\", \"run build\", \"test -- --watch\""
+                    "description": "Arguments to pass to npm, e.g. \"install\", \"run build\", \"test -- --watchAll=false \""
                 },
                 "directory": {
                     "type": "string",
