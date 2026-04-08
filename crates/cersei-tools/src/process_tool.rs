@@ -1,6 +1,7 @@
 //! Process tool: start a long-running bash process and interact with its output.
 
 use super::*;
+use crate::network_policy::{shell_command, NetworkAccess};
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -69,6 +70,11 @@ impl Tool for ProcessTool {
                 "workdir": {
                     "type": "string",
                     "description": "Optional subdirectory (relative to the working root) in which to start the process. Must not escape the root directory."
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["none", "full"],
+                    "description": "Network access for the process (only applies to 'start'). Default: none (sandboxed, no network). Use 'full' when the process needs external network access."
                 }
             },
             "required": ["action"]
@@ -82,6 +88,7 @@ impl Tool for ProcessTool {
             command: Option<String>,
             tail: Option<usize>,
             workdir: Option<String>,
+            network: Option<String>,
         }
 
         let input: Input = match serde_json::from_value(input) {
@@ -95,7 +102,8 @@ impl Tool for ProcessTool {
                     Some(c) => c,
                     None => return ToolResult::error("'command' is required for 'start' action"),
                 };
-                start_process(&ctx.session_id, &command, input.workdir.as_deref(), ctx).await
+                let requested = NetworkAccess::from_input(input.network.as_deref());
+                start_process(&ctx.session_id, &command, input.workdir.as_deref(), requested, ctx).await
             }
             "output" => {
                 let tail = input.tail.unwrap_or(DEFAULT_TAIL).min(RING_BUFFER_SIZE);
@@ -110,7 +118,7 @@ impl Tool for ProcessTool {
 
 // ─── Action implementations ──────────────────────────────────────────────────
 
-async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, ctx: &ToolContext) -> ToolResult {
+async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, requested: NetworkAccess, ctx: &ToolContext) -> ToolResult {
     if PROCESS_REGISTRY.contains_key(session_id) {
         return ToolResult::error(
             "A process is already running for this session. Kill it first with action 'kill'.",
@@ -148,9 +156,13 @@ async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, c
         base_cwd
     };
 
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.args(["-c", command])
-        .current_dir(&cwd)
+    let access = match ctx.network_policy {
+        Some(ref policy) => policy.check("Process", command, requested).await,
+        None => requested,
+    };
+
+    let mut cmd = shell_command(command, access);
+    cmd.current_dir(&cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

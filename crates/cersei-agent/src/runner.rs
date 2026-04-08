@@ -179,6 +179,7 @@ pub async fn run_agent_streaming(
         cost_tracker: Arc::clone(&agent.cost_tracker),
         mcp_manager: agent.mcp_manager.clone(),
         extensions: agent.tool_extensions.clone(),
+        network_policy: agent.network_policy.clone(),
     };
 
     // Agentic loop

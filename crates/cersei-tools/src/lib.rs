@@ -19,6 +19,7 @@ pub mod glob_tool;
 pub mod grep_tool;
 pub mod list_directory;
 pub mod mysql_tool;
+pub mod network_policy;
 pub mod npm_tool;
 pub mod npx_tool;
 pub mod notebook_edit;
@@ -160,6 +161,9 @@ pub struct ToolContext {
     pub cost_tracker: Arc<CostTracker>,
     pub mcp_manager: Option<Arc<McpManager>>,
     pub extensions: Extensions,
+    /// Optional network policy. `None` = allow all (default, backward-compatible).
+    /// Set to a [`NetworkPolicy`] impl to sandbox outbound network in shell tools.
+    pub network_policy: Option<Arc<dyn network_policy::NetworkPolicy>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

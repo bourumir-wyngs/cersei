@@ -1,6 +1,7 @@
 //! Application state, agent construction, and lifecycle management.
 
 use crate::config::AppConfig;
+use crate::network_policy::CliNetworkPolicy;
 use crate::permissions::CliPermissionPolicy;
 use crate::prompt;
 use crate::repl;
@@ -141,7 +142,9 @@ pub fn build_agent(
     if config.permissions_mode == "allow_all" {
         builder = builder.permission_policy(AllowAll);
     } else {
-        builder = builder.permission_policy(CliPermissionPolicy::new());
+        builder = builder
+            .permission_policy(CliPermissionPolicy::new())
+            .network_policy(CliNetworkPolicy::new());
     }
 
     // Effort level

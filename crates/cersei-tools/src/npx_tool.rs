@@ -1,6 +1,7 @@
 //! Npx tool: run npx commands.
 
 use super::*;
+use crate::network_policy::{shell_command, NetworkAccess};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -35,6 +36,11 @@ impl Tool for NpxTool {
                 "timeout": {
                     "type": "integer",
                     "description": "Optional timeout in milliseconds (max 600000)"
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["none", "full"],
+                    "description": "Network access required. Default: none (sandboxed, no network). Use 'full' when npx needs to download packages."
                 }
             },
             "required": ["args"]
@@ -47,6 +53,7 @@ impl Tool for NpxTool {
             args: String,
             directory: Option<String>,
             timeout: Option<u64>,
+            network: Option<String>,
         }
 
         let input: Input = match serde_json::from_value(input) {
@@ -85,9 +92,14 @@ impl Tool for NpxTool {
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
         let command = format!("npx --yes {}", input.args);
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.args(["-c", &command])
-            .current_dir(&cwd)
+        let requested = NetworkAccess::from_input(input.network.as_deref());
+        let access = match ctx.network_policy {
+            Some(ref policy) => policy.check(self.name(), &command, requested).await,
+            None => requested,
+        };
+
+        let mut cmd = shell_command(&command, access);
+        cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

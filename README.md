@@ -19,3 +19,32 @@ You can brief the AI on startup using instruction files placed in the working di
 - **`.abstract/instructions.md`** — Project-specific instructions for this tool. Run `cersei init` to create a template. Suitable for tool-specific preferences and constraints.
 
 Both files are injected into the system prompt as cached sections, so they are available throughout the session without consuming repeated token budget.
+
+## Network Sandboxing
+
+Shell tools (Bash, Npm, Npx, Cargo, Process) run with network access **disabled by default**. The AI must explicitly request network access by setting `network: "full"` in the tool input, which triggers a user approval prompt.
+
+Sandboxing is implemented via [firejail](https://firejail.wordpress.com/). Install it with:
+
+```bash
+sudo apt install firejail
+```
+
+When firejail is available, commands that don't request network run under `firejail --net=none`, blocking all outbound connections. When firejail is not installed, commands run unsandboxed (a warning is shown once).
+
+### User approval prompt
+
+When the AI requests `network: "full"`, you will see:
+
+```
+  Network access: Npm
+  npm install react
+  [Y]es  [N]o  [S]ession  [A]lways
+```
+
+- **Y** / Enter — allow network for this invocation
+- **N** — block network (run sandboxed)
+- **S** — allow for the rest of the session
+- **A** — always allow for this tool
+
+Pass `--no-permissions` to skip all prompts and allow everything (CI/headless mode).

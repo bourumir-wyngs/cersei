@@ -1,6 +1,7 @@
 //! Bash tool: execute shell commands.
 
 use super::*;
+use crate::network_policy::{shell_command, NetworkAccess};
 use serde::Deserialize;
 use std::process::Stdio;
 
@@ -28,6 +29,11 @@ impl Tool for BashTool {
                 "timeout": {
                     "type": "integer",
                     "description": "Optional timeout in milliseconds (max 600000)"
+                },
+                "network": {
+                    "type": "string",
+                    "enum": ["none", "full"],
+                    "description": "Network access required. Default: none (sandboxed, no network). Use 'full' when the command needs external network access."
                 }
             },
             "required": ["command"]
@@ -39,6 +45,7 @@ impl Tool for BashTool {
         struct Input {
             command: String,
             timeout: Option<u64>,
+            network: Option<String>,
         }
 
         let input: Input = match serde_json::from_value(input) {
@@ -57,9 +64,14 @@ impl Tool for BashTool {
 
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.args(["-c", &input.command])
-            .current_dir(&cwd)
+        let requested = NetworkAccess::from_input(input.network.as_deref());
+        let access = match ctx.network_policy {
+            Some(ref policy) => policy.check(self.name(), &input.command, requested).await,
+            None => requested,
+        };
+
+        let mut cmd = shell_command(&input.command, access);
+        cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

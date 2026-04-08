@@ -21,6 +21,7 @@ use cersei_hooks::Hook;
 use cersei_memory::Memory;
 use cersei_mcp::McpServerConfig;
 use cersei_provider::Provider;
+use cersei_tools::network_policy::NetworkPolicy;
 use cersei_tools::permissions::{AllowAll, PermissionPolicy};
 use cersei_tools::{CostTracker, Extensions, Tool};
 use cersei_types::*;
@@ -76,6 +77,7 @@ pub struct Agent {
     thinking_budget: Option<u32>,
     working_dir: PathBuf,
     permission_policy: Arc<dyn PermissionPolicy>,
+    network_policy: Option<Arc<dyn NetworkPolicy>>,
     memory: Option<Arc<dyn Memory>>,
     session_id: Option<String>,
     hooks: Vec<Arc<dyn Hook>>,
@@ -275,6 +277,7 @@ pub struct AgentBuilder {
     thinking_budget: Option<u32>,
     working_dir: Option<PathBuf>,
     permission_policy: Option<Arc<dyn PermissionPolicy>>,
+    network_policy: Option<Arc<dyn NetworkPolicy>>,
     memory: Option<Arc<dyn Memory>>,
     session_id: Option<String>,
     hooks: Vec<Arc<dyn Hook>>,
@@ -305,6 +308,7 @@ impl Default for AgentBuilder {
             thinking_budget: None,
             working_dir: None,
             permission_policy: None,
+            network_policy: None,
             memory: None,
             session_id: None,
             hooks: Vec::new(),
@@ -381,6 +385,11 @@ impl AgentBuilder {
 
     pub fn permission_policy(mut self, p: impl PermissionPolicy + 'static) -> Self {
         self.permission_policy = Some(Arc::new(p));
+        self
+    }
+
+    pub fn network_policy(mut self, p: impl NetworkPolicy + 'static) -> Self {
+        self.network_policy = Some(Arc::new(p));
         self
     }
 
@@ -486,6 +495,7 @@ impl AgentBuilder {
             permission_policy: self
                 .permission_policy
                 .unwrap_or_else(|| Arc::new(AllowAll)),
+            network_policy: self.network_policy,
             memory: self.memory,
             session_id: self.session_id,
             hooks: self.hooks,
