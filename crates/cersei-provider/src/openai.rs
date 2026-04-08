@@ -83,6 +83,19 @@ impl Provider for OpenAi {
             }));
         }
 
+        // Build a map of tool_use_id → tool name for tool result messages.
+        // Gemini requires the function name on tool result (function_response) entries.
+        let mut tool_id_to_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for msg in &request.messages {
+            if let MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        tool_id_to_name.insert(id.clone(), name.clone());
+                    }
+                }
+            }
+        }
+
         for msg in &request.messages {
             match msg.role {
                 Role::User => {
@@ -95,11 +108,16 @@ impl Provider for OpenAi {
                                 is_error,
                             } = block
                             {
-                                api_messages.push(serde_json::json!({
+                                let mut result = serde_json::json!({
                                     "role": "tool",
                                     "tool_call_id": tool_use_id,
                                     "content": content,
-                                }));
+                                });
+                                // Gemini requires function name on tool results
+                                if let Some(name) = tool_id_to_name.get(tool_use_id) {
+                                    result["name"] = serde_json::json!(name);
+                                }
+                                api_messages.push(result);
                             }
                         }
                         // Also include any text blocks as a user message

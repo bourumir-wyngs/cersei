@@ -20,6 +20,7 @@ pub mod grep_tool;
 pub mod list_directory;
 pub mod mysql_tool;
 pub mod npm_tool;
+pub mod npx_tool;
 pub mod notebook_edit;
 pub mod permissions;
 pub mod plan_mode;
@@ -400,6 +401,7 @@ pub fn shell() -> Vec<Box<dyn Tool>> {
 pub fn package_managers() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(npm_tool::NpmTool),
+        Box::new(npx_tool::NpxTool),
         Box::new(cargo_tool::CargoTool),
     ]
 }
