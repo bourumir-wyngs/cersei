@@ -30,6 +30,9 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: Value,
+        /// Gemini thought signature — must be echoed back verbatim in the next request.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -301,6 +304,8 @@ pub enum StreamEvent {
         /// For tool_use blocks: the tool name. Default: None.
         #[allow(unused)]
         name: Option<String>,
+        /// Gemini thought signature attached to this tool call.
+        thought_signature: Option<String>,
     },
     TextDelta {
         index: usize,

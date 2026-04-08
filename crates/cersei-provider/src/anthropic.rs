@@ -315,6 +315,7 @@ fn parse_sse_event(raw: &str) -> Option<StreamEvent> {
                 block_type,
                 id: json["content_block"]["id"].as_str().map(String::from),
                 name: json["content_block"]["name"].as_str().map(String::from),
+                thought_signature: None,
             })
         }
         "content_block_delta" => {

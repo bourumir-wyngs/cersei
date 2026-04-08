@@ -138,15 +138,19 @@ impl Provider for OpenAi {
                             let tool_calls: Vec<serde_json::Value> = tool_uses
                                 .iter()
                                 .map(|b| {
-                                    if let ContentBlock::ToolUse { id, name, input } = b {
-                                        serde_json::json!({
+                                    if let ContentBlock::ToolUse { id, name, input, thought_signature } = b {
+                                        let mut tc = serde_json::json!({
                                             "id": id,
                                             "type": "function",
                                             "function": {
                                                 "name": name,
                                                 "arguments": input.to_string(),
                                             }
-                                        })
+                                        });
+                                        if let Some(sig) = thought_signature {
+                                            tc["thought_signature"] = serde_json::json!(sig);
+                                        }
+                                        tc
                                     } else {
                                         serde_json::json!({})
                                     }
@@ -270,8 +274,9 @@ impl Provider for OpenAi {
                     // Track tool calls being assembled across chunks
                     // OpenAI sends: tool_calls[i].id, tool_calls[i].function.name (first chunk)
                     //               tool_calls[i].function.arguments (subsequent chunks, accumulated)
-                    let mut tool_calls: std::collections::HashMap<usize, (String, String, String)> =
-                        std::collections::HashMap::new(); // index -> (id, name, args_json)
+                    // index -> (id, name, args_json, thought_signature)
+                    let mut tool_calls: std::collections::HashMap<usize, (String, String, String, Option<String>)> =
+                        std::collections::HashMap::new();
                     let mut has_tool_calls = false;
 
                     while let Some(chunk) = stream.next().await {
@@ -286,7 +291,7 @@ impl Provider for OpenAi {
                                         let data = data.trim();
                                         if data == "[DONE]" {
                                             // Emit accumulated tool calls
-                                            for (idx, (id, name, args)) in &tool_calls {
+                                            for (idx, (id, name, args, sig)) in &tool_calls {
                                                 let input: serde_json::Value =
                                                     serde_json::from_str(args)
                                                         .unwrap_or(serde_json::Value::Null);
@@ -296,6 +301,7 @@ impl Provider for OpenAi {
                                                         block_type: "tool_use".into(),
                                                         id: Some(id.clone()),
                                                         name: Some(name.clone()),
+                                                        thought_signature: sig.clone(),
                                                     })
                                                     .await;
                                                 // Send full args as InputJsonDelta
@@ -354,6 +360,7 @@ impl Provider for OpenAi {
                                                             block_type: "text".into(),
                                                             id: None,
                                                             name: None,
+                                                            thought_signature: None,
                                                         })
                                                         .await;
                                                 }
@@ -378,6 +385,7 @@ impl Provider for OpenAi {
                                                                 String::new(),
                                                                 String::new(),
                                                                 String::new(),
+                                                                None,
                                                             )
                                                         });
 
@@ -395,6 +403,10 @@ impl Provider for OpenAi {
                                                         tc["function"]["arguments"].as_str()
                                                     {
                                                         entry.2.push_str(args);
+                                                    }
+                                                    // Gemini thought_signature (single chunk)
+                                                    if let Some(sig) = tc["thought_signature"].as_str() {
+                                                        entry.3 = Some(sig.to_string());
                                                     }
                                                 }
                                             }
@@ -605,11 +617,15 @@ impl OpenAi {
                                                                 .as_str()
                                                                 .unwrap_or_default()
                                                                 .to_string();
+                                                            let thought_signature = item["thought_signature"]
+                                                                .as_str()
+                                                                .map(|s| s.to_string());
                                                             let _ = tx.send(StreamEvent::ContentBlockStart {
                                                                 index,
                                                                 block_type: "tool_use".into(),
                                                                 id: Some(id),
                                                                 name: Some(name),
+                                                                thought_signature,
                                                             }).await;
                                                         }
                                                         "message" => {
@@ -619,6 +635,7 @@ impl OpenAi {
                                                                 block_type: "text".into(),
                                                                 id: None,
                                                                 name: None,
+                                                                thought_signature: None,
                                                             }).await;
                                                         }
                                                         _ => {}
@@ -636,6 +653,7 @@ impl OpenAi {
                                                                 block_type: "text".into(),
                                                                 id: None,
                                                                 name: None,
+                                                                thought_signature: None,
                                                             })
                                                             .await;
                                                     }
@@ -784,13 +802,18 @@ fn build_responses_input(messages: &[Message]) -> Vec<serde_json::Value> {
                             id,
                             name,
                             input: tool_input,
+                            thought_signature,
                         } => {
-                            input.push(serde_json::json!({
+                            let mut fc = serde_json::json!({
                                 "type": "function_call",
                                 "call_id": id,
                                 "name": name,
                                 "arguments": tool_input.to_string(),
-                            }));
+                            });
+                            if let Some(sig) = thought_signature {
+                                fc["thought_signature"] = serde_json::json!(sig);
+                            }
+                            input.push(fc);
                         }
                         ContentBlock::ToolResult {
                             tool_use_id,

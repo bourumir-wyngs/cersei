@@ -12,6 +12,7 @@ pub struct StreamAccumulator {
     block_types: HashMap<usize, String>,
     tool_use_ids: HashMap<usize, String>,
     tool_use_names: HashMap<usize, String>,
+    tool_thought_signatures: HashMap<usize, String>,
     stop_reason: Option<StopReason>,
     usage: Usage,
     model: Option<String>,
@@ -28,6 +29,7 @@ impl StreamAccumulator {
             block_types: HashMap::new(),
             tool_use_ids: HashMap::new(),
             tool_use_names: HashMap::new(),
+            tool_thought_signatures: HashMap::new(),
             stop_reason: None,
             usage: Usage::default(),
             model: None,
@@ -41,13 +43,16 @@ impl StreamAccumulator {
                 self.message_id = Some(id);
                 self.model = Some(model);
             }
-            StreamEvent::ContentBlockStart { index, block_type, id, name } => {
+            StreamEvent::ContentBlockStart { index, block_type, id, name, thought_signature } => {
                 self.block_types.insert(index, block_type);
                 if let Some(id) = id {
                     self.tool_use_ids.insert(index, id);
                 }
                 if let Some(name) = name {
                     self.tool_use_names.insert(index, name);
+                }
+                if let Some(sig) = thought_signature {
+                    self.tool_thought_signatures.insert(index, sig);
                 }
             }
             StreamEvent::TextDelta { index, text } => {
@@ -81,6 +86,7 @@ impl StreamAccumulator {
                             id: self.tool_use_ids.remove(&index).unwrap_or_default(),
                             name: self.tool_use_names.remove(&index).unwrap_or_default(),
                             input,
+                            thought_signature: self.tool_thought_signatures.remove(&index),
                         }
                     }
                     "thinking" => ContentBlock::Thinking {

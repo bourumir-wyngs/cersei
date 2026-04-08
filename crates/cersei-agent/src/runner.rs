@@ -302,7 +302,7 @@ pub async fn run_agent_streaming(
                     .content_blocks()
                     .into_iter()
                     .filter_map(|b| {
-                        if let ContentBlock::ToolUse { id, name, input } = b {
+                        if let ContentBlock::ToolUse { id, name, input, .. } = b {
                             Some((id, name, input))
                         } else {
                             None
