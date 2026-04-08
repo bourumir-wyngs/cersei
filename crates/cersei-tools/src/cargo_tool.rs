@@ -2,6 +2,7 @@
 
 use super::*;
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Stdio;
 
 pub struct CargoTool;
@@ -26,6 +27,10 @@ impl Tool for CargoTool {
                     "type": "string",
                     "description": "Arguments to pass to cargo, e.g. \"build --release\", \"test\", \"clippy -- -D warnings\""
                 },
+                "directory": {
+                    "type": "string",
+                    "description": "Optional subdirectory (relative to the working root) in which to run the command. Must not escape the root directory."
+                },
                 "timeout": {
                     "type": "integer",
                     "description": "Optional timeout in milliseconds (max 600000)"
@@ -39,6 +44,7 @@ impl Tool for CargoTool {
         #[derive(Deserialize)]
         struct Input {
             args: String,
+            directory: Option<String>,
             timeout: Option<u64>,
         }
 
@@ -48,9 +54,31 @@ impl Tool for CargoTool {
         };
 
         let shell_state = session_shell_state(&ctx.session_id);
-        let cwd = {
+        let base_cwd = {
             let state = shell_state.lock();
             state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
+        };
+
+        let cwd = if let Some(dir) = input.directory {
+            let candidate = PathBuf::from(&base_cwd).join(&dir);
+            let canonical_root = match ctx.working_dir.canonicalize() {
+                Ok(p) => p,
+                Err(e) => return ToolResult::error(format!("Cannot resolve working root: {}", e)),
+            };
+            let canonical_candidate = match candidate.canonicalize() {
+                Ok(p) => p,
+                Err(e) => return ToolResult::error(format!("Cannot resolve directory '{}': {}", dir, e)),
+            };
+            if !canonical_candidate.starts_with(&canonical_root) {
+                return ToolResult::error(format!(
+                    "Directory '{}' is outside the allowed root '{}'",
+                    dir,
+                    canonical_root.display()
+                ));
+            }
+            canonical_candidate
+        } else {
+            base_cwd
         };
 
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
