@@ -21,7 +21,8 @@ impl Tool for GrepTool {
                 "path": { "type": "string", "description": "File or directory to search in" },
                 "glob": { "type": "string", "description": "Glob pattern to include files (e.g. '*.rs')" },
                 "exclude": { "type": "string", "description": "Glob pattern to exclude files (e.g. '*.min.js')" },
-                "exclude_dir": { "type": "string", "description": "Directory name to exclude (e.g. 'node_modules'). Can be comma-separated for multiple." }
+                "exclude_dir": { "type": "string", "description": "Directory name to exclude (e.g. 'node_modules'). Can be comma-separated for multiple." },
+                "limit": { "type": "integer", "description": "Maximum number of output lines to return (default 256). If more lines match, a truncation notice is appended." }
             },
             "required": ["pattern"]
         })
@@ -35,6 +36,7 @@ impl Tool for GrepTool {
             glob: Option<String>,
             exclude: Option<String>,
             exclude_dir: Option<String>,
+            limit: Option<usize>,
         }
 
         let input: Input = match serde_json::from_value(input) {
@@ -88,13 +90,24 @@ impl Tool for GrepTool {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+        let limit = input.limit.unwrap_or(256);
+
         match cmd.output().await {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if stdout.trim().is_empty() {
                     ToolResult::success("No matches found.")
                 } else {
-                    ToolResult::success(stdout.to_string())
+                    let lines: Vec<&str> = stdout.lines().collect();
+                    if lines.len() <= limit {
+                        ToolResult::success(stdout.to_string())
+                    } else {
+                        let truncated = lines[..limit].join("\n");
+                        ToolResult::success(format!(
+                            "{}\n\n[more lines found, capped to {}]",
+                            truncated, limit
+                        ))
+                    }
                 }
             }
             Err(e) => ToolResult::error(format!("Search failed: {}", e)),
