@@ -19,7 +19,9 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": { "type": "string", "description": "Regex pattern to search for" },
                 "path": { "type": "string", "description": "File or directory to search in" },
-                "glob": { "type": "string", "description": "Glob pattern to filter files" }
+                "glob": { "type": "string", "description": "Glob pattern to include files (e.g. '*.rs')" },
+                "exclude": { "type": "string", "description": "Glob pattern to exclude files (e.g. '*.min.js')" },
+                "exclude_dir": { "type": "string", "description": "Directory name to exclude (e.g. 'node_modules'). Can be comma-separated for multiple." }
             },
             "required": ["pattern"]
         })
@@ -31,6 +33,8 @@ impl Tool for GrepTool {
             pattern: String,
             path: Option<String>,
             glob: Option<String>,
+            exclude: Option<String>,
+            exclude_dir: Option<String>,
         }
 
         let input: Input = match serde_json::from_value(input) {
@@ -51,11 +55,33 @@ impl Tool for GrepTool {
             if let Some(g) = &input.glob {
                 c.args(["--glob", g]);
             }
+            if let Some(ex) = &input.exclude {
+                c.args(["--glob", &format!("!{}", ex)]);
+            }
+            if let Some(dirs) = &input.exclude_dir {
+                for dir in dirs.split(',') {
+                    let dir = dir.trim();
+                    if !dir.is_empty() {
+                        c.args(["--glob", &format!("!{}/**", dir)]);
+                    }
+                }
+            }
             c.args(["--max-count", "250"]);
             c
         } else {
             let mut c = tokio::process::Command::new("grep");
             c.args(["-rn", &input.pattern, &search_path]);
+            if let Some(ex) = &input.exclude {
+                c.args([&format!("--exclude={}", ex)]);
+            }
+            if let Some(dirs) = &input.exclude_dir {
+                for dir in dirs.split(',') {
+                    let dir = dir.trim();
+                    if !dir.is_empty() {
+                        c.args([&format!("--exclude-dir={}", dir)]);
+                    }
+                }
+            }
             c.args(["--max-count=250"]);
             c
         };

@@ -5,17 +5,11 @@ use std::path::PathBuf;
 
 /// Get the sessions directory for the current project.
 fn sessions_dir(config: &AppConfig) -> PathBuf {
-    let sanitized = sanitize_path(&config.working_dir.display().to_string());
+    let sanitized = cersei_memory::memdir::sanitize_path_component(
+        &config.working_dir.display().to_string(),
+    );
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".claude").join("projects").join(sanitized)
-}
-
-fn sanitize_path(path: &str) -> String {
-    path.replace('/', "-")
-        .replace('\\', "-")
-        .replace(':', "-")
-        .trim_matches('-')
-        .to_string()
 }
 
 /// List all sessions for the current project.

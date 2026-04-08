@@ -15,6 +15,7 @@ mod runner;
 
 // Re-export runner utilities
 pub use runner::apply_tool_result_budget;
+pub use runner::strip_thinking_blocks;
 
 use cersei_hooks::Hook;
 use cersei_memory::Memory;
@@ -155,17 +156,25 @@ impl Agent {
     pub async fn compact_now(&self) -> cersei_types::Result<crate::compact::CompactResult> {
         let messages = self.messages.lock().clone();
         let model = self.model.as_deref().unwrap_or("unknown");
+
+        // When fewer messages than keep_recent, summarize everything (keep 0 recent).
+        let keep = if messages.len() <= crate::compact::KEEP_RECENT_MESSAGES {
+            0
+        } else {
+            crate::compact::KEEP_RECENT_MESSAGES
+        };
+
         let result = crate::compact::compact_conversation(
             self.provider.as_ref(),
             &messages,
             model,
-            crate::compact::KEEP_RECENT_MESSAGES,
+            keep,
             None,
         )
         .await?;
 
         // Replace messages with summary + recent
-        let split_idx = messages.len().saturating_sub(crate::compact::KEEP_RECENT_MESSAGES);
+        let split_idx = messages.len().saturating_sub(keep);
         let recent = messages[split_idx..].to_vec();
         let summary_msg = cersei_types::Message::user(result.summary.clone());
         let mut new_messages = vec![summary_msg];

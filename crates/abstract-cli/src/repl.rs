@@ -142,8 +142,14 @@ pub async fn run_repl(
     let mut current_model = repl_config.model.clone();
 
     loop {
-        let token_estimate = cersei_agent::compact::estimate_messages_tokens(&agent.messages());
-        let prompt_str = format!("\x1b[90m{token_estimate}\x1b[0m\x1b[36m> \x1b[0m");
+        // Prefer API-reported input tokens (exact); fall back to rough estimate before first turn
+        let usage = agent.usage();
+        let token_count = if usage.input_tokens > 0 {
+            usage.input_tokens
+        } else {
+            cersei_agent::compact::estimate_messages_tokens(&agent.messages())
+        };
+        let prompt_str = format!("\x1b[90m{token_count}\x1b[0m\x1b[36m> \x1b[0m");
 
         let input = match input_reader.readline(&prompt_str) {
             Some(line) => line,

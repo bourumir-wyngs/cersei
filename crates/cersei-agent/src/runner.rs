@@ -11,6 +11,34 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+// ─── Thinking block stripping ────────────────────────────────────────────────
+
+/// Remove Thinking and RedactedThinking blocks from loaded session history.
+///
+/// Extended thinking content can be very large and is not needed when resuming
+/// a session — the assistant's final text and tool calls provide sufficient
+/// context. Stripping them prevents context window overflow on resume.
+pub fn strip_thinking_blocks(messages: Vec<Message>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            if let MessageContent::Blocks(blocks) = msg.content {
+                let filtered: Vec<ContentBlock> = blocks
+                    .into_iter()
+                    .filter(|b| {
+                        !matches!(
+                            b,
+                            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. }
+                        )
+                    })
+                    .collect();
+                msg.content = MessageContent::Blocks(filtered);
+            }
+            msg
+        })
+        .collect()
+}
+
 // ─── Tool result budget ──────────────────────────────────────────────────────
 
 /// Truncate oldest tool results when cumulative size exceeds budget.
@@ -114,7 +142,7 @@ pub async fn run_agent_streaming(
     // Load session history (skip if messages were pre-populated via with_messages)
     if agent.messages.lock().is_empty() {
         if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
-            let history = memory.load(session_id).await?;
+            let history = strip_thinking_blocks(memory.load(session_id).await?);
             if !history.is_empty() {
                 let count = history.len();
                 agent.messages.lock().extend(history);
@@ -168,6 +196,12 @@ pub async fn run_agent_streaming(
         let _ = event_tx.send(AgentEvent::TurnStart { turn }).await;
         agent.emit(AgentEvent::TurnStart { turn });
 
+        // Apply tool result budget before sending
+        {
+            let mut msgs = agent.messages.lock();
+            apply_tool_result_budget(&mut msgs, agent.tool_result_budget);
+        }
+
         // Build completion request
         let messages = agent.messages.lock().clone();
         let tool_defs: Vec<ToolDefinition> = agent.tools.iter().map(|t| t.to_definition()).collect();
@@ -193,11 +227,48 @@ pub async fn run_agent_streaming(
             options,
         };
 
+        // Debug: print request when CERSEI_DEBUG_REQUEST is set
+        if std::env::var("CERSEI_DEBUG_REQUEST").is_ok() {
+            eprintln!("\n\x1b[90m─── REQUEST (turn {}) ───────────────────────────────\x1b[0m", turn);
+            eprintln!("\x1b[90mModel: {}\x1b[0m", request.model);
+            let sys_chars = request.system.as_deref().map(|s| s.len()).unwrap_or(0);
+            eprintln!("\x1b[90mSystem prompt: {} chars (~{} tokens)\x1b[0m", sys_chars, sys_chars / 4);
+            let tools_json = serde_json::to_string(&request.tools).unwrap_or_default();
+            eprintln!("\x1b[90mTools: {} ({} chars, ~{} tokens)\x1b[0m",
+                request.tools.len(), tools_json.len(), tools_json.len() / 4);
+            eprintln!("\x1b[90mMessages: {}\x1b[0m", request.messages.len());
+            let mut msg_total_chars = 0usize;
+            for (i, msg) in request.messages.iter().enumerate() {
+                let full = serde_json::to_string(&msg.content).unwrap_or_default();
+                msg_total_chars += full.len();
+                let preview_src = msg.get_all_text();
+                let preview_src = if preview_src.trim().is_empty() { &full } else { &preview_src };
+                let preview: String = preview_src.chars().take(100).collect();
+                let ellipsis = if preview_src.len() > 100 { "…" } else { "" };
+                eprintln!("\x1b[90m  [{}] {:?} ({} chars): {}{}\x1b[0m",
+                    i, msg.role, full.len(), preview, ellipsis);
+            }
+            let total_chars = sys_chars + tools_json.len() + msg_total_chars;
+            eprintln!("\x1b[90mTotal: ~{} tokens (sys={} tools={} msgs={})\x1b[0m",
+                total_chars / 4, sys_chars / 4, tools_json.len() / 4, msg_total_chars / 4);
+            eprintln!("\x1b[90m─────────────────────────────────────────────────────\x1b[0m\n");
+        }
+
+        // Use last known input token count from API, fall back to rough estimate
+        let token_estimate = {
+            let usage = agent.cumulative_usage.lock().clone();
+            if usage.input_tokens > 0 {
+                usage.input_tokens
+            } else {
+                crate::compact::estimate_messages_tokens(&messages)
+            }
+        };
+
         let _ = event_tx
             .send(AgentEvent::ModelRequestStart {
                 turn,
                 message_count: messages.len(),
-                token_estimate: 0,
+                token_estimate,
             })
             .await;
 
@@ -407,9 +478,22 @@ pub async fn run_agent_streaming(
                         duration,
                     });
 
+                    // Cap individual tool result size to avoid single-result context overflow.
+                    // ~150k chars ≈ ~37k tokens, leaving room for system prompt + messages.
+                    const MAX_TOOL_RESULT_CHARS: usize = 150_000;
+                    let content_text = if result.content.len() > MAX_TOOL_RESULT_CHARS {
+                        let truncated = &result.content[..MAX_TOOL_RESULT_CHARS];
+                        format!(
+                            "{}\n\n[...truncated: {} chars omitted]",
+                            truncated,
+                            result.content.len() - MAX_TOOL_RESULT_CHARS
+                        )
+                    } else {
+                        result.content
+                    };
                     result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: tool_id,
-                        content: ToolResultContent::Text(result.content),
+                        content: ToolResultContent::Text(content_text),
                         is_error: Some(result.is_error),
                     });
                 }
