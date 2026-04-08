@@ -12,6 +12,7 @@ pub fn run() -> anyhow::Result<()> {
     eprintln!("  /diff             Show git diff");
     eprintln!("  /resume [id]      Resume a previous session");
     eprintln!("  /save <name>      Save current session under a named file");
+    eprintln!("  /delete, /del     Delete a session by id");
     eprintln!("  /exit, /quit, /q  Exit");
     Ok(())
 }

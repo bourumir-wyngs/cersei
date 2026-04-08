@@ -345,7 +345,8 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     tools.extend(scheduling());
     tools.extend(orchestration());
     tools.push(Box::new(ask_user::AskUserQuestionTool));
-    tools.push(Box::new(synthetic_output::SyntheticOutputTool));
+    // SyntheticOutput is intentionally excluded from the default set — it's for SDK/coordinator
+    // sessions only. Add it explicitly via AgentBuilder::tool() when needed.
     tools.push(Box::new(config_tool::ConfigTool));
     #[cfg(feature = "cas")]
     tools.extend(math());

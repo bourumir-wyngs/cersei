@@ -87,8 +87,13 @@ pub fn estimate_tokens(text: &str) -> u64 {
 }
 
 /// Estimate tokens for a list of messages.
+/// Uses JSON serialization to capture all block types (ToolResult, ToolUse, etc.),
+/// not just plain text content.
 pub fn estimate_messages_tokens(messages: &[Message]) -> u64 {
-    messages.iter().map(|m| estimate_tokens(&m.get_all_text())).sum()
+    messages.iter().map(|m| {
+        let json = serde_json::to_string(m).unwrap_or_default();
+        estimate_tokens(&json)
+    }).sum()
 }
 
 /// Get context window size for a model.

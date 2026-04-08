@@ -81,7 +81,7 @@ impl StreamAccumulator {
                     },
                     "tool_use" => {
                         let json_str = self.partial_json.remove(&index).unwrap_or_default();
-                        let input = serde_json::from_str(&json_str).unwrap_or(serde_json::Value::Null);
+                        let input = serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}));
                         ContentBlock::ToolUse {
                             id: self.tool_use_ids.remove(&index).unwrap_or_default(),
                             name: self.tool_use_names.remove(&index).unwrap_or_default(),

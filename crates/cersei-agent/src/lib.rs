@@ -181,6 +181,9 @@ impl Agent {
         new_messages.extend(recent);
         *self.messages.lock() = new_messages;
 
+        // Reset cumulative usage so the prompt token count reflects the compacted context.
+        *self.cumulative_usage.lock() = Usage::default();
+
         Ok(result)
     }
 

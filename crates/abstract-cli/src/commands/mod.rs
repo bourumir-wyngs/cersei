@@ -50,6 +50,15 @@ impl CommandRegistry {
             "config" | "cfg" => config_cmd::run(args, config).map(|_| CommandAction::None),
             "diff" => diff::run(config).map(|_| CommandAction::None),
             "resume" => resume::run(args, config),
+            "delete" | "del" => {
+                if args.trim().is_empty() {
+                    eprintln!("\x1b[33mUsage: /delete <session-id>\x1b[0m");
+                    Ok(CommandAction::None)
+                } else {
+                    crate::sessions::delete(config, args.trim())
+                        .map(|_| CommandAction::None)
+                }
+            }
             "save" => Ok(if args.trim().is_empty() {
                 eprintln!("\x1b[33mUsage: /save <name>\x1b[0m");
                 CommandAction::None

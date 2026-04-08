@@ -213,13 +213,31 @@ pub fn save_named(config: &AppConfig, name: &str, messages: &[cersei_types::Mess
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut content = String::new();
+    // Overwrite the file (truncate first)
+    std::fs::write(&path, "")?;
+
+    let cwd = config.working_dir.display().to_string();
+    let mut last_user_uuid: Option<String> = None;
     for msg in messages {
-        let line = serde_json::to_string(msg)?;
-        content.push_str(&line);
-        content.push('\n');
+        match msg.role {
+            cersei_types::Role::User => {
+                let uuid = session_storage::write_user_entry(&path, name, msg.clone(), &cwd)
+                    .map_err(|e| anyhow::anyhow!("Write failed: {e}"))?;
+                last_user_uuid = Some(uuid);
+            }
+            cersei_types::Role::Assistant => {
+                session_storage::write_assistant_entry(
+                    &path,
+                    name,
+                    msg.clone(),
+                    &cwd,
+                    last_user_uuid.as_deref(),
+                )
+                .map_err(|e| anyhow::anyhow!("Write failed: {e}"))?;
+            }
+            _ => {}
+        }
     }
-    std::fs::write(&path, content)?;
     Ok(())
 }
 
