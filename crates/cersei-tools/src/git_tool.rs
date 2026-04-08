@@ -333,6 +333,7 @@ impl Tool for GitTool {
          • diff_commits  — unified diff between old_rev and new_rev\n\
          • diff_worktree — uncommitted changes: modified/deleted tracked files + untracked files (gitignore-aware)\n\
          • read_file     — file contents at a specific revision\n\
+         • status        — working tree status: staged, modified, untracked, deleted files + current branch\n\
          \n\
          Diff output is truncated at max_diff_lines (default 800). \
          Raise the limit or use summary_only=true to avoid truncation on large changesets."
@@ -353,7 +354,7 @@ impl Tool for GitTool {
                 "command": {
                     "type": "string",
                     "description": "Operation to perform.",
-                    "enum": ["log", "show", "diff_commits", "diff_worktree", "read_file"]
+                    "enum": ["log", "show", "diff_commits", "diff_worktree", "read_file", "status"]
                 },
                 "repo_path": {
                     "type": "string",
@@ -440,8 +441,10 @@ impl Tool for GitTool {
                     cmd_read_file(&repo, rev, path)
                 }
 
+                "status" => cmd_status(&repo),
+
                 other => Err(format!(
-                    "unknown command '{other}'; valid commands: log, show, diff_commits, diff_worktree, read_file"
+                    "unknown command '{other}'; valid commands: log, show, diff_commits, diff_worktree, read_file, status"
                 )),
             }
         })
@@ -820,6 +823,156 @@ fn cmd_read_file(repo: &gix::Repository, revision: &str, path: &str) -> Result<S
     }
 
     String::from_utf8(data).map_err(|_| format!("'{path}' contains non-UTF-8 bytes"))
+}
+
+fn cmd_status(repo: &gix::Repository) -> Result<String, String> {
+    use gix::bstr::ByteSlice as _;
+    use std::collections::HashSet;
+
+    let work_dir = repo
+        .work_dir()
+        .ok_or("bare repositories have no working tree")?
+        .to_path_buf();
+
+    let mut output = String::new();
+
+    // Current branch
+    let head_ref = repo.head_ref().ok().flatten();
+    let branch = head_ref
+        .as_ref()
+        .map(|r| {
+            r.name()
+                .as_bstr()
+                .to_str_lossy()
+                .strip_prefix("refs/heads/")
+                .unwrap_or(&r.name().as_bstr().to_str_lossy())
+                .to_string()
+        })
+        .unwrap_or_else(|| {
+            repo.head_id()
+                .map(|id| format!("(detached at {})", &id.to_string()[..8]))
+                .unwrap_or_else(|_| "(no commits)".into())
+        });
+    output.push_str(&format!("On branch {branch}\n\n"));
+
+    // Get HEAD tree blobs
+    let head_blobs = match repo.head_id() {
+        Ok(oid) => {
+            let tree_id = repo
+                .find_object(oid.detach())
+                .map_err(|e| e.to_string())?
+                .peel_to_commit()
+                .map_err(|e| e.to_string())?
+                .tree_id()
+                .map_err(|e| e.to_string())?
+                .detach();
+            tree_blobs(repo, tree_id)?
+        }
+        Err(_) => Vec::new(), // empty repo
+    };
+
+    let head_path_set: HashSet<gix::bstr::BString> =
+        head_blobs.iter().map(|(p, _)| p.clone()).collect();
+
+    let index = repo.index_or_empty().map_err(|e| e.to_string())?;
+
+    // Staged new files (in index but not in HEAD)
+    let mut staged: Vec<String> = Vec::new();
+    for entry in index.entries() {
+        let path = entry.path(&index);
+        if !head_path_set.contains(path) {
+            staged.push(path.to_str_lossy().to_string());
+        }
+    }
+
+    // Modified and deleted tracked files (HEAD vs working tree)
+    let mut modified: Vec<String> = Vec::new();
+    let mut deleted: Vec<String> = Vec::new();
+    for (path_bytes, head_oid) in &head_blobs {
+        let rel = path_bytes.to_str_lossy();
+        let disk_path = work_dir.join(rel.as_ref());
+
+        if !disk_path.exists() {
+            deleted.push(rel.to_string());
+            continue;
+        }
+
+        let disk_content =
+            std::fs::read(&disk_path).map_err(|e| format!("cannot read {rel}: {e}"))?;
+        let head_content = repo
+            .find_object(*head_oid)
+            .map_err(|e| e.to_string())?
+            .data
+            .to_vec();
+
+        if disk_content != head_content {
+            modified.push(rel.to_string());
+        }
+    }
+
+    // Untracked files (via dirwalk)
+    let mut untracked: Vec<String> = Vec::new();
+    let index_for_walk = repo.index_or_empty().map_err(|e| e.to_string())?;
+    let dir_walk = repo
+        .dirwalk_iter(
+            index_for_walk,
+            Vec::<gix::bstr::BString>::new(),
+            Default::default(),
+            repo.dirwalk_options()
+                .map_err(|e| format!("dirwalk options: {e}"))?,
+        )
+        .map_err(|e| format!("dirwalk: {e}"))?;
+
+    for item in dir_walk {
+        match item {
+            Ok(entry) => {
+                if entry.entry.status == gix::dir::entry::Status::Untracked {
+                    let p = entry.entry.rela_path.to_str_lossy().to_string();
+                    untracked.push(p);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    // Format output
+    if !staged.is_empty() {
+        output.push_str("Staged (new files):\n");
+        for f in &staged {
+            output.push_str(&format!("  A  {f}\n"));
+        }
+        output.push('\n');
+    }
+
+    if !modified.is_empty() {
+        output.push_str("Modified:\n");
+        for f in &modified {
+            output.push_str(&format!("  M  {f}\n"));
+        }
+        output.push('\n');
+    }
+
+    if !deleted.is_empty() {
+        output.push_str("Deleted:\n");
+        for f in &deleted {
+            output.push_str(&format!("  D  {f}\n"));
+        }
+        output.push('\n');
+    }
+
+    if !untracked.is_empty() {
+        output.push_str("Untracked:\n");
+        for f in &untracked {
+            output.push_str(&format!("  ?  {f}\n"));
+        }
+        output.push('\n');
+    }
+
+    if staged.is_empty() && modified.is_empty() && deleted.is_empty() && untracked.is_empty() {
+        output.push_str("Working tree clean.\n");
+    }
+
+    Ok(output)
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
