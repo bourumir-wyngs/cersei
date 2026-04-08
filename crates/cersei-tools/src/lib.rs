@@ -17,6 +17,7 @@ pub mod git_tool;
 pub mod git_utils;
 pub mod glob_tool;
 pub mod grep_tool;
+pub mod list_directory;
 pub mod mysql_tool;
 pub mod npm_tool;
 pub mod notebook_edit;
@@ -381,6 +382,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_edit::FileEditTool),
         Box::new(glob_tool::GlobTool),
         Box::new(grep_tool::GrepTool),
+        Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
     ]
 }

@@ -148,7 +148,13 @@ impl Provider for OpenAi {
                                             }
                                         });
                                         if let Some(sig) = thought_signature {
+                                            // Send in both formats: top-level and Gemini's nested format
                                             tc["thought_signature"] = serde_json::json!(sig);
+                                            tc["extra_content"] = serde_json::json!({
+                                                "google": {
+                                                    "thought_signature": sig
+                                                }
+                                            });
                                         }
                                         tc
                                     } else {
@@ -372,9 +378,17 @@ impl Provider for OpenAi {
                                                     .await;
                                             }
 
+                                            // thought_signature may arrive at the delta level
+                                            // (applies to all tool calls in this chunk).
+                                            let delta_sig = delta["thought_signature"].as_str()
+                                                .map(|s| s.to_string());
+
                                             // Tool calls (accumulated across chunks)
                                             if let Some(tc_array) = delta["tool_calls"].as_array() {
                                                 has_tool_calls = true;
+                                                if std::env::var("CERSEI_DEBUG_REQUEST").is_ok() {
+                                                    eprintln!("\x1b[90m[stream] delta: {}\x1b[0m", serde_json::to_string(delta).unwrap_or_default());
+                                                }
                                                 for tc in tc_array {
                                                     let idx =
                                                         tc["index"].as_u64().unwrap_or(0) as usize;
@@ -404,9 +418,14 @@ impl Provider for OpenAi {
                                                     {
                                                         entry.2.push_str(args);
                                                     }
-                                                    // Gemini thought_signature (single chunk)
-                                                    if let Some(sig) = tc["thought_signature"].as_str() {
-                                                        entry.3 = Some(sig.to_string());
+                                                    // Gemini thought_signature — check all known locations.
+                                                    let sig = tc["thought_signature"].as_str()
+                                                        .or_else(|| tc["extra_content"]["google"]["thought_signature"].as_str())
+                                                        .or_else(|| tc["function"]["thought_signature"].as_str())
+                                                        .map(|s| s.to_string())
+                                                        .or_else(|| delta_sig.clone());
+                                                    if let Some(sig) = sig {
+                                                        entry.3 = Some(sig);
                                                     }
                                                 }
                                             }
