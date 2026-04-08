@@ -179,6 +179,35 @@ impl Agent {
         let summary_msg = cersei_types::Message::user(result.summary.clone());
         let mut new_messages = vec![summary_msg];
         new_messages.extend(recent);
+
+        // Strip orphaned tool results: tool results whose matching tool_use
+        // was in the compacted portion and no longer exists.
+        let tool_use_ids: std::collections::HashSet<String> = new_messages
+            .iter()
+            .flat_map(|m| m.content_blocks())
+            .filter_map(|b| {
+                if let cersei_types::ContentBlock::ToolUse { id, .. } = &b {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for msg in &mut new_messages {
+            if let cersei_types::MessageContent::Blocks(blocks) = &mut msg.content {
+                blocks.retain(|b| {
+                    if let cersei_types::ContentBlock::ToolResult { tool_use_id, .. } = b {
+                        tool_use_ids.contains(tool_use_id)
+                    } else {
+                        true
+                    }
+                });
+            }
+        }
+        // Remove messages that became empty after stripping
+        new_messages.retain(|m| !m.content_blocks().is_empty());
+
         *self.messages.lock() = new_messages;
 
         // Reset cumulative usage so the prompt token count reflects the compacted context.
