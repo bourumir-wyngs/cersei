@@ -35,16 +35,21 @@ pub fn build_cli_system_prompt(
     }
 
     // Project instructions (.abstract/instructions.md)
+    let mut extra_cached = Vec::new();
     let instructions_path = config.working_dir.join(".abstract").join("instructions.md");
-    let extra_cached = if instructions_path.exists() {
+    if instructions_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&instructions_path) {
-            vec![("project_instructions".to_string(), content)]
-        } else {
-            vec![]
+            extra_cached.push(("project_instructions".to_string(), content));
         }
-    } else {
-        vec![]
-    };
+    }
+
+    // AGENTS.md briefing
+    let agents_md_path = config.working_dir.join("AGENTS.md");
+    if agents_md_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&agents_md_path) {
+            extra_cached.push(("agents_briefing".to_string(), content));
+        }
+    }
 
     let opts = SystemPromptOptions {
         prefix: Some(SystemPromptPrefix::Interactive),

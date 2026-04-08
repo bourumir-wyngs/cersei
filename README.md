@@ -10,3 +10,12 @@ The number of supported agents are limited (use /model without parameters to see
 While still can be a library, the crate is now extended to provide the own main.rs. The tools are configured via tools.yaml that must be present in the folder where the application starts.
 
 It is your responsibility to watch what the agents are doing and approve what is expected only (read the license for details).
+
+## Project Instructions
+
+You can brief the AI on startup using instruction files placed in the working directory:
+
+- **`AGENTS.md`** — A project-level briefing read from the working directory on startup. Use this to describe the project, its conventions, and any guidance relevant to AI agents (compatible with the OpenAI Codex `AGENTS.md` convention).
+- **`.abstract/instructions.md`** — Project-specific instructions for this tool. Run `cersei init` to create a template. Suitable for tool-specific preferences and constraints.
+
+Both files are injected into the system prompt as cached sections, so they are available throughout the session without consuming repeated token budget.
