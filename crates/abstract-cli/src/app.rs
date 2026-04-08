@@ -13,6 +13,7 @@ use crate::Cli;
 use cersei_agent::effort::EffortLevel;
 use cersei_memory::manager::MemoryManager;
 use cersei_mcp::McpServerConfig;
+use cersei_tools::network_policy::sandbox_warning;
 use cersei_tools::permissions::AllowAll;
 use cersei_tools::Extensions;
 use cersei_types::Message;
@@ -24,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     let theme = Theme::from_name(&config.theme);
     let tool_extensions = tools_config::load_extensions_from_start_dir()?;
+
+    print_startup_warnings();
 
     // Resolve or create session ID
     let session_id = if let Some(ref resume) = cli.resume {
@@ -200,4 +203,10 @@ fn print_banner(config: &AppConfig, session_id: &str, effort: &EffortLevel) {
         short_id,
     );
     eprintln!("\x1b[90mType /help for commands, Ctrl+C to cancel, Ctrl+C×2 to exit\x1b[0m\n");
+}
+
+fn print_startup_warnings() {
+    if let Some(warning) = sandbox_warning() {
+        eprintln!("\x1b[33;1mWarning:\x1b[0m {warning}\n");
+    }
 }
