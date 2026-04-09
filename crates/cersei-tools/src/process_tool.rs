@@ -1,4 +1,4 @@
-//! Process tool: start a long-running bash process and interact with its output.
+//! Process tool: start long-running bash processes and interact with their output.
 
 use super::*;
 use crate::network_policy::{shell_command, NetworkAccess};
@@ -23,10 +23,13 @@ struct ProcessEntry {
     running: AtomicBool,
     /// The original command string, for status display.
     command: String,
+    /// OS PID of the process (may be 0 if unavailable).
+    pid: u32,
 }
 
+/// Registry key: (session_id, pid)
 static PROCESS_REGISTRY: once_cell::sync::Lazy<
-    dashmap::DashMap<String, Arc<ProcessEntry>>,
+    dashmap::DashMap<(String, u32), Arc<ProcessEntry>>,
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 // ─── Tool ────────────────────────────────────────────────────────────────────
@@ -38,13 +41,15 @@ impl Tool for ProcessTool {
     fn name(&self) -> &str { "Process" }
 
     fn description(&self) -> &str {
-        "Start a long-running bash process and interact with it. \
-        Actions: 'start' (launches the process, required first), \
-        'output' (retrieve recent captured output), \
-        'status' (check if process is running), \
-        'kill' (terminate the process). \
-        stdout and stderr are captured into a 1024-line ring buffer. \
-        Use 'output' with 'tail' to read recent lines."
+        "Start and manage long-running bash processes. Multiple processes can run simultaneously. \
+        Actions: \
+        'start' — launch a process, returns its PID; \
+        'list' — list all processes for this session with PID, status, and command; \
+        'output' — retrieve recent captured output (requires pid); \
+        'status' — check if a process is running (requires pid); \
+        'kill' — terminate a process (requires pid). \
+        stdout and stderr are captured into a 1024-line ring buffer per process. \
+        Use 'list' to discover PIDs, then use pid to target a specific process."
     }
 
     fn permission_level(&self) -> PermissionLevel { PermissionLevel::Execute }
@@ -56,12 +61,16 @@ impl Tool for ProcessTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["start", "output", "status", "kill"],
-                    "description": "Action to perform: 'start', 'output', 'status', or 'kill'. Must call 'start' before any other action."
+                    "enum": ["start", "list", "output", "status", "kill"],
+                    "description": "Action to perform. Use 'list' to see all processes and their PIDs."
                 },
                 "command": {
                     "type": "string",
                     "description": "Bash command to run (required for 'start')"
+                },
+                "pid": {
+                    "type": "integer",
+                    "description": "Process PID (required for 'output', 'status', 'kill'). Use 'list' to discover PIDs."
                 },
                 "tail": {
                     "type": "integer",
@@ -86,6 +95,7 @@ impl Tool for ProcessTool {
         struct Input {
             action: String,
             command: Option<String>,
+            pid: Option<u32>,
             tail: Option<usize>,
             workdir: Option<String>,
             network: Option<String>,
@@ -105,13 +115,30 @@ impl Tool for ProcessTool {
                 let requested = NetworkAccess::from_input(input.network.as_deref());
                 start_process(&ctx.session_id, &command, input.workdir.as_deref(), requested, ctx).await
             }
+            "list" => list_processes(&ctx.session_id),
             "output" => {
+                let pid = match input.pid {
+                    Some(p) => p,
+                    None => return ToolResult::error("'pid' is required for 'output'. Use action 'list' to see running processes."),
+                };
                 let tail = input.tail.unwrap_or(DEFAULT_TAIL).min(RING_BUFFER_SIZE);
-                get_output(&ctx.session_id, tail)
+                get_output(&ctx.session_id, pid, tail)
             }
-            "status" => get_status(&ctx.session_id),
-            "kill" => kill_process(&ctx.session_id).await,
-            other => ToolResult::error(format!("Unknown action: '{}'. Use start, output, status, or kill.", other)),
+            "status" => {
+                let pid = match input.pid {
+                    Some(p) => p,
+                    None => return ToolResult::error("'pid' is required for 'status'. Use action 'list' to see running processes."),
+                };
+                get_status(&ctx.session_id, pid)
+            }
+            "kill" => {
+                let pid = match input.pid {
+                    Some(p) => p,
+                    None => return ToolResult::error("'pid' is required for 'kill'. Use action 'list' to see running processes."),
+                };
+                kill_process(&ctx.session_id, pid).await
+            }
+            other => ToolResult::error(format!("Unknown action: '{}'. Use start, list, output, status, or kill.", other)),
         }
     }
 }
@@ -119,12 +146,6 @@ impl Tool for ProcessTool {
 // ─── Action implementations ──────────────────────────────────────────────────
 
 async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, requested: NetworkAccess, ctx: &ToolContext) -> ToolResult {
-    if PROCESS_REGISTRY.contains_key(session_id) {
-        return ToolResult::error(
-            "A process is already running for this session. Kill it first with action 'kill'.",
-        );
-    }
-
     let shell_state = session_shell_state(session_id);
     let (base_cwd, env_vars) = {
         let state = shell_state.lock();
@@ -186,9 +207,10 @@ async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, r
         lines: parking_lot::Mutex::new(VecDeque::new()),
         running: AtomicBool::new(true),
         command: command.to_string(),
+        pid,
     });
 
-    PROCESS_REGISTRY.insert(session_id.to_string(), Arc::clone(&entry));
+    PROCESS_REGISTRY.insert((session_id.to_string(), pid), Arc::clone(&entry));
 
     // Spawn stdout reader
     let entry_stdout = Arc::clone(&entry);
@@ -217,7 +239,6 @@ async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, r
     });
 
     // Spawn a watcher that marks the process as done when it exits
-    let session_id_owned = session_id.to_string();
     let entry_watcher = Arc::clone(&entry);
     tokio::spawn(async move {
         let status = {
@@ -229,7 +250,6 @@ async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, r
             }
         };
         entry_watcher.running.store(false, Ordering::SeqCst);
-        // Append exit notification to the buffer
         let exit_msg = match status {
             Some(s) => format!("[process exited: {}]", s),
             None => "[process exited]".to_string(),
@@ -239,20 +259,40 @@ async fn start_process(session_id: &str, command: &str, workdir: Option<&str>, r
             buf.pop_front();
         }
         buf.push_back(exit_msg);
-        // Remove from registry so a new process can be started
-        PROCESS_REGISTRY.remove(&session_id_owned);
+        // Entry stays in registry so output/status remain accessible after exit.
     });
 
-    ToolResult::success(format!(
-        "Process started (pid {}): {}",
-        pid, command
-    ))
+    ToolResult::success(format!("Process started (pid {}): {}", pid, command))
 }
 
-fn get_output(session_id: &str, tail: usize) -> ToolResult {
-    let entry = match PROCESS_REGISTRY.get(session_id) {
+fn list_processes(session_id: &str) -> ToolResult {
+    let mut entries: Vec<(u32, Arc<ProcessEntry>)> = PROCESS_REGISTRY
+        .iter()
+        .filter(|e| e.key().0 == session_id)
+        .map(|e| (e.key().1, Arc::clone(e.value())))
+        .collect();
+
+    if entries.is_empty() {
+        return ToolResult::success("No processes");
+    }
+
+    entries.sort_by_key(|(pid, _)| *pid);
+
+    let lines: Vec<String> = entries
+        .iter()
+        .map(|(pid, entry)| {
+            let status = if entry.running.load(Ordering::SeqCst) { "running" } else { "exited" };
+            format!("pid={:<8} status={:<8} command={}", pid, status, entry.command)
+        })
+        .collect();
+
+    ToolResult::success(lines.join("\n"))
+}
+
+fn get_output(session_id: &str, pid: u32, tail: usize) -> ToolResult {
+    let entry = match PROCESS_REGISTRY.get(&(session_id.to_string(), pid)) {
         Some(e) => Arc::clone(e.value()),
-        None => return ToolResult::error("Start the process first"),
+        None => return ToolResult::error(format!("No process with pid {}. Use action 'list' to see processes.", pid)),
     };
 
     let buf = entry.lines.lock();
@@ -265,24 +305,24 @@ fn get_output(session_id: &str, tail: usize) -> ToolResult {
     }
 }
 
-fn get_status(session_id: &str) -> ToolResult {
-    let entry = match PROCESS_REGISTRY.get(session_id) {
+fn get_status(session_id: &str, pid: u32) -> ToolResult {
+    let entry = match PROCESS_REGISTRY.get(&(session_id.to_string(), pid)) {
         Some(e) => Arc::clone(e.value()),
-        None => return ToolResult::error("Start the process first"),
+        None => return ToolResult::error(format!("No process with pid {}. Use action 'list' to see processes.", pid)),
     };
 
     let running = entry.running.load(Ordering::SeqCst);
     let line_count = entry.lines.lock().len();
     ToolResult::success(format!(
-        "Command: {}\nRunning: {}\nBuffered lines: {}",
-        entry.command, running, line_count
+        "pid: {}\ncommand: {}\nrunning: {}\nbuffered lines: {}",
+        entry.pid, entry.command, running, line_count
     ))
 }
 
-async fn kill_process(session_id: &str) -> ToolResult {
-    let entry = match PROCESS_REGISTRY.get(session_id) {
+async fn kill_process(session_id: &str, pid: u32) -> ToolResult {
+    let entry = match PROCESS_REGISTRY.get(&(session_id.to_string(), pid)) {
         Some(e) => Arc::clone(e.value()),
-        None => return ToolResult::error("Start the process first"),
+        None => return ToolResult::error(format!("No process with pid {}. Use action 'list' to see processes.", pid)),
     };
 
     let mut guard = entry.child.lock().await;
@@ -290,8 +330,7 @@ async fn kill_process(session_id: &str) -> ToolResult {
         match child.kill().await {
             Ok(_) => {
                 drop(guard);
-                // Registry cleanup is handled by the watcher task
-                ToolResult::success("Process killed")
+                ToolResult::success(format!("Process {} killed", pid))
             }
             Err(e) => ToolResult::error(format!("Failed to kill process: {}", e)),
         }
