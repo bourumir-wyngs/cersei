@@ -241,11 +241,11 @@ pub static REGISTRY: &[ProviderEntry] = &[
         api_base: "https://api.x.ai/v1",
         env_keys: &["XAI_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
-        default_model: "grok-2",
+        default_model: "grok-4.20-0309-reasoning",
         models: &[ModelEntry {
-            id: "grok-2",
-            context_window: 128_000,
-            capabilities: FULL,
+            id: "grok-4.20-0309-reasoning",
+            context_window: 2_000_000,
+            capabilities: FULL_THINKING,
         }],
     },
     ProviderEntry {

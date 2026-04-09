@@ -98,7 +98,7 @@ fn current_provider(config: &AppConfig) -> &'static ProviderEntry {
 }
 
 fn display_providers() -> Vec<&'static ProviderEntry> {
-    ["anthropic", "openai", "google"]
+    ["anthropic", "openai", "google", "xai"]
         .into_iter()
         .filter_map(registry::lookup)
         .collect()
@@ -266,6 +266,10 @@ async fn fetch_openai_compatible_models(provider: &ProviderEntry) -> anyhow::Res
 }
 
 fn is_chat_completions_compatible(provider_id: &str, model: &str) -> bool {
+    if provider_id == "xai" {
+        return !model.starts_with("grok-imagine-");
+    }
+
     if provider_id != "openai" {
         return true;
     }
@@ -322,12 +326,13 @@ mod tests {
     use cersei_provider::registry;
 
     #[test]
-    fn includes_openai_and_google_in_model_listing() {
+    fn includes_xai_in_model_listing() {
         let providers = display_providers();
-        assert_eq!(providers.len(), 3);
+        assert_eq!(providers.len(), 4);
         assert_eq!(providers[0].id, "anthropic");
         assert_eq!(providers[1].id, "openai");
         assert_eq!(providers[2].id, "google");
+        assert_eq!(providers[3].id, "xai");
     }
 
     #[test]
@@ -337,6 +342,13 @@ mod tests {
         assert!(models.iter().any(|model| model == "gemini-3-flash-preview"));
         assert!(models.iter().any(|model| model == "gemini-3.1-pro-preview"));
         assert_eq!(models.len(), 2);
+    }
+
+    #[test]
+    fn keeps_xai_models_in_fallback_list() {
+        let xai = registry::lookup("xai").unwrap();
+        let models = fallback_models(xai);
+        assert_eq!(models, vec!["grok-4.20-0309-reasoning"]);
     }
 
     #[test]
@@ -362,6 +374,16 @@ mod tests {
             selected_provider_id(&config, "gemini-3.1-pro-preview"),
             "google"
         );
+    }
+
+    #[test]
+    fn filters_xai_image_generation_models_from_chat_path() {
+        assert!(is_chat_completions_compatible(
+            "xai",
+            "grok-4.20-0309-reasoning"
+        ));
+        assert!(!is_chat_completions_compatible("xai", "grok-imagine-image"));
+        assert!(!is_chat_completions_compatible("xai", "grok-imagine-video"));
     }
 
     #[test]
