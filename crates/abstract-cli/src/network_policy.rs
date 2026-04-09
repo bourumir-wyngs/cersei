@@ -1,8 +1,8 @@
 //! Interactive network-access policy for the CLI.
 //!
-//! When the AI requests `network: "full"` or `network: "local"`, the user is
-//! prompted once per tool type. No prompt is shown when the AI requests no
-//! network (default).
+//! Missing `network` is treated as a normal network request so the model cannot
+//! silently start commands with networking disabled. Only an explicit legacy
+//! `network: "none"` bypasses the prompt and stays sandboxed.
 //!
 //!   Network access: Npm  (requests: local network)
 //!   npm install react
@@ -40,7 +40,7 @@ impl NetworkPolicy for CliNetworkPolicy {
         command: &str,
         requested: NetworkAccess,
     ) -> NetworkAccess {
-        // AI didn't ask for network — sandbox silently, no prompt.
+        // Explicit no-network request — honor it without prompting.
         if requested == NetworkAccess::Blocked {
             return NetworkAccess::Blocked;
         }

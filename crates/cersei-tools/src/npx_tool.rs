@@ -39,8 +39,8 @@ impl Tool for NpxTool {
                 },
                 "network": {
                     "type": "string",
-                    "enum": ["none", "local", "full"],
-                    "description": "Network access required. Default: none (sandboxed, no network). Use 'local' for local network only. Use 'full' when npx needs to download packages."
+                    "enum": ["local", "full"],
+                    "description": "Network access required. Omit to request normal network access. Use 'local' for local network only. Use 'full' when npx needs to download packages."
                 }
             },
             "required": ["args"]

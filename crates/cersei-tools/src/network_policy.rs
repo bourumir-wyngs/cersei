@@ -1,9 +1,9 @@
 //! Network policy for sandboxing outbound network access in shell tool execution.
 //!
-//! The AI declares whether it needs network via a `network` field in tool input:
-//! - `"none"` (default) — run under `firejail --net=none`, no prompt
+//! The AI may declare network access via a `network` field in tool input:
+//! - omitted / `"full"` (default) — request full network access
 //! - `"local"` — local network only; run under `firejail --net=sandbox`
-//! - `"full"` — full network requested; policy prompts the user to approve or deny
+//! - `"none"` — legacy explicit opt-out; run under `firejail --net=none`
 //!
 //! ## Sandbox backend
 //!
@@ -55,12 +55,17 @@ pub enum NetworkAccess {
 }
 
 impl NetworkAccess {
-    /// Parse from the AI's tool input field (`"full"`, `"local"`, or `"none"`/absent → Blocked).
+    /// Parse from the tool input field.
+    ///
+    /// Missing `network` now defaults to `Full` so the model cannot silently
+    /// opt out of network permission prompts by omission. `"none"` remains
+    /// accepted for backwards compatibility with existing direct callers.
     pub fn from_input(s: Option<&str>) -> Self {
         match s {
-            Some("full") => Self::Full,
             Some("local") => Self::Local,
-            _ => Self::Blocked,
+            Some("none") => Self::Blocked,
+            Some("full") | None => Self::Full,
+            Some(_) => Self::Blocked,
         }
     }
 }
@@ -71,9 +76,9 @@ impl NetworkAccess {
 pub trait NetworkPolicy: Send + Sync {
     /// Decide the actual access level to grant.
     ///
-    /// `requested` is what the AI declared. When `Blocked` the policy should
-    /// return `Blocked` without prompting. When `Full` the policy may approve,
-    /// deny, or prompt the user.
+    /// `requested` is what the tool input declared. When `Blocked` the policy
+    /// should return `Blocked` without prompting. When `Full` the policy may
+    /// approve, deny, or prompt the user.
     async fn check(&self, tool_name: &str, command: &str, requested: NetworkAccess)
         -> NetworkAccess;
 }
@@ -131,4 +136,25 @@ pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
     let mut cmd = Command::new("firejail");
     cmd.args(["--quiet", "--noprofile", net_flag, "--", "sh", "-c", command]);
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkAccess;
+
+    #[test]
+    fn missing_network_defaults_to_full() {
+        assert_eq!(NetworkAccess::from_input(None), NetworkAccess::Full);
+    }
+
+    #[test]
+    fn local_and_full_are_preserved() {
+        assert_eq!(NetworkAccess::from_input(Some("local")), NetworkAccess::Local);
+        assert_eq!(NetworkAccess::from_input(Some("full")), NetworkAccess::Full);
+    }
+
+    #[test]
+    fn legacy_none_still_blocks() {
+        assert_eq!(NetworkAccess::from_input(Some("none")), NetworkAccess::Blocked);
+    }
 }
