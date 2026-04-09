@@ -58,6 +58,9 @@ sudo ip link add sandbox type bridge
 sudo ip addr add 10.200.1.1/24 dev sandbox
 sudo ip link set sandbox up
 
+# server will start at
+http://10.200.1.2:3000
+
 ## Check
 ip a show sandbox
 

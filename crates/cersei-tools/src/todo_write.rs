@@ -115,6 +115,7 @@ mod tests {
             cost_tracker: Arc::new(CostTracker::new()),
             mcp_manager: None,
             extensions: Extensions::default(),
+            network_policy: None,
         }
     }
 

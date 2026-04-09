@@ -41,15 +41,13 @@ impl Tool for ProcessTool {
     fn name(&self) -> &str { "Process" }
 
     fn description(&self) -> &str {
-        "Start and manage long-running bash processes. Multiple processes can run simultaneously. \
-        Actions: \
-        'start' — launch a process, returns its PID; \
-        'list' — list all processes for this session with PID, status, and command; \
-        'output' — retrieve recent captured output (requires pid); \
-        'status' — check if a process is running (requires pid); \
-        'kill' — terminate a process (requires pid). \
-        stdout and stderr are captured into a 1024-line ring buffer per process. \
-        Use 'list' to discover PIDs, then use pid to target a specific process."
+        "Manage long-running bash processes. Always supply the 'action' field. \
+        action='start' + command='...' — launch a process, returns its PID. \
+        action='list' — list all processes with PID, status, and command \
+        action='output' + pid=N — retrieve recent captured output. \
+        action='status' + pid=N — check if a process is running. \
+        action='kill' + pid=N — terminate a process. \
+        Multiple processes can run simultaneously. stdout and stderr go to a 1024-line ring buffer."
     }
 
     fn permission_level(&self) -> PermissionLevel { PermissionLevel::Execute }
@@ -62,7 +60,8 @@ impl Tool for ProcessTool {
                 "action": {
                     "type": "string",
                     "enum": ["start", "list", "output", "status", "kill"],
-                    "description": "Action to perform. Use 'list' to see all processes and their PIDs."
+                    "default": "list",
+                    "description": "Action to perform (default: 'list'). start=launch process, list=show all processes, output=get stdout/stderr, status=check running, kill=terminate."
                 },
                 "command": {
                     "type": "string",

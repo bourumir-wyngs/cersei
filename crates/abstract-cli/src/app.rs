@@ -43,11 +43,11 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     // Build memory manager with graph memory
     let memory_manager = build_memory_manager(&config)?;
 
-    let cancel_token = CancellationToken::new();
     let running = Arc::new(AtomicBool::new(false));
 
     // Install signal handlers
-    crate::signals::install(cancel_token.clone(), running.clone())?;
+    let signal_handle = crate::signals::install(running.clone())?;
+    let cancel_token = signal_handle.token();
 
     // Build the initial agent
     let (agent, resolved_model) = build_agent(
@@ -81,7 +81,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
             &tool_extensions,
             cli.json,
             running,
-            cancel_token,
+            signal_handle,
         )
         .await
     } else {
@@ -94,7 +94,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
             &tool_extensions,
             cli.json,
             running,
-            cancel_token,
+            signal_handle,
         )
         .await
     }

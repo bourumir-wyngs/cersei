@@ -166,6 +166,20 @@ pub struct ToolContext {
     pub network_policy: Option<Arc<dyn network_policy::NetworkPolicy>>,
 }
 
+impl Default for ToolContext {
+    fn default() -> Self {
+        Self {
+            working_dir: PathBuf::from("."),
+            session_id: "default".into(),
+            permissions: Arc::new(permissions::AllowAll),
+            cost_tracker: Arc::new(CostTracker::default()),
+            mcp_manager: None,
+            extensions: Extensions::default(),
+            network_policy: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {

@@ -991,6 +991,7 @@ mod tests {
             cost_tracker: Arc::new(crate::CostTracker::new()),
             mcp_manager: None,
             extensions: crate::Extensions::default(),
+            network_policy: None,
         }
     }
 
@@ -1117,6 +1118,7 @@ mod tests {
             cost_tracker: Arc::new(crate::CostTracker::new()),
             mcp_manager: None,
             extensions: crate::Extensions::default(),
+            network_policy: None,
         }
     }
 

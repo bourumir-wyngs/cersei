@@ -33,6 +33,7 @@ fn main() {
         cost_tracker: Arc::new(CostTracker::new()),
         mcp_manager: None,
         extensions: Extensions::default(),
+        network_policy: None,
     };
 
     // ── 1. Bundled Skills ────────────────────────────────────────────────

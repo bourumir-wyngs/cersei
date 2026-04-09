@@ -251,6 +251,7 @@ mod tests {
                     id: "t1".into(),
                     name: "Read".into(),
                     input: serde_json::json!({"file_path": "src/main.rs"}),
+                    thought_signature: None,
                 },
             ]),
             Message::user_blocks(vec![ContentBlock::ToolResult {

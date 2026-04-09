@@ -305,6 +305,7 @@ pub enum StreamEvent {
         #[allow(unused)]
         name: Option<String>,
         /// Gemini thought signature attached to this tool call.
+        #[serde(default)]
         thought_signature: Option<String>,
     },
     TextDelta {

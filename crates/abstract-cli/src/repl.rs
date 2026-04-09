@@ -10,6 +10,7 @@ use crate::input::InputReader;
 use crate::render::{self, StreamRenderer};
 use crate::status::StatusLine;
 use crate::theme::Theme;
+use crate::signals::SignalHandle;
 use cersei::events::AgentEvent;
 use cersei::Agent;
 use cersei_memory::manager::MemoryManager;
@@ -18,7 +19,6 @@ use cersei_types::Role;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_util::sync::CancellationToken;
 
 // ─── Recovery prompt ───────────────────────────────────────────────────────
 
@@ -131,7 +131,7 @@ pub async fn run_repl(
     tool_extensions: &Extensions,
     json_mode: bool,
     running: Arc<AtomicBool>,
-    cancel_token: CancellationToken,
+    signal_handle: SignalHandle,
 ) -> anyhow::Result<()> {
     let mut repl_config = config.clone();
     let mut input_reader = InputReader::new()?;
@@ -218,7 +218,7 @@ pub async fn run_repl(
                                 &repl_config,
                                 memory_manager,
                                 session_id,
-                                cancel_token.clone(),
+                                signal_handle.token(),
                                 Some(msgs),
                                 tool_extensions.clone(),
                             ) {
@@ -267,9 +267,11 @@ pub async fn run_repl(
             match result {
                 Ok(_) => {
                     is_first_turn = false;
+                    signal_handle.reset();
                 }
                 Err(err_msg) => {
                     renderer.error(&err_msg);
+                    signal_handle.reset();
 
                     if is_provider_error(&err_msg) {
                         match prompt_recovery(&current_model, &repl_config) {
@@ -288,7 +290,7 @@ pub async fn run_repl(
                                     &repl_config,
                                     memory_manager,
                                     session_id,
-                                    cancel_token.clone(),
+                                    signal_handle.token(),
                                     Some(msgs),
                                     tool_extensions.clone(),
                                 ) {
@@ -343,7 +345,7 @@ pub async fn run_single_shot(
     _tool_extensions: &Extensions,
     json_mode: bool,
     running: Arc<AtomicBool>,
-    _cancel_token: CancellationToken,
+    _signal_handle: SignalHandle,
 ) -> anyhow::Result<()> {
     let mut renderer = StreamRenderer::new(theme, json_mode);
     let mut status = StatusLine::new(theme, &config.model, session_id, false);

@@ -7,9 +7,34 @@ use tokio_util::sync::CancellationToken;
 
 static LAST_CTRLC: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
 
-/// Install signal handlers. Returns a CancellationToken that gets cancelled on Ctrl+C.
-pub fn install(cancel_token: CancellationToken, running: Arc<AtomicBool>) -> anyhow::Result<()> {
-    let ct = cancel_token.clone();
+/// A handle to the active cancellation token. The signal handler cancels whatever
+/// token is currently stored here. Call [`SignalHandle::reset`] after each cancelled
+/// turn to install a fresh token so the next run is not pre-cancelled.
+pub struct SignalHandle {
+    active: Arc<parking_lot::Mutex<CancellationToken>>,
+}
+
+impl SignalHandle {
+    /// Return a clone of the current active token (for passing to the agent).
+    pub fn token(&self) -> CancellationToken {
+        self.active.lock().clone()
+    }
+
+    /// Replace the active token with a brand-new one and return it.
+    pub fn reset(&self) -> CancellationToken {
+        let new = CancellationToken::new();
+        *self.active.lock() = new.clone();
+        new
+    }
+}
+
+/// Install signal handlers. Returns a [`SignalHandle`] whose token can be reset
+/// between turns to allow cancellation to be used more than once per session.
+pub fn install(running: Arc<AtomicBool>) -> anyhow::Result<SignalHandle> {
+    let handle = SignalHandle {
+        active: Arc::new(parking_lot::Mutex::new(CancellationToken::new())),
+    };
+    let active = Arc::clone(&handle.active);
     let r = running.clone();
 
     ctrlc_handler(move || {
@@ -26,8 +51,8 @@ pub fn install(cancel_token: CancellationToken, running: Arc<AtomicBool>) -> any
         *last = Some(now);
 
         if r.load(Ordering::Relaxed) {
-            // Agent is running — cancel it
-            ct.cancel();
+            // Agent is running — cancel the current turn's token
+            active.lock().cancel();
             eprintln!("\n  Cancelling... (press Ctrl+C again to force exit)");
         } else {
             // Not running — exit
@@ -36,15 +61,9 @@ pub fn install(cancel_token: CancellationToken, running: Arc<AtomicBool>) -> any
         }
     });
 
-    Ok(())
+    Ok(handle)
 }
 
 fn ctrlc_handler(f: impl Fn() + Send + 'static) {
     let _ = ctrlc::set_handler(f);
-}
-
-/// Reset the cancel token for a new agent run.
-#[allow(dead_code)]
-pub fn fresh_cancel_token() -> CancellationToken {
-    CancellationToken::new()
 }
