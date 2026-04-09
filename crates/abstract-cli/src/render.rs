@@ -1,8 +1,8 @@
 //! Streaming terminal renderer: markdown, tool badges, thinking, errors.
 
 use crate::theme::Theme;
-use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::execute;
+use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use std::io::{self, Write};
 use std::time::Duration;
 
@@ -77,7 +77,7 @@ impl StreamRenderer {
             SetAttribute(Attribute::Bold),
             Print(format!("  [{name}]")),
             ResetColor,
-            SetForegroundColor(self.theme.dim),
+            SetForegroundColor(tool_summary_color(name, &self.theme)),
             Print(format!(" {summary}")),
             ResetColor,
             Print("\n"),
@@ -235,10 +235,21 @@ pub fn print_json_event(event: &cersei_agent::events::AgentEvent) {
         cersei_agent::events::AgentEvent::ToolStart { name, id, input } => {
             serde_json::json!({"type": "tool_start", "name": name, "id": id, "input": input})
         }
-        cersei_agent::events::AgentEvent::ToolEnd { name, id, result, is_error, duration } => {
+        cersei_agent::events::AgentEvent::ToolEnd {
+            name,
+            id,
+            result,
+            is_error,
+            duration,
+        } => {
             serde_json::json!({"type": "tool_end", "name": name, "id": id, "result": result, "is_error": is_error, "duration_ms": duration.as_millis() as u64})
         }
-        cersei_agent::events::AgentEvent::CostUpdate { turn_cost, cumulative_cost, input_tokens, output_tokens } => {
+        cersei_agent::events::AgentEvent::CostUpdate {
+            turn_cost,
+            cumulative_cost,
+            input_tokens,
+            output_tokens,
+        } => {
             serde_json::json!({"type": "cost_update", "turn_cost": turn_cost, "cumulative_cost": cumulative_cost, "input_tokens": input_tokens, "output_tokens": output_tokens})
         }
         cersei_agent::events::AgentEvent::Error(msg) => {
@@ -257,8 +268,10 @@ pub fn print_json_event(event: &cersei_agent::events::AgentEvent) {
 fn make_skin(theme: &Theme) -> termimad::MadSkin {
     let mut skin = termimad::MadSkin::default();
     // Customize code block styling
-    skin.code_block.set_fg(crossterm_to_termimad_color(theme.accent));
-    skin.inline_code.set_fg(crossterm_to_termimad_color(theme.accent));
+    skin.code_block
+        .set_fg(crossterm_to_termimad_color(theme.accent));
+    skin.inline_code
+        .set_fg(crossterm_to_termimad_color(theme.accent));
     skin.bold.set_fg(crossterm_to_termimad_color(theme.text));
     skin.italic.set_fg(crossterm_to_termimad_color(theme.dim));
     skin
@@ -324,6 +337,13 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             let s = serde_json::to_string(input).unwrap_or_default();
             truncate(&s, 80)
         }
+    }
+}
+
+fn tool_summary_color(name: &str, theme: &Theme) -> Color {
+    match name {
+        "Bash" | "bash" | "Process" => theme.review_text,
+        _ => theme.dim,
     }
 }
 

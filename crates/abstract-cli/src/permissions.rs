@@ -3,8 +3,11 @@
 //! Implements PermissionPolicy by prompting the user in the terminal.
 //! Caches session-level allow decisions.
 
+use crate::theme::Theme;
 use cersei_tools::permissions::{PermissionDecision, PermissionPolicy, PermissionRequest};
 use cersei_tools::PermissionLevel;
+use crossterm::execute;
+use crossterm::style::{Print, ResetColor, SetAttribute, SetForegroundColor};
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -16,13 +19,15 @@ pub struct CliPermissionPolicy {
     session_allowed: Mutex<HashSet<String>>,
     /// Tools permanently allowed (by tool name).
     always_allowed: Mutex<HashSet<String>>,
+    theme: Theme,
 }
 
 impl CliPermissionPolicy {
-    pub fn new() -> Self {
+    pub fn new(theme: &Theme) -> Self {
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             always_allowed: Mutex::new(HashSet::new()),
+            theme: theme.clone(),
         }
     }
 }
@@ -51,11 +56,40 @@ impl PermissionPolicy for CliPermissionPolicy {
 
         // Prompt user
         let level_str = format!("{:?}", request.permission_level);
-        eprint!("\n");
-        eprint!("  \x1b[33;1mPermission required: {}\x1b[0m\n", request.tool_name);
-        eprint!("  \x1b[90m{}\x1b[0m\n", request.description);
-        eprint!("  \x1b[90mRisk: {level_str}\x1b[0m\n");
-        eprint!("  \x1b[33m[Y]es  [N]o  [S]ession  [A]lways\x1b[0m ");
+        let preview = permission_preview(request);
+        let _ = execute!(
+            io::stderr(),
+            Print("\n"),
+            SetForegroundColor(self.theme.permission_accent),
+            SetAttribute(crossterm::style::Attribute::Bold),
+            Print(format!("  Permission required: {}", request.tool_name)),
+            ResetColor,
+            SetAttribute(crossterm::style::Attribute::Reset),
+            Print("\n"),
+            SetForegroundColor(self.theme.dim),
+            Print(format!("  {}", request.description)),
+            ResetColor,
+            Print("\n"),
+        );
+        if let Some(preview) = preview {
+            let _ = execute!(
+                io::stderr(),
+                SetForegroundColor(self.theme.review_text),
+                Print(format!("  {preview}")),
+                ResetColor,
+                Print("\n"),
+            );
+        }
+        let _ = execute!(
+            io::stderr(),
+            SetForegroundColor(self.theme.dim),
+            Print(format!("  Risk: {level_str}")),
+            ResetColor,
+            Print("\n"),
+            SetForegroundColor(self.theme.permission_accent),
+            Print("  [Y]es  [N]o  [S]ession  [A]lways "),
+            ResetColor,
+        );
         let _ = io::stderr().flush();
 
         let decision = read_permission_char();
@@ -69,13 +103,36 @@ impl PermissionPolicy for CliPermissionPolicy {
                 PermissionDecision::AllowForSession
             }
             'a' | 'A' => {
-                self.always_allowed
-                    .lock()
-                    .insert(request.tool_name.clone());
+                self.always_allowed.lock().insert(request.tool_name.clone());
                 PermissionDecision::Allow
             }
             _ => PermissionDecision::Deny("User denied".into()),
         }
+    }
+}
+
+fn permission_preview(request: &PermissionRequest) -> Option<String> {
+    match request.tool_name.as_str() {
+        "Bash" | "bash" => request
+            .tool_input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate(s, 120)),
+        "Process" => request
+            .tool_input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate(s, 120)),
+        _ => None,
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}…")
     }
 }
 

@@ -7,6 +7,7 @@ use crossterm::style::Color;
 pub struct Theme {
     pub text: Color,
     pub dim: Color,
+    pub review_text: Color,
     pub accent: Color,
     pub success: Color,
     pub error: Color,
@@ -25,15 +26,28 @@ impl Theme {
         Self {
             text: Color::White,
             dim: Color::DarkGrey,
+            review_text: Color::Rgb {
+                r: 255,
+                g: 105,
+                b: 180,
+            },
             accent: Color::Cyan,
             success: Color::Green,
             error: Color::Red,
             warning: Color::Yellow,
             tool_badge: Color::Magenta,
             thinking: Color::DarkGrey,
-            code_bg: Color::Rgb { r: 30, g: 30, b: 30 },
+            code_bg: Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 30,
+            },
             prompt: Color::Cyan,
-            status_bg: Color::Rgb { r: 30, g: 30, b: 30 },
+            status_bg: Color::Rgb {
+                r: 30,
+                g: 30,
+                b: 30,
+            },
             status_fg: Color::DarkGrey,
             permission_accent: Color::Yellow,
         }
@@ -43,15 +57,28 @@ impl Theme {
         Self {
             text: Color::Black,
             dim: Color::DarkGrey,
+            review_text: Color::Rgb {
+                r: 166,
+                g: 28,
+                b: 96,
+            },
             accent: Color::DarkCyan,
             success: Color::DarkGreen,
             error: Color::DarkRed,
             warning: Color::DarkYellow,
             tool_badge: Color::DarkMagenta,
             thinking: Color::Grey,
-            code_bg: Color::Rgb { r: 240, g: 240, b: 240 },
+            code_bg: Color::Rgb {
+                r: 240,
+                g: 240,
+                b: 240,
+            },
             prompt: Color::DarkCyan,
-            status_bg: Color::Rgb { r: 240, g: 240, b: 240 },
+            status_bg: Color::Rgb {
+                r: 240,
+                g: 240,
+                b: 240,
+            },
             status_fg: Color::DarkGrey,
             permission_accent: Color::DarkYellow,
         }

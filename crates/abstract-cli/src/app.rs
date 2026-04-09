@@ -11,8 +11,8 @@ use crate::tools_config;
 use crate::Cli;
 
 use cersei_agent::effort::EffortLevel;
-use cersei_memory::manager::MemoryManager;
 use cersei_mcp::McpServerConfig;
+use cersei_memory::manager::MemoryManager;
 use cersei_tools::network_policy::sandbox_warning;
 use cersei_tools::permissions::AllowAll;
 use cersei_tools::Extensions;
@@ -110,11 +110,12 @@ pub fn build_agent(
     existing_messages: Option<Vec<Message>>,
     tool_extensions: Extensions,
 ) -> anyhow::Result<(cersei::Agent, String)> {
-    let (provider, resolved_model) = cersei_provider::from_model_string(model_string)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (provider, resolved_model) =
+        cersei_provider::from_model_string(model_string).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let system_prompt = prompt::build_cli_system_prompt(config, memory_manager);
     let effort = EffortLevel::from_str(&config.effort);
+    let theme = Theme::from_name(&config.theme);
 
     let mcp_configs: Vec<McpServerConfig> = config
         .mcp_servers
@@ -146,8 +147,8 @@ pub fn build_agent(
         builder = builder.permission_policy(AllowAll);
     } else {
         builder = builder
-            .permission_policy(CliPermissionPolicy::new())
-            .network_policy(CliNetworkPolicy::new());
+            .permission_policy(CliPermissionPolicy::new(&theme))
+            .network_policy(CliNetworkPolicy::new(&theme));
     }
 
     // Effort level

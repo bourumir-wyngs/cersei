@@ -13,7 +13,10 @@
 //! S         = allow for the rest of the session
 //! A         = always allow
 
+use crate::theme::Theme;
 use cersei_tools::network_policy::{NetworkAccess, NetworkPolicy};
+use crossterm::execute;
+use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForegroundColor};
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -21,13 +24,15 @@ use std::io::{self, Write};
 pub struct CliNetworkPolicy {
     session_allowed: Mutex<HashSet<String>>,
     always_allowed: Mutex<HashSet<String>>,
+    theme: Theme,
 }
 
 impl CliNetworkPolicy {
-    pub fn new() -> Self {
+    pub fn new(theme: &Theme) -> Self {
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             always_allowed: Mutex::new(HashSet::new()),
+            theme: theme.clone(),
         }
     }
 }
@@ -64,10 +69,26 @@ impl NetworkPolicy for CliNetworkPolicy {
             NetworkAccess::Local => "local network",
             NetworkAccess::Blocked => unreachable!(),
         };
-        eprint!("\n");
-        eprint!("  \x1b[33;1mNetwork access: {}  ({})\x1b[0m\n", tool_name, access_label);
-        eprint!("  \x1b[90m{}\x1b[0m\n", preview);
-        eprint!("  \x1b[33m[Y]es  [N]o  [S]ession  [A]lways\x1b[0m ");
+        let _ = execute!(
+            io::stderr(),
+            Print("\n"),
+            SetForegroundColor(self.theme.permission_accent),
+            SetAttribute(Attribute::Bold),
+            Print(format!(
+                "  Network access: {}  ({})",
+                tool_name, access_label
+            )),
+            ResetColor,
+            SetAttribute(Attribute::Reset),
+            Print("\n"),
+            SetForegroundColor(self.theme.review_text),
+            Print(format!("  {preview}")),
+            ResetColor,
+            Print("\n"),
+            SetForegroundColor(self.theme.permission_accent),
+            Print("  [Y]es  [N]o  [S]ession  [A]lways "),
+            ResetColor,
+        );
         let _ = io::stderr().flush();
 
         match read_char() {
