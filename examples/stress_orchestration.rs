@@ -28,7 +28,7 @@ impl Provider for EchoProvider {
         let (tx, rx) = mpsc::channel(16);
         tokio::spawn(async move {
             let _ = tx.send(StreamEvent::MessageStart { id: "1".into(), model: "echo".into() }).await;
-            let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None }).await;
+            let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
             let _ = tx.send(StreamEvent::TextDelta { index: 0, text: format!("[Echo] {}", &prompt[..prompt.len().min(100)]) }).await;
             let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
             let _ = tx.send(StreamEvent::MessageDelta {
@@ -278,17 +278,25 @@ async fn run() {
         }
 
         let results: Vec<_> = futures::future::join_all(handles).await;
-        let all_ok = results.iter().all(|r| r.as_ref().map(|(_, r)| !r.is_error).unwrap_or(false));
+        let all_ok = results.iter().all(|r| {
+            if let Ok((_, tr)) = r {
+                !tr.is_error
+            } else {
+                false
+            }
+        });
         check!("All 3 workers completed", all_ok);
 
         // Mark tasks complete
         let update = cersei_tools::tasks::TaskUpdateTool;
-        for (id, result) in results.iter().filter_map(|r| r.as_ref().ok()) {
-            update.execute(serde_json::json!({
-                "id": id,
-                "status": "completed",
-                "output": &result.content
-            }), &ctx).await;
+        for res_outer in results {
+            if let Ok((id, tr)) = res_outer {
+                update.execute(serde_json::json!({
+                    "id": id,
+                    "status": "completed",
+                    "output": &tr.content
+                }), &ctx).await;
+            }
         }
 
         let completed = cersei_tools::tasks::list_tasks()

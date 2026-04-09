@@ -101,16 +101,16 @@ impl Provider for SimulatedClaude {
             match turn {
                 0 => {
                     // Turn 1: model reads a file (tool call)
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "thinking".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "thinking".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::ThinkingDelta { index: 0, thinking: "Let me look at the project structure first...".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
 
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::TextDelta { index: 1, text: "I'll start by examining the project structure.".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 1 }).await;
 
                     // Tool use: Glob
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 2, block_type: "tool_use".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 2, block_type: "tool_use".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::InputJsonDelta { index: 2, partial_json: r#"{"pattern": "**/*.rs"}"#.into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 2 }).await;
 
@@ -132,11 +132,11 @@ impl Provider for SimulatedClaude {
                 }
                 1 => {
                     // Turn 2: model reads a specific file (another tool call)
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::TextDelta { index: 0, text: "Let me read the main source file.".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
 
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::InputJsonDelta { index: 1, partial_json: r#"{"file_path": "src/main.rs"}"#.into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 1 }).await;
 
@@ -158,11 +158,11 @@ impl Provider for SimulatedClaude {
                 }
                 _ => {
                     // Turn 3: final response (end_turn)
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "thinking".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "thinking".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::ThinkingDelta { index: 0, thinking: "I've analyzed the project. Let me summarize my findings...".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
 
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let response = "Based on my analysis of the project:\n\n\
                         - **Structure**: 9 crates in a Cargo workspace\n\
                         - **Total files**: 24 Rust source files\n\

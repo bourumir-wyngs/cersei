@@ -64,6 +64,7 @@ impl Provider for EchoProvider {
                 block_type: "text".into(),
                 id: None,
                 name: None,
+                thought_signature: None,
             }).await;
 
             // Stream word by word for demonstration

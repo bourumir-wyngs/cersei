@@ -297,7 +297,7 @@ impl Provider for MockCodingProvider {
             match turn {
                 0 => {
                     // Turn 1: Write todo.py
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::TextDelta { index: 0,
                         text: "I'll create the todo CLI app. Let me write `todo.py` first.\n".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
@@ -308,7 +308,7 @@ impl Provider for MockCodingProvider {
                         "file_path": file_path,
                         "content": TODO_PY,
                     });
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: Some("tu_write1".into()), name: Some("Write".into()) }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: Some("tu_write1".into()), name: Some("Write".into()), thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::InputJsonDelta { index: 1,
                         partial_json: serde_json::to_string(&tool_input).unwrap() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 1 }).await;
@@ -331,7 +331,7 @@ impl Provider for MockCodingProvider {
                 }
                 1 => {
                     // Turn 2: Write README.md
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::TextDelta { index: 0,
                         text: "Now I'll create a README.md.\n".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
@@ -341,7 +341,7 @@ impl Provider for MockCodingProvider {
                         "file_path": file_path,
                         "content": README_CONTENT,
                     });
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: Some("tu_write2".into()), name: Some("Write".into()) }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: Some("tu_write2".into()), name: Some("Write".into()), thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::InputJsonDelta { index: 1,
                         partial_json: serde_json::to_string(&tool_input).unwrap() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 1 }).await;
@@ -364,7 +364,7 @@ impl Provider for MockCodingProvider {
                 }
                 2 => {
                     // Turn 3: Verify with python3
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::TextDelta { index: 0,
                         text: "Let me verify the Python syntax.\n".into() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
@@ -373,7 +373,7 @@ impl Provider for MockCodingProvider {
                     let tool_input = serde_json::json!({
                         "command": format!("python3 -c \"import ast; ast.parse(open('{}').read()); print('Syntax OK')\"", py_path),
                     });
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: Some("tu_bash1".into()), name: Some("Bash".into()) }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 1, block_type: "tool_use".into(), id: Some("tu_bash1".into()), name: Some("Bash".into()), thought_signature: None }).await;
                     let _ = tx.send(StreamEvent::InputJsonDelta { index: 1,
                         partial_json: serde_json::to_string(&tool_input).unwrap() }).await;
                     let _ = tx.send(StreamEvent::ContentBlockStop { index: 1 }).await;
@@ -396,7 +396,7 @@ impl Provider for MockCodingProvider {
                 }
                 _ => {
                     // Turn 4: Final summary
-                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None }).await;
+                    let _ = tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into(), id: None, name: None, thought_signature: None }).await;
                     let summary = "I've created the Python todo CLI application:\n\n\
                         **Files created:**\n\
                         - `todo.py` — Full CLI with add, list, done, remove, clear commands\n\

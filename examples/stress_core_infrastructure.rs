@@ -172,6 +172,7 @@ fn main() {
                     id: format!("t{}", i),
                     name: "Read".into(),
                     input: serde_json::json!({"file_path": format!("src/mod_{}.rs", i)}),
+                    thought_signature: None,
                 },
             ]));
             messages.push(Message::user_blocks(vec![ContentBlock::ToolResult {

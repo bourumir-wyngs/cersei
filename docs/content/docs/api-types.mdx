@@ -82,7 +82,13 @@ Events emitted during streaming completion:
 ```rust
 pub enum StreamEvent {
     MessageStart { id: String, model: String },
-    ContentBlockStart { index: usize, block_type: String, id: Option<String>, name: Option<String> },
+    ContentBlockStart {
+        index: usize,
+        block_type: String,
+        id: Option<String>,
+        name: Option<String>,
+        thought_signature: Option<String>,
+    },
     TextDelta { index: usize, text: String },
     InputJsonDelta { index: usize, partial_json: String },
     ThinkingDelta { index: usize, thinking: String },

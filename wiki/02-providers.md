@@ -134,7 +134,13 @@ impl Provider for MyLlm {
         // Spawn async task to send StreamEvents
         tokio::spawn(async move {
             tx.send(StreamEvent::MessageStart { id: "1".into(), model: "my-llm".into() }).await.ok();
-            tx.send(StreamEvent::ContentBlockStart { index: 0, block_type: "text".into() }).await.ok();
+            tx.send(StreamEvent::ContentBlockStart {
+                index: 0,
+                block_type: "text".into(),
+                id: None,
+                name: None,
+                thought_signature: None,
+            }).await.ok();
             tx.send(StreamEvent::TextDelta { index: 0, text: "Hello!".into() }).await.ok();
             tx.send(StreamEvent::ContentBlockStop { index: 0 }).await.ok();
             tx.send(StreamEvent::MessageDelta {
@@ -194,7 +200,7 @@ Events emitted by the provider's streaming response:
 | Event | Description |
 |-------|-------------|
 | `MessageStart { id, model }` | Response begins |
-| `ContentBlockStart { index, block_type }` | New content block (text, tool_use, thinking) |
+| `ContentBlockStart { index, block_type, id, name, thought_signature }` | New content block (text, tool_use, thinking) |
 | `TextDelta { index, text }` | Incremental text |
 | `InputJsonDelta { index, partial_json }` | Incremental tool input JSON |
 | `ThinkingDelta { index, thinking }` | Incremental thinking text |

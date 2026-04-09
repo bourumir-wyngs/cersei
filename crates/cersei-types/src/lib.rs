@@ -289,7 +289,7 @@ pub struct ToolDefinition {
 
 // ─── Stream events ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StreamEvent {
     MessageStart {
         id: String,

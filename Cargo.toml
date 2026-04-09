@@ -10,6 +10,7 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 default-run = "cersei"
+autoexamples = false
 
 [[bin]]
 name = "cersei"
