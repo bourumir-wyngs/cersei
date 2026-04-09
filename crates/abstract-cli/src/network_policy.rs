@@ -21,6 +21,9 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::io::{self, Write};
 
+const MAX_REVIEW_PREVIEW_LINES: usize = 5;
+const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
+
 pub struct CliNetworkPolicy {
     session_allowed: Mutex<HashSet<String>>,
     always_allowed: Mutex<HashSet<String>>,
@@ -59,11 +62,7 @@ impl NetworkPolicy for CliNetworkPolicy {
         }
 
         // Prompt user.
-        let preview = if command.len() > 80 {
-            format!("{}…", &command[..79])
-        } else {
-            command.to_string()
-        };
+        let preview = truncate_review_text(command);
         let access_label = match requested {
             NetworkAccess::Full => "full network",
             NetworkAccess::Local => "local network",
@@ -82,7 +81,7 @@ impl NetworkPolicy for CliNetworkPolicy {
             SetAttribute(Attribute::Reset),
             Print("\n"),
             SetForegroundColor(self.theme.review_text),
-            Print(format!("  {preview}")),
+            Print(indent_review_text(&preview)),
             ResetColor,
             Print("\n"),
             SetForegroundColor(self.theme.permission_accent),
@@ -104,6 +103,42 @@ impl NetworkPolicy for CliNetworkPolicy {
             _ => NetworkAccess::Blocked,
         }
     }
+}
+
+fn truncate_review_text(s: &str) -> String {
+    let original_line_count = s.lines().count();
+    let mut lines: Vec<&str> = s.lines().take(MAX_REVIEW_PREVIEW_LINES + 1).collect();
+    let truncated_by_lines = if original_line_count > MAX_REVIEW_PREVIEW_LINES {
+        lines.truncate(MAX_REVIEW_PREVIEW_LINES);
+        true
+    } else {
+        false
+    };
+
+    let joined = lines.join("\n");
+    let original_char_count = s.chars().count();
+    let truncated_by_chars = original_char_count > MAX_REVIEW_PREVIEW_CHARS;
+    let mut preview = if truncated_by_chars {
+        joined
+            .chars()
+            .take(MAX_REVIEW_PREVIEW_CHARS)
+            .collect::<String>()
+    } else {
+        joined
+    };
+
+    if truncated_by_lines || truncated_by_chars {
+        preview.push('…');
+    }
+
+    preview
+}
+
+fn indent_review_text(s: &str) -> String {
+    s.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn read_char() -> char {

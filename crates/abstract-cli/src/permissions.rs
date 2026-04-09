@@ -12,6 +12,9 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::io::{self, Write};
 
+const MAX_REVIEW_PREVIEW_LINES: usize = 5;
+const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
+
 /// Interactive permission policy for the CLI.
 /// Prompts user for Write/Execute/Dangerous tools, auto-allows ReadOnly/None.
 pub struct CliPermissionPolicy {
@@ -75,7 +78,7 @@ impl PermissionPolicy for CliPermissionPolicy {
             let _ = execute!(
                 io::stderr(),
                 SetForegroundColor(self.theme.review_text),
-                Print(format!("  {preview}")),
+                Print(indent_review_text(&preview)),
                 ResetColor,
                 Print("\n"),
             );
@@ -117,23 +120,50 @@ fn permission_preview(request: &PermissionRequest) -> Option<String> {
             .tool_input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| truncate(s, 120)),
+            .map(truncate_review_text),
         "Process" => request
             .tool_input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| truncate(s, 120)),
+            .map(truncate_review_text),
         _ => None,
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
+fn truncate_review_text(s: &str) -> String {
+    let original_line_count = s.lines().count();
+    let mut lines: Vec<&str> = s.lines().take(MAX_REVIEW_PREVIEW_LINES + 1).collect();
+    let truncated_by_lines = if original_line_count > MAX_REVIEW_PREVIEW_LINES {
+        lines.truncate(MAX_REVIEW_PREVIEW_LINES);
+        true
     } else {
-        let truncated: String = s.chars().take(max).collect();
-        format!("{truncated}…")
+        false
+    };
+
+    let joined = lines.join("\n");
+    let original_char_count = s.chars().count();
+    let truncated_by_chars = original_char_count > MAX_REVIEW_PREVIEW_CHARS;
+    let mut preview = if truncated_by_chars {
+        joined
+            .chars()
+            .take(MAX_REVIEW_PREVIEW_CHARS)
+            .collect::<String>()
+    } else {
+        joined
+    };
+
+    if truncated_by_lines || truncated_by_chars {
+        preview.push('…');
     }
+
+    preview
+}
+
+fn indent_review_text(s: &str) -> String {
+    s.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn read_permission_char() -> char {

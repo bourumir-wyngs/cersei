@@ -78,7 +78,7 @@ impl StreamRenderer {
             Print(format!("  [{name}]")),
             ResetColor,
             SetForegroundColor(tool_summary_color(name, &self.theme)),
-            Print(format!(" {summary}")),
+            Print(format_tool_summary(name, &summary)),
             ResetColor,
             Print("\n"),
         );
@@ -301,12 +301,20 @@ fn crossterm_to_termimad_color(c: Color) -> termimad::crossterm::style::Color {
     }
 }
 
+const MAX_REVIEW_PREVIEW_LINES: usize = 5;
+const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
+
 fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
     match name {
         "Bash" | "bash" => input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| truncate(s, 80))
+            .map(truncate_review_text)
+            .unwrap_or_default(),
+        "Process" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(truncate_review_text)
             .unwrap_or_default(),
         "Read" | "file_read" => input
             .get("file_path")
@@ -345,6 +353,51 @@ fn tool_summary_color(name: &str, theme: &Theme) -> Color {
         "Bash" | "bash" | "Process" => theme.review_text,
         _ => theme.dim,
     }
+}
+
+fn format_tool_summary(name: &str, summary: &str) -> String {
+    let mut lines = summary.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+
+    let continuation_indent = " ".repeat(name.len() + 5);
+    let mut formatted = format!(" {first}");
+    for line in lines {
+        formatted.push('\n');
+        formatted.push_str(&continuation_indent);
+        formatted.push_str(line);
+    }
+    formatted
+}
+
+fn truncate_review_text(s: &str) -> String {
+    let original_line_count = s.lines().count();
+    let mut lines: Vec<&str> = s.lines().take(MAX_REVIEW_PREVIEW_LINES + 1).collect();
+    let truncated_by_lines = if original_line_count > MAX_REVIEW_PREVIEW_LINES {
+        lines.truncate(MAX_REVIEW_PREVIEW_LINES);
+        true
+    } else {
+        false
+    };
+
+    let joined = lines.join("\n");
+    let original_char_count = s.chars().count();
+    let truncated_by_chars = original_char_count > MAX_REVIEW_PREVIEW_CHARS;
+    let mut preview = if truncated_by_chars {
+        joined
+            .chars()
+            .take(MAX_REVIEW_PREVIEW_CHARS)
+            .collect::<String>()
+    } else {
+        joined
+    };
+
+    if truncated_by_lines || truncated_by_chars {
+        preview.push('…');
+    }
+
+    preview
 }
 
 fn truncate(s: &str, max: usize) -> String {
