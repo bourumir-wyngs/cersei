@@ -38,8 +38,8 @@ impl Tool for NpmTool {
                 },
                 "network": {
                     "type": "string",
-                    "enum": ["none", "full"],
-                    "description": "Network access required. Default: none (sandboxed, no network). Use 'full' for npm install or other registry access."
+                    "enum": ["none", "local", "full"],
+                    "description": "Network access required. Default: none (sandboxed, no network). Use 'local' for local network only. Use 'full' for npm install or other registry access."
                 }
             },
             "required": ["args"]

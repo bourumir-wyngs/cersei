@@ -1,14 +1,15 @@
 //! Interactive network-access policy for the CLI.
 //!
-//! When the AI requests `network: "full"`, the user is prompted once per tool
-//! type. No prompt is shown when the AI requests no network (default).
+//! When the AI requests `network: "full"` or `network: "local"`, the user is
+//! prompted once per tool type. No prompt is shown when the AI requests no
+//! network (default).
 //!
-//!   Network access: Npm  (requests: full network)
+//!   Network access: Npm  (requests: local network)
 //!   npm install react
 //!   [Y]es  [N]o  [S]ession  [A]lways
 //!
-//! Y / Enter = allow full network, once
-//! N         = block (run sandboxed), once
+//! Y / Enter = allow the requested access level, once
+//! N         = block (run sandboxed with --net=none), once
 //! S         = allow for the rest of the session
 //! A         = always allow
 
@@ -46,10 +47,10 @@ impl NetworkPolicy for CliNetworkPolicy {
 
         // Check permanent then session cache.
         if self.always_allowed.lock().contains(tool_name) {
-            return NetworkAccess::Full;
+            return requested;
         }
         if self.session_allowed.lock().contains(tool_name) {
-            return NetworkAccess::Full;
+            return requested;
         }
 
         // Prompt user.
@@ -58,21 +59,26 @@ impl NetworkPolicy for CliNetworkPolicy {
         } else {
             command.to_string()
         };
+        let access_label = match requested {
+            NetworkAccess::Full => "full network",
+            NetworkAccess::Local => "local network",
+            NetworkAccess::Blocked => unreachable!(),
+        };
         eprint!("\n");
-        eprint!("  \x1b[33;1mNetwork access: {}\x1b[0m\n", tool_name);
+        eprint!("  \x1b[33;1mNetwork access: {}  ({})\x1b[0m\n", tool_name, access_label);
         eprint!("  \x1b[90m{}\x1b[0m\n", preview);
         eprint!("  \x1b[33m[Y]es  [N]o  [S]ession  [A]lways\x1b[0m ");
         let _ = io::stderr().flush();
 
         match read_char() {
-            'y' | 'Y' | '\n' => NetworkAccess::Full,
+            'y' | 'Y' | '\n' => requested,
             's' | 'S' => {
                 self.session_allowed.lock().insert(tool_name.to_string());
-                NetworkAccess::Full
+                requested
             }
             'a' | 'A' => {
                 self.always_allowed.lock().insert(tool_name.to_string());
-                NetworkAccess::Full
+                requested
             }
             _ => NetworkAccess::Blocked,
         }

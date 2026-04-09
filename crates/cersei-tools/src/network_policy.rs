@@ -2,13 +2,14 @@
 //!
 //! The AI declares whether it needs network via a `network` field in tool input:
 //! - `"none"` (default) — run under `firejail --net=none`, no prompt
+//! - `"local"` — local network only; run under `firejail --net=sandbox`
 //! - `"full"` — full network requested; policy prompts the user to approve or deny
 //!
 //! ## Sandbox backend
 //!
-//! Uses `firejail --quiet --noprofile --net=none` when available (probed once at
-//! startup). Falls back to unsandboxed execution if firejail is not installed,
-//! with a one-time warning via [`sandbox_warning`].
+//! Uses `firejail --quiet --noprofile` when available (probed once at startup).
+//! Falls back to unsandboxed execution if firejail is not installed, with a
+//! one-time warning via [`sandbox_warning`].
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -47,15 +48,18 @@ pub fn sandbox_warning() -> Option<&'static str> {
 pub enum NetworkAccess {
     /// Full unrestricted network access.
     Full,
+    /// Local network only — sandboxed with `firejail --net=sandbox`.
+    Local,
     /// No network — sandboxed with `firejail --net=none` (or plain `sh` if unavailable).
     Blocked,
 }
 
 impl NetworkAccess {
-    /// Parse from the AI's tool input field (`"full"` or `"none"`/absent → Blocked).
+    /// Parse from the AI's tool input field (`"full"`, `"local"`, or `"none"`/absent → Blocked).
     pub fn from_input(s: Option<&str>) -> Self {
         match s {
             Some("full") => Self::Full,
+            Some("local") => Self::Local,
             _ => Self::Blocked,
         }
     }
@@ -110,6 +114,8 @@ impl NetworkPolicy for Arc<dyn NetworkPolicy> {
 /// Build a shell command with the appropriate network sandbox applied.
 ///
 /// - `Full`    → `sh -c <command>`
+/// - `Local`   → `firejail --quiet --noprofile --net=sandbox -- sh -c <command>`
+///               (falls back to `sh -c` if firejail is unavailable)
 /// - `Blocked` → `firejail --quiet --noprofile --net=none -- sh -c <command>`
 ///               (falls back to `sh -c` if firejail is unavailable)
 pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
@@ -118,7 +124,11 @@ pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
         cmd.args(["-c", command]);
         return cmd;
     }
+    let net_flag = match access {
+        NetworkAccess::Local => "--net=sandbox",
+        _ => "--net=none",
+    };
     let mut cmd = Command::new("firejail");
-    cmd.args(["--quiet", "--noprofile", "--net=none", "--", "sh", "-c", command]);
+    cmd.args(["--quiet", "--noprofile", net_flag, "--", "sh", "-c", command]);
     cmd
 }

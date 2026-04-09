@@ -48,3 +48,22 @@ When the AI requests `network: "full"`, you will see:
 - **A** — always allow for this tool
 
 Pass `--no-permissions` to skip all prompts and allow everything (CI/headless mode).
+
+# Bridge "sandbox" (local network access only)
+
+## Create
+This tool supports running applications withing the sandbox (multiple processes like backend server, database can run within the sandbox and see each other, but they otherwise do not see or are accessible even for/from local host. 
+
+sudo ip link add sandbox type bridge
+sudo ip addr add 10.200.1.1/24 dev sandbox
+sudo ip link set sandbox up
+
+## Check
+ip a show sandbox
+
+## Run app on sandbox
+firejail --net=sandbox node app.js
+
+IMPORTANT: It is your responsibility to create the "sandbox" bridge before running cersei, and ensure it is 
+configured correctly.
+

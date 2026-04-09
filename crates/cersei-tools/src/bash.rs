@@ -32,8 +32,8 @@ impl Tool for BashTool {
                 },
                 "network": {
                     "type": "string",
-                    "enum": ["none", "full"],
-                    "description": "Network access required. Default: none (sandboxed, no network). Use 'full' when the command needs external network access."
+                    "enum": ["none", "local", "full"],
+                    "description": "Network access required. Default: none (sandboxed, no network). Use 'local' for local network only (e.g. localhost services). Use 'full' when the command needs external network access."
                 }
             },
             "required": ["command"]

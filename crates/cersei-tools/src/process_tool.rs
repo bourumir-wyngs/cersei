@@ -73,8 +73,8 @@ impl Tool for ProcessTool {
                 },
                 "network": {
                     "type": "string",
-                    "enum": ["none", "full"],
-                    "description": "Network access for the process (only applies to 'start'). Default: none (sandboxed, no network). Use 'full' when the process needs external network access."
+                    "enum": ["none", "local", "full"],
+                    "description": "Network access for the process (only applies to 'start'). Default: none (sandboxed, no network). Use 'local' for local network only (e.g. localhost services). Use 'full' when the process needs external network access."
                 }
             },
             "required": ["action"]
