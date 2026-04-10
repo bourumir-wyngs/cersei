@@ -186,6 +186,7 @@ async fn ensure_start_permission(
         permission_level: PermissionLevel::Execute,
         description: format!("Start process: {}", preview),
         id: format!("process-start-{}", uuid::Uuid::new_v4()),
+        working_dir: ctx.working_dir.clone(),
     };
 
     match ctx.permissions.check(&request).await {

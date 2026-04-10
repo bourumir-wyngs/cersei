@@ -33,8 +33,12 @@ pub struct CliPermissionPolicy {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersistedPermissionRule {
     regex: String,
+    #[serde(default)]
     network: bool,
+    #[serde(default)]
     allow: bool,
+    #[serde(default)]
+    allow_read: Vec<String>,
 }
 
 type PersistedPermissions = Vec<PersistedPermissionRule>;
@@ -76,7 +80,16 @@ pub(crate) fn command_line_from_tool_input(
 }
 
 pub(crate) fn match_persisted_permission(command_line: &str, network: bool) -> Option<bool> {
-    load_persisted_file().into_iter().find_map(|rule| {
+    let persisted = load_persisted_file();
+    match_persisted_permission_in(&persisted, command_line, network)
+}
+
+fn match_persisted_permission_in(
+    persisted: &[PersistedPermissionRule],
+    command_line: &str,
+    network: bool,
+) -> Option<bool> {
+    persisted.iter().find_map(|rule| {
         if rule.network != network {
             return None;
         }
@@ -98,6 +111,7 @@ pub(crate) fn register_command_line(command_line: &str) {
         regex,
         network: false,
         allow: false,
+        allow_read: Vec::new(),
     });
     save_persisted_file_to(&path, &persisted);
 }
@@ -120,8 +134,9 @@ impl PermissionPolicy for CliPermissionPolicy {
         }
 
         let command_line = command_line_from_request(request);
+        let persisted = load_persisted_file();
 
-        if let Some(allow) = match_persisted_permission(&command_line, false) {
+        if let Some(allow) = match_persisted_permission_in(&persisted, &command_line, false) {
             return if allow {
                 PermissionDecision::Allow
             } else {
@@ -130,8 +145,13 @@ impl PermissionPolicy for CliPermissionPolicy {
         }
 
         match request.permission_level {
-            PermissionLevel::None | PermissionLevel::ReadOnly => {
+            PermissionLevel::None => {
                 return PermissionDecision::Allow;
+            }
+            PermissionLevel::ReadOnly => {
+                if read_only_targets_allowed(request, &persisted).unwrap_or(true) {
+                    return PermissionDecision::Allow;
+                }
             }
             _ => {}
         }
@@ -215,6 +235,73 @@ impl PermissionPolicy for CliPermissionPolicy {
             }
         }
     }
+}
+
+fn read_only_targets_allowed(
+    request: &PermissionRequest,
+    persisted: &[PersistedPermissionRule],
+) -> Option<bool> {
+    if request.permission_level != PermissionLevel::ReadOnly {
+        return None;
+    }
+
+    let targets = extract_read_targets(request)?;
+    if targets.is_empty() {
+        return Some(true);
+    }
+
+    let workspace_root = normalize_path(&request.working_dir, &request.working_dir);
+    let allow_read_roots: Vec<PathBuf> = persisted
+        .iter()
+        .flat_map(|rule| rule.allow_read.iter())
+        .map(|path| normalize_path(Path::new(path), &request.working_dir))
+        .collect();
+
+    Some(targets.iter().all(|target| {
+        path_within(target, &workspace_root)
+            || allow_read_roots
+                .iter()
+                .any(|allowed_root| path_within(target, allowed_root))
+    }))
+}
+
+fn extract_read_targets(request: &PermissionRequest) -> Option<Vec<PathBuf>> {
+    let tool_input = &request.tool_input;
+    let path_field = |name: &str| tool_input.get(name).and_then(|value| value.as_str());
+
+    match request.tool_name.as_str() {
+        "Read" => Some(vec![resolve_request_path(
+            path_field("file_path")?,
+            &request.working_dir,
+        )]),
+        "Glob" | "Grep" | "ListDirectory" => Some(vec![resolve_request_path(
+            path_field("path").unwrap_or_else(|| request.working_dir.to_str().unwrap_or(".")),
+            &request.working_dir,
+        )]),
+        "Git" => Some(vec![resolve_request_path(
+            path_field("repo_path").unwrap_or_else(|| request.working_dir.to_str().unwrap_or(".")),
+            &request.working_dir,
+        )]),
+        _ => None,
+    }
+}
+
+fn resolve_request_path(raw_path: &str, working_dir: &Path) -> PathBuf {
+    normalize_path(Path::new(raw_path), working_dir)
+}
+
+fn normalize_path(path: &Path, working_dir: &Path) -> PathBuf {
+    let combined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        working_dir.join(path)
+    };
+
+    combined.canonicalize().unwrap_or(combined)
+}
+
+fn path_within(target: &Path, allowed_root: &Path) -> bool {
+    target == allowed_root || target.starts_with(allowed_root)
 }
 
 fn permission_preview(request: &PermissionRequest, command_line: &str) -> Option<String> {
@@ -331,6 +418,7 @@ mod tests {
             permission_level: PermissionLevel::Execute,
             description: "test".into(),
             id: "test-id".into(),
+            working_dir: PathBuf::from("/tmp/workspace"),
         }
     }
 
@@ -383,11 +471,13 @@ mod tests {
                 regex: "^cargo build$".into(),
                 network: false,
                 allow: true,
+                allow_read: Vec::new(),
             },
             PersistedPermissionRule {
                 regex: "^npm install react$".into(),
                 network: true,
                 allow: false,
+                allow_read: Vec::new(),
             },
         ];
 
@@ -408,6 +498,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_network_and_allow_default_to_false() {
+        let path = temp_permissions_path();
+        std::fs::write(&path, "- regex: '^cargo build$'\n").unwrap();
+
+        let loaded = load_persisted_file_from(&path);
+
+        assert_eq!(
+            loaded,
+            vec![PersistedPermissionRule {
+                regex: "^cargo build$".into(),
+                network: false,
+                allow: false,
+                allow_read: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
     fn invalid_regex_rule_is_ignored() {
         let path = temp_permissions_path();
         let perms = vec![
@@ -415,11 +523,13 @@ mod tests {
                 regex: "(".into(),
                 network: false,
                 allow: true,
+                allow_read: Vec::new(),
             },
             PersistedPermissionRule {
                 regex: "^cargo build$".into(),
                 network: false,
                 allow: false,
+                allow_read: Vec::new(),
             },
         ];
         save_persisted_file_to(&path, &perms);
@@ -443,11 +553,13 @@ mod tests {
                 regex: "^cargo .*$".into(),
                 network: false,
                 allow: false,
+                allow_read: Vec::new(),
             },
             PersistedPermissionRule {
                 regex: "^cargo build$".into(),
                 network: false,
                 allow: true,
+                allow_read: Vec::new(),
             },
         ];
         let path = temp_permissions_path();
@@ -464,6 +576,53 @@ mod tests {
             });
 
         assert_eq!(matched, Some(false));
+    }
+
+    #[test]
+    fn read_only_targets_within_workspace_are_allowed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("src").join("main.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        let request = PermissionRequest {
+            tool_name: "Read".into(),
+            tool_input: json!({ "file_path": file.display().to_string() }),
+            permission_level: PermissionLevel::ReadOnly,
+            description: "test".into(),
+            id: "test-id".into(),
+            working_dir: workspace.path().to_path_buf(),
+        };
+
+        assert_eq!(read_only_targets_allowed(&request, &[]), Some(true));
+    }
+
+    #[test]
+    fn read_only_targets_outside_workspace_need_allow_read() {
+        let workspace = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let file = external.path().join("lib.rs");
+        std::fs::write(&file, "pub fn demo() {}").unwrap();
+
+        let request = PermissionRequest {
+            tool_name: "Read".into(),
+            tool_input: json!({ "file_path": file.display().to_string() }),
+            permission_level: PermissionLevel::ReadOnly,
+            description: "test".into(),
+            id: "test-id".into(),
+            working_dir: workspace.path().to_path_buf(),
+        };
+
+        assert_eq!(read_only_targets_allowed(&request, &[]), Some(false));
+
+        let rules = vec![PersistedPermissionRule {
+            regex: "^$".into(),
+            network: false,
+            allow: false,
+            allow_read: vec![external.path().display().to_string()],
+        }];
+
+        assert_eq!(read_only_targets_allowed(&request, &rules), Some(true));
     }
 
     #[test]

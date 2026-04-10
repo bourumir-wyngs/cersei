@@ -447,6 +447,7 @@ pub async fn run_agent_streaming(
                                 permission_level: tool.permission_level(),
                                 description: format!("Execute tool '{}'", tool_name),
                                 id: tool_id.clone(),
+                                working_dir: tool_ctx.working_dir.clone(),
                             };
 
                             let decision = agent.permission_policy.check(&perm_req).await;

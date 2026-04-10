@@ -3,6 +3,7 @@
 use super::PermissionLevel;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 // ─── Permission policy trait ─────────────────────────────────────────────────
 
@@ -18,6 +19,7 @@ pub struct PermissionRequest {
     pub permission_level: PermissionLevel,
     pub description: String,
     pub id: String,
+    pub working_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]

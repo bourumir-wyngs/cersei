@@ -54,7 +54,11 @@ Persisted permission rules live in `~/.abstract/permissions_<project>.yaml`, whe
 - regex: "^npm install react$"
   network: true
   allow: true
+  allow_read:
+    - /home/audrius/.cargo/registry/src/
 ```
+
+`allow_read` is optional. It lists filesystem roots that path-based read-only tools such as `Read`, `Glob`, `Grep`, `ListDirectory`, and read-only `Git` access may use without prompting, in addition to the current workspace.
 
 Pass `--no-permissions` to skip all prompts and allow everything (CI/headless mode).
 
