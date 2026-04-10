@@ -74,6 +74,14 @@ pub trait Tool: Send + Sync {
         ToolCategory::Custom
     }
 
+    /// Validate or short-circuit tool execution before permissions are checked.
+    ///
+    /// This is useful for rejecting obviously misrouted tool calls such as
+    /// `Bash` invocations that should use a dedicated tool instead.
+    fn preflight(&self, _input: &Value, _ctx: &ToolContext) -> Option<ToolResult> {
+        None
+    }
+
     /// Execute the tool with the given JSON input.
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult;
 

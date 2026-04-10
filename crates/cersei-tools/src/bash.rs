@@ -7,6 +7,37 @@ use std::process::Stdio;
 
 pub struct BashTool;
 
+fn tool_override_for_command(command: &str) -> Option<(&str, &'static str)> {
+    let cmd_trim = command.trim();
+    let cmd_base_full = cmd_trim.split_whitespace().next().unwrap_or("");
+    let cmd_base = cmd_base_full.rsplit('/').next().unwrap_or(cmd_base_full);
+    let tool_name = match cmd_base {
+        "ls" | "tree" | "exa" | "lsd" => Some("ListDirectory"),
+        "grep" | "rg" | "ag" => Some("Grep"),
+        "cat" | "bat" | "head" | "tail" | "less" | "more" => Some("Read"),
+        "sed" => Some("Sed"),
+        "find" | "fd" => Some("Glob"),
+        "npm" | "yarn" | "pnpm" => Some("Npm"),
+        "npx" => Some("Npx"),
+        "cargo" => Some("Cargo"),
+        "git" => Some("Git"),
+        "mysql" => Some("MySql"),
+        "psql" => Some("PostgreSql"),
+        "curl" | "wget" => Some("WebFetch"),
+        "pwsh" => Some("PowerShell"),
+        _ => None,
+    }?;
+    Some((cmd_base, tool_name))
+}
+
+fn tool_override_error(command: &str) -> Option<String> {
+    let (cmd_base, tool_name) = tool_override_for_command(command)?;
+    Some(format!(
+        "Action denied, do not use bash for '{}', use {}. If does not do what you want or is buggy, report to the user.",
+        cmd_base, tool_name
+    ))
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -48,6 +79,11 @@ impl Tool for BashTool {
         })
     }
 
+    fn preflight(&self, input: &Value, _ctx: &ToolContext) -> Option<ToolResult> {
+        let command = input.get("command")?.as_str()?;
+        tool_override_error(command).map(ToolResult::error)
+    }
+
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
         struct Input {
@@ -61,28 +97,8 @@ impl Tool for BashTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let cmd_trim = input.command.trim();
-        let cmd_base_full = cmd_trim.split_whitespace().next().unwrap_or("");
-        let cmd_base = cmd_base_full.rsplit('/').next().unwrap_or(cmd_base_full);
-        let tool_override = match cmd_base {
-            "ls" | "tree" | "exa" | "lsd" => Some("ListDirectory"),
-            "grep" | "rg" | "ag" => Some("Grep"),
-            "cat" | "bat" | "head" | "tail" | "less" | "more" => Some("Read"),
-            "sed" => Some("Sed"),
-            "find" | "fd" => Some("Glob"),
-            "npm" | "yarn" | "pnpm" => Some("Npm"),
-            "npx" => Some("Npx"),
-            "cargo" => Some("Cargo"),
-            "git" => Some("Git"),
-            "mysql" => Some("MySql"),
-            "psql" => Some("PostgreSql"),
-            "curl" | "wget" => Some("WebFetch"),
-            "pwsh" => Some("PowerShell"),
-            _ => None,
-        };
-        if let Some(tool_name) = tool_override {
-            return ToolResult::error(format!("Action denied, do not use bash for '{}',\
-             use {}. If does not do what you want or is buggy, report to the user.", cmd_base, tool_name));
+        if let Some(message) = tool_override_error(&input.command) {
+            return ToolResult::error(message);
         }
 
         let shell_state = session_shell_state(&ctx.session_id);
@@ -158,5 +174,29 @@ impl Tool for BashTool {
             Ok(Err(e)) => ToolResult::error(format!("Failed to execute: {}", e)),
             Err(_) => ToolResult::error(format!("Command timed out after {}ms", timeout_ms)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn preflight_rejects_ls_before_execution() {
+        let tool = BashTool;
+        let result = tool.preflight(&json!({"command": "ls -la"}), &ToolContext::default());
+
+        let result = result.expect("expected preflight rejection");
+        assert!(result.is_error);
+        assert!(result.content.contains("use ListDirectory"));
+    }
+
+    #[test]
+    fn preflight_allows_normal_shell_commands() {
+        let tool = BashTool;
+        let result = tool.preflight(&json!({"command": "echo hello"}), &ToolContext::default());
+
+        assert!(result.is_none());
     }
 }

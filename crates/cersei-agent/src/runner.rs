@@ -437,47 +437,52 @@ pub async fn run_agent_streaming(
                     let tool = agent.tools.iter().find(|t| t.name() == tool_name);
 
                     let result = if let Some(tool) = tool {
-                        // Check permissions
-                        let perm_req = PermissionRequest {
-                            tool_name: tool_name.clone(),
-                            tool_input: tool_input.clone(),
-                            permission_level: tool.permission_level(),
-                            description: format!("Execute tool '{}'", tool_name),
-                            id: tool_id.clone(),
-                        };
+                        if let Some(preflight_result) = tool.preflight(&tool_input, &tool_ctx) {
+                            preflight_result
+                        } else {
+                            // Check permissions
+                            let perm_req = PermissionRequest {
+                                tool_name: tool_name.clone(),
+                                tool_input: tool_input.clone(),
+                                permission_level: tool.permission_level(),
+                                description: format!("Execute tool '{}'", tool_name),
+                                id: tool_id.clone(),
+                            };
 
-                        let decision = agent.permission_policy.check(&perm_req).await;
+                            let decision = agent.permission_policy.check(&perm_req).await;
 
-                        match decision {
-                            PermissionDecision::Allow
-                            | PermissionDecision::AllowOnce
-                            | PermissionDecision::AllowForSession => {
-                                // Fire PreToolUse hooks
-                                let hook_ctx = HookContext {
-                                    event: HookEvent::PreToolUse,
-                                    tool_name: Some(tool_name.clone()),
-                                    tool_input: Some(tool_input.clone()),
-                                    tool_result: None,
-                                    tool_is_error: None,
-                                    turn,
-                                    cumulative_cost_usd: cumulative.cost_usd.unwrap_or(0.0),
-                                    message_count: agent.messages.lock().len(),
-                                };
-                                let hook_action =
-                                    cersei_hooks::run_hooks(&agent.hooks, &hook_ctx).await;
+                            match decision {
+                                PermissionDecision::Allow
+                                | PermissionDecision::AllowOnce
+                                | PermissionDecision::AllowForSession => {
+                                    // Fire PreToolUse hooks
+                                    let hook_ctx = HookContext {
+                                        event: HookEvent::PreToolUse,
+                                        tool_name: Some(tool_name.clone()),
+                                        tool_input: Some(tool_input.clone()),
+                                        tool_result: None,
+                                        tool_is_error: None,
+                                        turn,
+                                        cumulative_cost_usd: cumulative.cost_usd.unwrap_or(0.0),
+                                        message_count: agent.messages.lock().len(),
+                                    };
+                                    let hook_action =
+                                        cersei_hooks::run_hooks(&agent.hooks, &hook_ctx).await;
 
-                                match hook_action {
-                                    HookAction::Block(reason) => {
-                                        ToolResult::error(format!("Blocked by hook: {}", reason))
+                                    match hook_action {
+                                        HookAction::Block(reason) => ToolResult::error(format!(
+                                            "Blocked by hook: {}",
+                                            reason
+                                        )),
+                                        HookAction::ModifyInput(new_input) => {
+                                            tool.execute(new_input, &tool_ctx).await
+                                        }
+                                        _ => tool.execute(tool_input.clone(), &tool_ctx).await,
                                     }
-                                    HookAction::ModifyInput(new_input) => {
-                                        tool.execute(new_input, &tool_ctx).await
-                                    }
-                                    _ => tool.execute(tool_input.clone(), &tool_ctx).await,
                                 }
-                            }
-                            PermissionDecision::Deny(reason) => {
-                                ToolResult::error(format!("Permission denied: {}", reason))
+                                PermissionDecision::Deny(reason) => {
+                                    ToolResult::error(format!("Permission denied: {}", reason))
+                                }
                             }
                         }
                     } else {
@@ -587,4 +592,190 @@ pub async fn run_agent_streaming(
     }
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use cersei_provider::{CompletionRequest, CompletionStream, Provider, ProviderCapabilities};
+    use cersei_tools::permissions::{PermissionPolicy, PermissionRequest};
+    use cersei_tools::PermissionLevel;
+    use cersei_tools::{Tool, ToolCategory};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct TwoStepProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for TwoStepProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn context_window(&self, _model: &str) -> u64 {
+            4096
+        }
+
+        fn capabilities(&self, _model: &str) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tool_use: true,
+                ..Default::default()
+            }
+        }
+
+        async fn complete(&self, _request: CompletionRequest) -> Result<CompletionStream> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = mpsc::channel(16);
+
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamEvent::MessageStart {
+                        id: format!("msg-{call}"),
+                        model: "test".into(),
+                    })
+                    .await;
+
+                if call == 0 {
+                    let input = json!({ "value": "bad" });
+                    let _ = tx
+                        .send(StreamEvent::ContentBlockStart {
+                            index: 0,
+                            block_type: "tool_use".into(),
+                            id: Some("tool-1".into()),
+                            name: Some("PreflightTool".into()),
+                            thought_signature: None,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(StreamEvent::InputJsonDelta {
+                            index: 0,
+                            partial_json: serde_json::to_string(&input).unwrap(),
+                        })
+                        .await;
+                    let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                    let _ = tx
+                        .send(StreamEvent::MessageDelta {
+                            stop_reason: Some(StopReason::ToolUse),
+                            usage: Some(Usage::default()),
+                        })
+                        .await;
+                } else {
+                    let _ = tx
+                        .send(StreamEvent::ContentBlockStart {
+                            index: 0,
+                            block_type: "text".into(),
+                            id: None,
+                            name: None,
+                            thought_signature: None,
+                        })
+                        .await;
+                    let _ = tx
+                        .send(StreamEvent::TextDelta {
+                            index: 0,
+                            text: "done".into(),
+                        })
+                        .await;
+                    let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                    let _ = tx
+                        .send(StreamEvent::MessageDelta {
+                            stop_reason: Some(StopReason::EndTurn),
+                            usage: Some(Usage::default()),
+                        })
+                        .await;
+                }
+
+                let _ = tx.send(StreamEvent::MessageStop).await;
+            });
+
+            Ok(CompletionStream::new(rx))
+        }
+    }
+
+    struct CountingPermissions {
+        checks: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PermissionPolicy for CountingPermissions {
+        async fn check(&self, _request: &PermissionRequest) -> PermissionDecision {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            PermissionDecision::Allow
+        }
+    }
+
+    struct PreflightTool {
+        executed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for PreflightTool {
+        fn name(&self) -> &str {
+            "PreflightTool"
+        }
+
+        fn description(&self) -> &str {
+            "Tool used to verify preflight ordering."
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "value": { "type": "string" }
+                }
+            })
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            PermissionLevel::Execute
+        }
+
+        fn category(&self) -> ToolCategory {
+            ToolCategory::Custom
+        }
+
+        fn preflight(&self, _input: &serde_json::Value, _ctx: &ToolContext) -> Option<ToolResult> {
+            Some(ToolResult::error("preflight blocked"))
+        }
+
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success("should not execute")
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_blocks_before_permission_checks() {
+        let permission_checks = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+
+        let agent = Agent::builder()
+            .provider(TwoStepProvider {
+                calls: AtomicUsize::new(0),
+            })
+            .tool(PreflightTool {
+                executed: Arc::clone(&executed),
+            })
+            .permission_policy(CountingPermissions {
+                checks: Arc::clone(&permission_checks),
+            })
+            .working_dir(std::env::temp_dir())
+            .model("test-model")
+            .max_turns(4)
+            .build()
+            .unwrap();
+
+        let output = run_agent(&agent, "test").await.unwrap();
+
+        assert_eq!(permission_checks.load(Ordering::SeqCst), 0);
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+        assert_eq!(output.tool_calls.len(), 1);
+        assert!(output.tool_calls[0].is_error);
+        assert!(output.tool_calls[0].result.contains("preflight blocked"));
+    }
 }
