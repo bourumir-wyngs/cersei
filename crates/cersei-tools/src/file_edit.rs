@@ -7,12 +7,12 @@ use serde::Deserialize;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone)]
-struct LastSedSnapshot {
+struct LastEditSnapshot {
     file_path: PathBuf,
     content: Vec<u8>,
 }
 
-static LAST_SED_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastSedSnapshot>> =
+static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapshot>> =
     Lazy::new(dashmap::DashMap::new);
 
 pub struct SedTool;
@@ -118,11 +118,11 @@ impl Tool for SedTool {
             history.snapshot_before_write(&path, &original_text, "edit");
         }
 
-        let snapshot = LastSedSnapshot {
+        let snapshot = LastEditSnapshot {
             file_path: path.clone(),
             content: original_bytes.clone(),
         };
-        let previous_snapshot = LAST_SED_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
+        let previous_snapshot = LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
 
         if let Err(e) = write_bytes(&path, updated_text.as_bytes()).await {
             restore_previous_snapshot(&ctx.session_id, previous_snapshot);
@@ -151,7 +151,7 @@ impl Tool for RevertTool {
     }
 
     fn description(&self) -> &str {
-        "Restore the previous checkpoint from the most recent successful `sed` edit in this \
+        "Restore the previous checkpoint from the most recent successful `sed` or `vicut` edit in this \
          session. Only one checkpoint is retained."
     }
 
@@ -186,7 +186,7 @@ impl Tool for RevertTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let snapshot = match LAST_SED_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
+        let snapshot = match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
             Some(entry) => entry.clone(),
             None => {
                 return ToolResult::error(
@@ -223,7 +223,7 @@ impl Tool for RevertTool {
             return ToolResult::error(format!("Failed to write file: {}", e));
         }
 
-        LAST_SED_SNAPSHOT_REGISTRY.remove(&ctx.session_id);
+        LAST_EDIT_SNAPSHOT_REGISTRY.remove(&ctx.session_id);
 
         let diff = unified_diff(
             &current_text,
@@ -331,17 +331,17 @@ fn normalize_relative_workspace_path(input: &str) -> std::result::Result<PathBuf
     Ok(normalized)
 }
 
-fn restore_previous_snapshot(session_id: &str, previous: Option<LastSedSnapshot>) {
+fn restore_previous_snapshot(session_id: &str, previous: Option<LastEditSnapshot>) {
     if let Some(snapshot) = previous {
-        LAST_SED_SNAPSHOT_REGISTRY.insert(session_id.to_string(), snapshot);
+        LAST_EDIT_SNAPSHOT_REGISTRY.insert(session_id.to_string(), snapshot);
     } else {
-        LAST_SED_SNAPSHOT_REGISTRY.remove(session_id);
+        LAST_EDIT_SNAPSHOT_REGISTRY.remove(session_id);
     }
 }
 
 #[cfg(test)]
 fn clear_last_snapshot(session_id: &str) {
-    LAST_SED_SNAPSHOT_REGISTRY.remove(session_id);
+    LAST_EDIT_SNAPSHOT_REGISTRY.remove(session_id);
 }
 
 #[cfg(test)]

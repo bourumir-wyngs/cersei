@@ -59,6 +59,29 @@ impl Tool for BashTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
+        let cmd_trim = input.command.trim();
+        let cmd_base_full = cmd_trim.split_whitespace().next().unwrap_or("");
+        let cmd_base = cmd_base_full.rsplit('/').next().unwrap_or(cmd_base_full);
+        let tool_override = match cmd_base {
+            "ls" | "tree" | "exa" | "lsd" => Some("ListDirectory"),
+            "grep" | "rg" | "ag" => Some("Grep"),
+            "cat" | "bat" | "head" | "tail" | "less" | "more" => Some("Read"),
+            "sed" => Some("Sed"),
+            "find" | "fd" => Some("Glob"),
+            "npm" | "yarn" | "pnpm" => Some("Npm"),
+            "npx" => Some("Npx"),
+            "cargo" => Some("Cargo"),
+            "git" => Some("Git"),
+            "mysql" => Some("MySql"),
+            "psql" => Some("PostgreSql"),
+            "curl" | "wget" => Some("WebFetch"),
+            "pwsh" => Some("PowerShell"),
+            _ => None,
+        };
+        if let Some(tool_name) = tool_override {
+            return ToolResult::error(format!("Do not use bash, use {}", tool_name));
+        }
+
         let shell_state = session_shell_state(&ctx.session_id);
         let (cwd, env_vars) = {
             let state = shell_state.lock();
