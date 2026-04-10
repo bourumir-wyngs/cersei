@@ -107,6 +107,11 @@ pub fn graph_db_path() -> PathBuf {
     global_config_dir().join("graph.db")
 }
 
+/// ~/.abstract/permissions.json
+pub fn permissions_path() -> PathBuf {
+    global_config_dir().join("permissions.json")
+}
+
 // ─── Loading ───────────────────────────────────────────────────────────────
 
 /// Load config with layered merging.

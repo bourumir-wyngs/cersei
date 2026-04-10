@@ -11,8 +11,9 @@
 //! Y / Enter = allow the requested access level, once
 //! N         = block (run sandboxed with --net=none), once
 //! S         = allow for the rest of the session
-//! A         = always allow
+//! A         = always allow (persisted across restarts)
 
+use crate::permissions::{load_persisted_network_permissions, save_persisted_network_permissions};
 use crate::theme::Theme;
 use cersei_tools::network_policy::{NetworkAccess, NetworkPolicy};
 use crossterm::execute;
@@ -30,11 +31,21 @@ pub struct CliNetworkPolicy {
     theme: Theme,
 }
 
+/// Build a composite key for network permission: tool_name + command.
+fn network_key(tool_name: &str, command: &str) -> String {
+    if command.is_empty() {
+        tool_name.to_string()
+    } else {
+        format!("{tool_name}:{command}")
+    }
+}
+
 impl CliNetworkPolicy {
     pub fn new(theme: &Theme) -> Self {
+        let always_allowed = load_persisted_network_permissions();
         Self {
             session_allowed: Mutex::new(HashSet::new()),
-            always_allowed: Mutex::new(HashSet::new()),
+            always_allowed: Mutex::new(always_allowed),
             theme: theme.clone(),
         }
     }
@@ -53,11 +64,13 @@ impl NetworkPolicy for CliNetworkPolicy {
             return NetworkAccess::Blocked;
         }
 
+        let key = network_key(tool_name, command);
+
         // Check permanent then session cache.
-        if self.always_allowed.lock().contains(tool_name) {
+        if self.always_allowed.lock().contains(&key) {
             return requested;
         }
-        if self.session_allowed.lock().contains(tool_name) {
+        if self.session_allowed.lock().contains(&key) {
             return requested;
         }
 
@@ -93,11 +106,12 @@ impl NetworkPolicy for CliNetworkPolicy {
         match read_char() {
             'y' | 'Y' | '\n' => requested,
             's' | 'S' => {
-                self.session_allowed.lock().insert(tool_name.to_string());
+                self.session_allowed.lock().insert(key);
                 requested
             }
             'a' | 'A' => {
-                self.always_allowed.lock().insert(tool_name.to_string());
+                self.always_allowed.lock().insert(key);
+                save_persisted_network_permissions(&self.always_allowed.lock());
                 requested
             }
             _ => NetworkAccess::Blocked,
