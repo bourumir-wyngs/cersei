@@ -293,6 +293,9 @@ const CORE_CAPABILITIES: &str = r#"
 
 You have access to powerful tools for software engineering tasks:
 - **Read/Write files**: Read any file, write new files, edit existing files with `sed`, inspect diffs, and undo the last `sed` edit with `revert`
+- **Filesystem navigation**: Use `ListDirectory`, `Glob`, and `Grep` to inspect directories and search files
+- **Package managers**: Use `Cargo`, `Npm`, and `Npx` for package-manager workflows instead of shelling out through bash
+- **Git**: Use the `Git` tool for all git operations (log, show, diff, status, etc.) instead of bash
 - **Execute commands**: Run bash commands, PowerShell scripts, background processes
 - **Search**: Glob patterns, regex grep, web search, file content search
 - **Web**: Fetch URLs, search the internet
@@ -308,12 +311,14 @@ You have access to powerful tools for software engineering tasks:
 2. **Minimal changes**: Only modify what's needed. Don't refactor unrequested code.
 3. **Verify**: Check your work with tests or by reading the result
 4. **Communicate blockers**: If stuck, ask the user rather than guessing
+5. **Hand off cleanly**: If you stop and ask the user to continue later or send a follow-up prompt, briefly summarize what you already completed
 "#;
 
 const TOOL_USE_GUIDELINES: &str = r#"
 ## Tool use guidelines
 
-- Use dedicated tools (Read, Sed, Revert, Glob, Grep) instead of bash equivalents
+- Use dedicated tools (Read, Sed, Revert, ListDirectory, Glob, Grep, Cargo, Npm, Npx, Git) instead of bash equivalents
+- Do not use bash as a substitute for `ListDirectory`, `Glob`, `Grep`, `Cargo`, `Npm`, `Npx`, or `Git` when those tools fit the task
 - For searches, prefer Grep over `grep`; prefer Glob over `find`
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits

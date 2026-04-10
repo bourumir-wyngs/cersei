@@ -22,6 +22,8 @@ const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
 pub struct CliPermissionPolicy {
     /// Tools allowed for the entire session (by composite key).
     session_allowed: Mutex<HashSet<String>>,
+    /// Tools denied for the entire session (by composite key).
+    session_denied: Mutex<HashSet<String>>,
     /// Tools permanently allowed (by composite key), persisted to disk.
     always_allowed: Mutex<HashSet<String>>,
     theme: Theme,
@@ -48,6 +50,7 @@ impl CliPermissionPolicy {
         let always_allowed = load_persisted_permissions();
         Self {
             session_allowed: Mutex::new(HashSet::new()),
+            session_denied: Mutex::new(HashSet::new()),
             always_allowed: Mutex::new(always_allowed),
             theme: theme.clone(),
         }
@@ -73,6 +76,9 @@ impl PermissionPolicy for CliPermissionPolicy {
         // Check caches
         if self.always_allowed.lock().contains(&key) {
             return PermissionDecision::Allow;
+        }
+        if self.session_denied.lock().contains(&key) {
+            return PermissionDecision::Deny("User denied (session)".into());
         }
         if self.session_allowed.lock().contains(&key) {
             return PermissionDecision::Allow;
@@ -111,7 +117,7 @@ impl PermissionPolicy for CliPermissionPolicy {
             ResetColor,
             Print("\n"),
             SetForegroundColor(self.theme.permission_accent),
-            Print("  [Y]es  [N]o  [S]ession  [A]lways "),
+            Print("  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [A]lways "),
             ResetColor,
         );
         let _ = io::stderr().flush();
@@ -124,10 +130,26 @@ impl PermissionPolicy for CliPermissionPolicy {
                 self.session_allowed.lock().insert(key);
                 PermissionDecision::AllowForSession
             }
+            'e' | 'E' => {
+                self.session_denied.lock().insert(key);
+                PermissionDecision::Deny("User denied (session)".into())
+            }
             'a' | 'A' => {
                 self.always_allowed.lock().insert(key);
                 save_persisted_permissions(&self.always_allowed.lock());
                 PermissionDecision::Allow
+            }
+            'x' | 'X' => {
+                let _ = execute!(
+                    io::stderr(),
+                    SetForegroundColor(self.theme.permission_accent),
+                    Print("\n  Why denied? "),
+                    ResetColor,
+                );
+                let _ = io::stderr().flush();
+                let mut explanation = String::new();
+                let _ = io::stdin().read_line(&mut explanation);
+                PermissionDecision::Deny(format!("User denied: {}", explanation.trim()))
             }
             _ => PermissionDecision::Deny("User denied".into()),
         }

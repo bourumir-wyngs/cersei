@@ -28,7 +28,7 @@ impl Tool for SedTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a GNU-compatible sed script to a file using sed-rs. The file is checkpointed \
+        "Apply a sed script to a file using sed-rs (Rust regex / ERE). NOTE: unlike standard GNU sed, characters like `{`, `}`, `(`, `)`, `+`, and `?` are special by default and must be escaped (e.g., `\\{`) to match literals in code. The file is checkpointed \
          before the write, the result is written back to disk, and the tool returns a unified \
          diff plus the reminder \"use 'revert' command if wrong\". Use `revert` to undo the \
          most recent successful sed edit in this session."
@@ -52,7 +52,7 @@ impl Tool for SedTool {
                 },
                 "script": {
                     "type": "string",
-                    "description": "GNU-compatible sed script, for example `s/foo/bar/g` or `2,4d`"
+                    "description": "Sed script using Extended Regular Expressions (ERE), e.g. `s/foo/bar/g`. Escape {, }, (, ), +, ? to match as literals!"
                 },
                 "quiet": {
                     "type": "boolean",
@@ -98,7 +98,7 @@ impl Tool for SedTool {
 
         let mut sed = match sed_rs::Sed::new(&input.script) {
             Ok(sed) => sed,
-            Err(e) => return ToolResult::error(format!("Invalid sed script: {}", e)),
+            Err(e) => return ToolResult::error(format!("Invalid sed script: {}\n\nNOTE: Unlike standard GNU sed, this tool uses Rust regex (Extended Regular Expressions). Characters like `{{`, `}}`, `(`, `)`, `+`, and `?` are special by default and must be escaped (e.g., `\\{{`) to match literals in code. To use capture groups, do NOT escape the parentheses: use `(...)` instead of `\\(...\\)`.", e)),
         };
         sed.quiet(input.quiet).null_data(input.null_data);
 

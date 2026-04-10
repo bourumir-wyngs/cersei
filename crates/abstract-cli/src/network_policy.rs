@@ -27,6 +27,7 @@ const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
 
 pub struct CliNetworkPolicy {
     session_allowed: Mutex<HashSet<String>>,
+    session_denied: Mutex<HashSet<String>>,
     always_allowed: Mutex<HashSet<String>>,
     theme: Theme,
 }
@@ -45,6 +46,7 @@ impl CliNetworkPolicy {
         let always_allowed = load_persisted_network_permissions();
         Self {
             session_allowed: Mutex::new(HashSet::new()),
+            session_denied: Mutex::new(HashSet::new()),
             always_allowed: Mutex::new(always_allowed),
             theme: theme.clone(),
         }
@@ -69,6 +71,9 @@ impl NetworkPolicy for CliNetworkPolicy {
         // Check permanent then session cache.
         if self.always_allowed.lock().contains(&key) {
             return requested;
+        }
+        if self.session_denied.lock().contains(&key) {
+            return NetworkAccess::Blocked;
         }
         if self.session_allowed.lock().contains(&key) {
             return requested;
@@ -98,7 +103,7 @@ impl NetworkPolicy for CliNetworkPolicy {
             ResetColor,
             Print("\n"),
             SetForegroundColor(self.theme.permission_accent),
-            Print("  [Y]es  [N]o  [S]ession  [A]lways "),
+            Print("  [Y]es  [N]o  n[E]ver  [S]ession  [A]lways "),
             ResetColor,
         );
         let _ = io::stderr().flush();
@@ -108,6 +113,10 @@ impl NetworkPolicy for CliNetworkPolicy {
             's' | 'S' => {
                 self.session_allowed.lock().insert(key);
                 requested
+            }
+            'e' | 'E' => {
+                self.session_denied.lock().insert(key);
+                NetworkAccess::Blocked
             }
             'a' | 'A' => {
                 self.always_allowed.lock().insert(key);
