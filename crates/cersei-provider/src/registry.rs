@@ -242,11 +242,18 @@ pub static REGISTRY: &[ProviderEntry] = &[
         env_keys: &["XAI_API_KEY"],
         api_format: ApiFormat::OpenAiCompatible,
         default_model: "grok-4.20-0309-reasoning",
-        models: &[ModelEntry {
-            id: "grok-4.20-0309-reasoning",
-            context_window: 2_000_000,
-            capabilities: FULL_THINKING,
-        }],
+        models: &[
+            ModelEntry {
+                id: "grok-4.20-0309-non-reasoning",
+                context_window: 2_000_000,
+                capabilities: FULL,
+            },
+            ModelEntry {
+                id: "grok-4.20-0309-reasoning",
+                context_window: 2_000_000,
+                capabilities: FULL_THINKING,
+            },
+        ],
     },
     ProviderEntry {
         id: "together",

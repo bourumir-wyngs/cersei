@@ -10,6 +10,13 @@ pub fn should_display_agent(provider_id: &str, agent_name: &str) -> bool {
         );
     }
 
+    if provider_id.eq_ignore_ascii_case("xai") {
+        return matches!(
+            agent_name,
+            "grok-4.20-0309-non-reasoning" | "grok-4.20-0309-reasoning"
+        );
+    }
+
     true
 }
 
@@ -49,6 +56,14 @@ mod tests {
     }
 
     #[test]
+    fn filters_xai_agents_to_supported_allowlist() {
+        assert!(should_display_agent("xai", "grok-4.20-0309-non-reasoning"));
+        assert!(should_display_agent("xai", "grok-4.20-0309-reasoning"));
+        assert!(!should_display_agent("xai", "grok-4-fast-reasoning"));
+        assert!(!should_display_agent("xai", "grok-code-fast-1"));
+    }
+
+    #[test]
     fn filters_agent_name_lists() {
         let filtered = filter_agent_names("openai", ["agent-5.4", "agent-5.3", "agent-6.0"]);
         assert_eq!(filtered, vec!["agent-5.4"]);
@@ -58,5 +73,21 @@ mod tests {
     fn filters_gpt_name_lists_as_expected() {
         let filtered = filter_agent_names("openai", ["gpt-5.4", "gpt-5.3", "gpt-4o"]);
         assert_eq!(filtered, vec!["gpt-5.4"]);
+    }
+
+    #[test]
+    fn filters_xai_name_lists_as_expected() {
+        let filtered = filter_agent_names(
+            "xai",
+            [
+                "grok-4.20-0309-reasoning",
+                "grok-4-fast-reasoning",
+                "grok-4.20-0309-non-reasoning",
+            ],
+        );
+        assert_eq!(
+            filtered,
+            vec!["grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning"]
+        );
     }
 }

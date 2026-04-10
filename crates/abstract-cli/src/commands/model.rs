@@ -348,7 +348,10 @@ mod tests {
     fn keeps_xai_models_in_fallback_list() {
         let xai = registry::lookup("xai").unwrap();
         let models = fallback_models(xai);
-        assert_eq!(models, vec!["grok-4.20-0309-reasoning"]);
+        assert_eq!(
+            models,
+            vec!["grok-4.20-0309-non-reasoning", "grok-4.20-0309-reasoning"]
+        );
     }
 
     #[test]
