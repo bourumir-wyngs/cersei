@@ -50,12 +50,7 @@ impl Tool for FileWriteTool {
 
         let path = resolve_path(ctx, &input.file_path);
 
-        // Snapshot existing content before overwriting
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            if let Ok(existing) = tokio::fs::read_to_string(&path).await {
-                history.snapshot_before_write(&path, &existing, "write");
-            }
-        }
+        let previous_content = tokio::fs::read_to_string(&path).await.ok();
 
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
@@ -65,6 +60,9 @@ impl Tool for FileWriteTool {
 
         match tokio::fs::write(&path, &input.content).await {
             Ok(()) => {
+                if let Some(history) = ctx.extensions.get::<FileHistory>() {
+                    history.record_change(&path, previous_content.as_deref(), &input.content, "write");
+                }
                 ToolResult::success(format!("File created successfully at: {}", path.display()))
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),

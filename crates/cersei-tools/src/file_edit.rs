@@ -261,10 +261,6 @@ impl Tool for SedTool {
             ));
         }
 
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.snapshot_before_write(&path, &original_text, "edit");
-        }
-
         let snapshot = LastEditSnapshot {
             file_path: path.clone(),
             content: original_bytes.clone(),
@@ -275,6 +271,10 @@ impl Tool for SedTool {
         if let Err(e) = write_bytes(&path, updated_text.as_bytes()).await {
             restore_previous_snapshot(&ctx.session_id, previous_snapshot);
             return ToolResult::error(format!("Failed to write file: {}", e));
+        }
+
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            history.record_change(&path, Some(&original_text), &updated_text, "edit");
         }
 
         let diff = unified_diff(
@@ -363,12 +363,12 @@ impl Tool for RevertTool {
         let current_text = String::from_utf8_lossy(&current_bytes).into_owned();
         let restored_text = String::from_utf8_lossy(&snapshot.content).into_owned();
 
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.snapshot_before_write(&snapshot.file_path, &current_text, "revert");
-        }
-
         if let Err(e) = write_bytes(&snapshot.file_path, &snapshot.content).await {
             return ToolResult::error(format!("Failed to write file: {}", e));
+        }
+
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            history.record_change(&snapshot.file_path, Some(&current_text), &restored_text, "revert");
         }
 
         LAST_EDIT_SNAPSHOT_REGISTRY.remove(&ctx.session_id);
@@ -425,7 +425,7 @@ async fn execute_edit_inner(
 
         if let Some(ctx) = ctx {
             if let Some(history) = ctx.extensions.get::<FileHistory>() {
-                history.snapshot_before_write(&path.to_path_buf(), &text, "edit");
+                history.record_change(&path.to_path_buf(), Some(&text), &new_text, "edit");
             }
             LAST_EDIT_SNAPSHOT_REGISTRY.insert(
                 ctx.session_id.clone(),

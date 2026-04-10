@@ -1,9 +1,10 @@
-//! Versioned file history: tracks reads/writes/edits and stores content snapshots.
+//! Versioned file history: tracks reads/writes/edits and stores file states.
 //!
 //! Stored in `Extensions` as `Arc<FileHistory>`. File-mutating tools (Edit, Write)
-//! call `snapshot_before_write` before modifying a file; the Read tool calls
-//! `record_read`. The `FileHistoryTool` exposes revisions, diffs, and revert to
-//! the AI.
+//! call `record_change` after successful mutations, while low-level helpers such
+//! as `snapshot_before_write` remain available for tests and compatibility. The
+//! Read tool calls `record_read`. The `FileHistoryTool` exposes revisions, diffs,
+//! and revert to the AI.
 
 use parking_lot::Mutex;
 use similar::TextDiff;
@@ -11,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A single revision of a file's content, captured *before* a mutation.
+/// A single stored file state.
 #[derive(Debug, Clone)]
 pub struct Revision {
     /// 1-based revision number.
@@ -22,6 +23,10 @@ pub struct Revision {
     pub timestamp: u64,
     /// What caused the snapshot: "edit", "write", "revert", or "restore".
     pub operation: String,
+    /// Monotonic change identifier for a single successful mutation.
+    pub change_id: u32,
+    /// Whether this revision is the base state seen before a change or the result after it.
+    pub stage: String,
 }
 
 /// Per-file tracking state.
@@ -50,6 +55,10 @@ impl FileEntry {
 
     fn next_revision_number(&self) -> u32 {
         self.revisions.last().map_or(1, |r| r.number + 1)
+    }
+
+    fn next_change_number(&self) -> u32 {
+        self.revisions.last().map_or(1, |r| r.change_id + 1)
     }
 }
 
@@ -95,19 +104,67 @@ impl FileHistory {
         let entry = entries
             .entry(key.clone())
             .or_insert_with(|| FileEntry::new(key));
-        let rev = entry.next_revision_number();
-        entry.revisions.push(Revision {
-            number: rev,
-            content: content.to_string(),
-            timestamp: now_secs(),
-            operation: operation.to_string(),
-        });
-        match operation {
-            "edit" | "restore" | "revert" => entry.edit_count += 1,
-            _ => entry.write_count += 1,
-        }
+        let change_id = entry.next_change_number();
+        let rev = push_revision(entry, content, operation, change_id, "base");
+        increment_mutation_count(entry, operation);
         entry.last_accessed = now_secs();
         rev
+    }
+
+    /// Record the full state transition for one successful mutation.
+    ///
+    /// If the latest stored revision already matches `old_content`, the base state is
+    /// not duplicated; only the new resulting state is appended.
+    pub fn record_change(
+        &self,
+        path: &PathBuf,
+        old_content: Option<&str>,
+        new_content: &str,
+        operation: &str,
+    ) -> Vec<u32> {
+        let key = Self::normalize_key(path);
+        let mut entries = self.entries.lock();
+        let entry = entries
+            .entry(key.clone())
+            .or_insert_with(|| FileEntry::new(key));
+        let change_id = entry.next_change_number();
+        let mut recorded = Vec::new();
+
+        if let Some(old_content) = old_content {
+            let last_matches_old = entry
+                .revisions
+                .last()
+                .map(|r| r.content.as_str() == old_content)
+                .unwrap_or(false);
+            if !last_matches_old {
+                recorded.push(push_revision(
+                    entry,
+                    old_content,
+                    operation,
+                    change_id,
+                    "base",
+                ));
+            }
+        }
+
+        let last_matches_new = entry
+            .revisions
+            .last()
+            .map(|r| r.content.as_str() == new_content)
+            .unwrap_or(false);
+        if !last_matches_new {
+            recorded.push(push_revision(
+                entry,
+                new_content,
+                operation,
+                change_id,
+                "result",
+            ));
+        }
+
+        increment_mutation_count(entry, operation);
+        entry.last_accessed = now_secs();
+        recorded
     }
 
     // ── Query methods (used by FileHistoryTool) ─────────────────────────
@@ -135,13 +192,17 @@ impl FileHistory {
         let key = Self::normalize_key(path);
         let entries = self.entries.lock();
         entries.get(&key).map(|e| {
+            let current_revision = e.revisions.last().map(|r| r.number);
             e.revisions
                 .iter()
                 .map(|r| RevisionInfo {
                     number: r.number,
                     timestamp: r.timestamp,
                     operation: r.operation.clone(),
+                    change_id: r.change_id,
+                    stage: r.stage.clone(),
                     size_bytes: r.content.len(),
+                    is_current: Some(r.number) == current_revision,
                 })
                 .collect()
         })
@@ -270,7 +331,36 @@ pub struct RevisionInfo {
     pub number: u32,
     pub timestamp: u64,
     pub operation: String,
+    pub change_id: u32,
+    pub stage: String,
     pub size_bytes: usize,
+    pub is_current: bool,
+}
+
+fn push_revision(
+    entry: &mut FileEntry,
+    content: &str,
+    operation: &str,
+    change_id: u32,
+    stage: &str,
+) -> u32 {
+    let rev = entry.next_revision_number();
+    entry.revisions.push(Revision {
+        number: rev,
+        content: content.to_string(),
+        timestamp: now_secs(),
+        operation: operation.to_string(),
+        change_id,
+        stage: stage.to_string(),
+    });
+    rev
+}
+
+fn increment_mutation_count(entry: &mut FileEntry, operation: &str) {
+    match operation {
+        "edit" | "restore" | "revert" => entry.edit_count += 1,
+        _ => entry.write_count += 1,
+    }
 }
 
 // ─── Diff helper ────────────────────────────────────────────────────────────
@@ -474,5 +564,46 @@ mod tests {
         let diff = history.diff_two_revisions(&path, 1, 2).unwrap();
         // No @@ hunk markers when content is identical
         assert!(!diff.contains("@@"));
+    }
+
+    #[test]
+    fn test_record_change_captures_state_timeline() {
+        let history = FileHistory::new();
+        let path = PathBuf::from("timeline.txt");
+
+        let revs = history.record_change(&path, Some("v1\n"), "v2\n", "edit");
+        assert_eq!(revs, vec![1, 2]);
+
+        let revs = history.record_change(&path, Some("v2\n"), "v3\n", "edit");
+        assert_eq!(revs, vec![3]);
+
+        let revisions = history.get_revisions(&path).unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(revisions[0].change_id, 1);
+        assert_eq!(revisions[0].stage, "base");
+        assert_eq!(revisions[1].change_id, 1);
+        assert_eq!(revisions[1].stage, "result");
+        assert_eq!(revisions[2].change_id, 2);
+        assert_eq!(revisions[2].stage, "result");
+        assert!(revisions[2].is_current);
+
+        assert_eq!(history.get_revision_content(&path, 1).unwrap(), "v1\n");
+        assert_eq!(history.get_revision_content(&path, 2).unwrap(), "v2\n");
+        assert_eq!(history.get_revision_content(&path, 3).unwrap(), "v3\n");
+    }
+
+    #[test]
+    fn test_record_change_on_new_file_stores_result_only() {
+        let history = FileHistory::new();
+        let path = PathBuf::from("new.txt");
+
+        let revs = history.record_change(&path, None, "created\n", "write");
+        assert_eq!(revs, vec![1]);
+
+        let revisions = history.get_revisions(&path).unwrap();
+        assert_eq!(revisions.len(), 1);
+        assert_eq!(revisions[0].stage, "result");
+        assert_eq!(revisions[0].change_id, 1);
+        assert_eq!(history.get_revision_content(&path, 1).unwrap(), "created\n");
     }
 }

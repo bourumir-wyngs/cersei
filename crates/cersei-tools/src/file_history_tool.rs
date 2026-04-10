@@ -18,9 +18,10 @@ impl Tool for FileHistoryTool {
 
     fn description(&self) -> &str {
         "Interact with the session's file revision history. Every time a file is edited or \
-         written, a snapshot of the previous content is saved as a numbered revision. Use this \
-         tool to list tracked files, inspect revisions, view diffs, revert to earlier versions, \
-         or restore a revision's content into the current file.\n\
+         written, the file's states are saved as numbered revisions. The first successful change \
+         usually stores both the base state and the resulting state; later successful changes add \
+         the new resulting state. Use this tool to list tracked files, inspect revisions, view \
+         diffs, revert to earlier versions, or restore a revision's content into the current file.\n\
          \n\
          Actions:\n\
          - `list` — list all tracked files with read/write/edit counts and revision counts.\n\
@@ -246,9 +247,10 @@ fn action_revisions(history: &FileHistory, path: &std::path::PathBuf) -> ToolRes
         Some(revs) => {
             let mut out = format!("Revisions for {}:\n\n", path.display());
             for r in &revs {
+                let current = if r.is_current { ", current" } else { "" };
                 out.push_str(&format!(
-                    "  rev {} — op: {}, size: {} bytes, timestamp: {}\n",
-                    r.number, r.operation, r.size_bytes, r.timestamp,
+                    "  rev {} — change: {}, stage: {}{}, op: {}, size: {} bytes, timestamp: {}\n",
+                    r.number, r.change_id, r.stage, current, r.operation, r.size_bytes, r.timestamp,
                 ));
             }
             ToolResult::success(out)
@@ -350,8 +352,8 @@ async fn action_diff(
     }
 }
 
-// Note: action_revert snapshots current content before writing, so the revert
-// itself becomes a new revision that can be undone.
+// Note: action_revert records the resulting state after the write, so the
+// revert itself becomes a new revision that can be undone.
 
 async fn action_revert(
     history: &FileHistory,
@@ -370,24 +372,19 @@ async fn action_revert(
         }
     };
 
-    // Snapshot the current content before reverting (so the revert can itself be reverted)
-    match tokio::fs::read_to_string(path).await {
-        Ok(current) => {
-            history.snapshot_before_write(path, &current, "revert");
-        }
-        Err(_) => {
-            // File may not exist on disk yet; that's OK for revert
-        }
-    }
+    let current_content = tokio::fs::read_to_string(path).await.ok();
 
     // Write the revision content to disk
     match tokio::fs::write(path, &target_content).await {
-        Ok(()) => ToolResult::success(format!(
-            "Reverted {} to revision {}. The previous content was saved as a new revision \
-             (use `revisions` to see it), so this revert can itself be undone.",
-            path.display(),
-            revision
-        )),
+        Ok(()) => {
+            history.record_change(path, current_content.as_deref(), &target_content, "revert");
+            ToolResult::success(format!(
+                "Reverted {} to revision {}. The resulting file state was recorded as a new revision \
+                 so this revert can itself be undone.",
+                path.display(),
+                revision
+            ))
+        }
         Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
     }
 }
@@ -499,6 +496,8 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("rev 1"));
         assert!(result.content.contains("rev 2"));
+        assert!(result.content.contains("change: 1"));
+        assert!(result.content.contains("stage: base"));
     }
 
     #[tokio::test]
@@ -671,10 +670,13 @@ mod tests {
         let restored = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(restored, "original content");
 
-        // Verify a new revert revision was created (the pre-revert snapshot)
+        // Verify the revert added the modified state and the restored result state.
         let revs = history.get_revisions(&path).unwrap();
-        assert_eq!(revs.len(), 2);
+        assert_eq!(revs.len(), 3);
         assert_eq!(revs[1].operation, "revert");
+        assert_eq!(revs[1].stage, "base");
+        assert_eq!(revs[2].operation, "revert");
+        assert_eq!(revs[2].stage, "result");
     }
 
     #[tokio::test]
@@ -936,7 +938,7 @@ mod tests {
             "history should not split relative and absolute keys"
         );
         assert_eq!(files[0].read_count, 1);
-        assert_eq!(files[0].revision_count, 2);
+        assert_eq!(files[0].revision_count, 3);
 
         let tool = FileHistoryTool;
         let revisions = tool
@@ -948,6 +950,10 @@ mod tests {
         assert!(!revisions.is_error, "{}", revisions.content);
         assert!(revisions.content.contains("rev 1"));
         assert!(revisions.content.contains("rev 2"));
+        assert!(revisions.content.contains("rev 3"));
+        assert!(revisions.content.contains("change: 1, stage: base"));
+        assert!(revisions.content.contains("change: 1, stage: result"));
+        assert!(revisions.content.contains("change: 2, stage: result, current"));
         assert!(!revisions.content.contains("only reads so far"));
 
         let diff = tool
@@ -956,16 +962,16 @@ mod tests {
                     "diff",
                     serde_json::json!({
                         "file_path": file_name,
-                        "from_revision": 1,
-                        "to_revision": 2
+                        "from_revision": 2,
+                        "to_revision": 3
                     }),
                 ),
                 &ctx,
             )
             .await;
         assert!(!diff.is_error, "diff failed: {}", diff.content);
-        assert!(diff.content.contains("-Line 2: beta"), "{}", diff.content);
-        assert!(diff.content.contains("+Line 2: BETA"), "{}", diff.content);
+        assert!(diff.content.contains("-Line 1: alpha"), "{}", diff.content);
+        assert!(diff.content.contains("+Line 1: ALPHA"), "{}", diff.content);
     }
 
     #[tokio::test]
