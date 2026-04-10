@@ -52,7 +52,13 @@ mod gql {
         s.replace('\\', "\\\\").replace('\'', "\\'")
     }
 
-    pub fn insert_memory(id: &str, content: &str, mem_type: &str, confidence: f32, now: &str) -> String {
+    pub fn insert_memory(
+        id: &str,
+        content: &str,
+        mem_type: &str,
+        confidence: f32,
+        now: &str,
+    ) -> String {
         format!(
             "INSERT (:Memory {{id: '{id}', content: '{content}', mem_type: '{mem_type}', \
              confidence: {confidence}, created_at: '{now}', updated_at: '{now}', \
@@ -123,7 +129,10 @@ impl GraphMemory {
             VersionCheck::NeedsMigration { from, to } => {
                 graph_migrate::run_migrations(&db, from, to)?;
             }
-            VersionCheck::CodeBehind { graph_version, code_version } => {
+            VersionCheck::CodeBehind {
+                graph_version,
+                code_version,
+            } => {
                 tracing::warn!(
                     "Graph schema v{} is newer than code v{}. Forward-compatible reads will be used.",
                     graph_version, code_version
@@ -185,7 +194,8 @@ impl GraphMemory {
         let escaped = gql::escape(content);
 
         let query = gql::insert_memory(&id, &escaped, &mem_type_str, confidence, &now);
-        session.execute(&query)
+        session
+            .execute(&query)
             .map_err(|e| CerseiError::Config(format!("Graph insert failed: {}", e)))?;
 
         Ok(id)
@@ -193,15 +203,11 @@ impl GraphMemory {
 
     /// Link two memories with a named relationship.
     #[cfg(feature = "graph")]
-    pub fn link_memories(
-        &self,
-        from_id: &str,
-        to_id: &str,
-        relationship: &str,
-    ) -> Result<()> {
+    pub fn link_memories(&self, from_id: &str, to_id: &str, relationship: &str) -> Result<()> {
         let session = self.db.session();
         let query = gql::link_memories(from_id, to_id, relationship);
-        session.execute(&query)
+        session
+            .execute(&query)
             .map_err(|e| CerseiError::Config(format!("Graph link failed: {}", e)))?;
         Ok(())
     }
@@ -211,24 +217,21 @@ impl GraphMemory {
     pub fn tag_memory(&self, memory_id: &str, topic: &str) -> Result<()> {
         let session = self.db.session();
         let query = gql::tag_memory(memory_id, topic);
-        session.execute(&query)
+        session
+            .execute(&query)
             .map_err(|e| CerseiError::Config(format!("Graph tag failed: {}", e)))?;
         Ok(())
     }
 
     /// Record a session in the graph.
     #[cfg(feature = "graph")]
-    pub fn record_session(
-        &self,
-        session_id: &str,
-        model: Option<&str>,
-        turns: u32,
-    ) -> Result<()> {
+    pub fn record_session(&self, session_id: &str, model: Option<&str>, turns: u32) -> Result<()> {
         let session = self.db.session();
         let now = chrono::Utc::now().to_rfc3339();
         let model_str = model.unwrap_or("unknown");
         let query = gql::insert_session(session_id, &now, model_str, turns);
-        session.execute(&query)
+        session
+            .execute(&query)
             .map_err(|e| CerseiError::Config(format!("Graph session record failed: {}", e)))?;
         Ok(())
     }
@@ -241,7 +244,10 @@ impl GraphMemory {
         let query = gql::revalidate(memory_id, &chrono::Utc::now().to_rfc3339());
         match session.execute(&query) {
             Ok(result) => Ok(result.iter().next().is_some()),
-            Err(e) => Err(CerseiError::Config(format!("Graph revalidate failed: {}", e))),
+            Err(e) => Err(CerseiError::Config(format!(
+                "Graph revalidate failed: {}",
+                e
+            ))),
         }
     }
 
@@ -254,11 +260,10 @@ impl GraphMemory {
         let escaped = gql::escape(query_text);
         let query = gql::recall(&escaped, limit);
         match session.execute(&query) {
-            Ok(result) => {
-                result.iter()
-                    .filter_map(|row| row.first().map(|v| format!("{}", v)))
-                    .collect()
-            }
+            Ok(result) => result
+                .iter()
+                .filter_map(|row| row.first().map(|v| format!("{}", v)))
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -270,11 +275,10 @@ impl GraphMemory {
         let type_str = format!("{:?}", mem_type);
         let query = gql::by_type(&type_str);
         match session.execute(&query) {
-            Ok(result) => {
-                result.iter()
-                    .filter_map(|row| row.first().map(|v| format!("{}", v)))
-                    .collect()
-            }
+            Ok(result) => result
+                .iter()
+                .filter_map(|row| row.first().map(|v| format!("{}", v)))
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -285,11 +289,10 @@ impl GraphMemory {
         let session = self.db.session();
         let query = gql::by_topic(topic);
         match session.execute(&query) {
-            Ok(result) => {
-                result.iter()
-                    .filter_map(|row| row.first().map(|v| format!("{}", v)))
-                    .collect()
-            }
+            Ok(result) => result
+                .iter()
+                .filter_map(|row| row.first().map(|v| format!("{}", v)))
+                .collect(),
             Err(_) => Vec::new(),
         }
     }
@@ -299,7 +302,8 @@ impl GraphMemory {
     pub fn stats(&self) -> GraphStats {
         let session = self.db.session();
         let count = |query: &str| -> usize {
-            session.execute(query)
+            session
+                .execute(query)
                 .ok()
                 .and_then(|r| r.scalar::<i64>().ok())
                 .map(|v| v as usize)
@@ -348,19 +352,29 @@ impl GraphMemory {
     }
 
     #[cfg(not(feature = "graph"))]
-    pub fn recall(&self, _: &str, _: usize) -> Vec<String> { Vec::new() }
+    pub fn recall(&self, _: &str, _: usize) -> Vec<String> {
+        Vec::new()
+    }
 
     #[cfg(not(feature = "graph"))]
-    pub fn by_type(&self, _: MemoryType) -> Vec<String> { Vec::new() }
+    pub fn by_type(&self, _: MemoryType) -> Vec<String> {
+        Vec::new()
+    }
 
     #[cfg(not(feature = "graph"))]
-    pub fn by_topic(&self, _: &str) -> Vec<String> { Vec::new() }
+    pub fn by_topic(&self, _: &str) -> Vec<String> {
+        Vec::new()
+    }
 
     #[cfg(not(feature = "graph"))]
-    pub fn stats(&self) -> GraphStats { GraphStats::default() }
+    pub fn stats(&self) -> GraphStats {
+        GraphStats::default()
+    }
 
     #[cfg(not(feature = "graph"))]
-    pub fn schema_version(&self) -> VersionCheck { VersionCheck::UpToDate }
+    pub fn schema_version(&self) -> VersionCheck {
+        VersionCheck::UpToDate
+    }
 }
 
 /// Check if graph memory is available (compiled with the feature).

@@ -19,9 +19,8 @@ pub fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction> {
 
     let entries = session_storage::load_transcript(&path)
         .map_err(|e| anyhow::anyhow!("Failed to load session: {e}"))?;
-    let messages = cersei_agent::strip_thinking_blocks(
-        session_storage::messages_from_transcript(&entries)
-    );
+    let messages =
+        cersei_agent::strip_thinking_blocks(session_storage::messages_from_transcript(&entries));
 
     if messages.is_empty() {
         anyhow::bail!("Session '{}' is empty", session_id);

@@ -124,8 +124,7 @@ fn diff_trees(
     use gix::bstr::ByteSlice as _;
     use gix::object::tree::diff::ChangeDetached;
 
-    let opts = gix::diff::Options::default()
-        .with_rewrites(Some(gix::diff::Rewrites::default()));
+    let opts = gix::diff::Options::default().with_rewrites(Some(gix::diff::Rewrites::default()));
 
     let changes = repo
         .diff_tree_to_tree(old_tree, new_tree, opts)
@@ -150,12 +149,21 @@ fn diff_trees(
 
     for change in &changes {
         let patch = match change {
-            ChangeDetached::Addition { location, entry_mode, id, .. } => {
+            ChangeDetached::Addition {
+                location,
+                entry_mode,
+                id,
+                ..
+            } => {
                 if !entry_mode.is_blob() {
                     continue;
                 }
                 let rel = location.to_str_lossy();
-                let data = repo.find_object(*id).map_err(|e| e.to_string())?.data.to_vec();
+                let data = repo
+                    .find_object(*id)
+                    .map_err(|e| e.to_string())?
+                    .data
+                    .to_vec();
                 format!(
                     "diff --git a/{rel} b/{rel}\nnew file mode {}\n{}",
                     entry_mode.kind().as_octal_str(),
@@ -163,12 +171,21 @@ fn diff_trees(
                 )
             }
 
-            ChangeDetached::Deletion { location, entry_mode, id, .. } => {
+            ChangeDetached::Deletion {
+                location,
+                entry_mode,
+                id,
+                ..
+            } => {
                 if !entry_mode.is_blob() {
                     continue;
                 }
                 let rel = location.to_str_lossy();
-                let data = repo.find_object(*id).map_err(|e| e.to_string())?.data.to_vec();
+                let data = repo
+                    .find_object(*id)
+                    .map_err(|e| e.to_string())?
+                    .data
+                    .to_vec();
                 format!(
                     "diff --git a/{rel} b/{rel}\ndeleted file mode {}\n{}",
                     entry_mode.kind().as_octal_str(),
@@ -188,8 +205,7 @@ fn diff_trees(
                     continue;
                 }
                 let rel = location.to_str_lossy();
-                let mut header =
-                    format!("diff --git a/{rel} b/{rel}\n");
+                let mut header = format!("diff --git a/{rel} b/{rel}\n");
                 // Mode change (e.g. +x bit)
                 if previous_entry_mode != entry_mode {
                     header.push_str(&format!(
@@ -200,8 +216,16 @@ fn diff_trees(
                 }
                 // Content change
                 if previous_id != id {
-                    let old = repo.find_object(*previous_id).map_err(|e| e.to_string())?.data.to_vec();
-                    let new = repo.find_object(*id).map_err(|e| e.to_string())?.data.to_vec();
+                    let old = repo
+                        .find_object(*previous_id)
+                        .map_err(|e| e.to_string())?
+                        .data
+                        .to_vec();
+                    let new = repo
+                        .find_object(*id)
+                        .map_err(|e| e.to_string())?
+                        .data
+                        .to_vec();
                     header.push_str(&unified_diff_modify(&rel, &old, &new));
                 }
                 header
@@ -236,8 +260,16 @@ fn diff_trees(
                 );
                 // Content diff only when blobs differ
                 if source_id != id {
-                    let old = repo.find_object(*source_id).map_err(|e| e.to_string())?.data.to_vec();
-                    let new = repo.find_object(*id).map_err(|e| e.to_string())?.data.to_vec();
+                    let old = repo
+                        .find_object(*source_id)
+                        .map_err(|e| e.to_string())?
+                        .data
+                        .to_vec();
+                    let new = repo
+                        .find_object(*id)
+                        .map_err(|e| e.to_string())?
+                        .data
+                        .to_vec();
                     patch.push_str(&unified_diff_modify(&dst, &old, &new));
                 }
                 patch
@@ -515,7 +547,10 @@ fn cmd_show(
     let author = commit.author().map_err(|e| e.to_string())?;
     let committer = commit.committer().map_err(|e| e.to_string())?;
     let msg = commit.message().map_err(|e| e.to_string())?;
-    let full_body = msg.body.map(|b| b.to_str_lossy().into_owned()).unwrap_or_default();
+    let full_body = msg
+        .body
+        .map(|b| b.to_str_lossy().into_owned())
+        .unwrap_or_default();
 
     let mut out = format!(
         "commit {oid}\nAuthor:    {} <{}>\nCommitter: {} <{}>\nDate:      {}\n\n    {}\n",
@@ -550,8 +585,7 @@ fn cmd_show(
     };
 
     // Build the changed-file summary using gix's diff engine (includes renames).
-    let opts = gix::diff::Options::default()
-        .with_rewrites(Some(gix::diff::Rewrites::default()));
+    let opts = gix::diff::Options::default().with_rewrites(Some(gix::diff::Rewrites::default()));
     let changes = repo
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&new_tree), opts)
         .map_err(|e| e.to_string())?;
@@ -560,25 +594,41 @@ fn cmd_show(
     let mut changed: Vec<String> = Vec::new();
     for change in &changes {
         match change {
-            ChangeDetached::Addition { location, .. } =>
-                changed.push(format!("A  {}", location.to_str_lossy())),
-            ChangeDetached::Deletion { location, .. } =>
-                changed.push(format!("D  {}", location.to_str_lossy())),
-            ChangeDetached::Modification { location, previous_entry_mode, entry_mode, .. } => {
+            ChangeDetached::Addition { location, .. } => {
+                changed.push(format!("A  {}", location.to_str_lossy()))
+            }
+            ChangeDetached::Deletion { location, .. } => {
+                changed.push(format!("D  {}", location.to_str_lossy()))
+            }
+            ChangeDetached::Modification {
+                location,
+                previous_entry_mode,
+                entry_mode,
+                ..
+            } => {
                 if previous_entry_mode != entry_mode {
-                    changed.push(format!("M  {} (mode {} → {})",
+                    changed.push(format!(
+                        "M  {} (mode {} → {})",
                         location.to_str_lossy(),
                         previous_entry_mode.kind().as_octal_str(),
-                        entry_mode.kind().as_octal_str()));
+                        entry_mode.kind().as_octal_str()
+                    ));
                 } else {
                     changed.push(format!("M  {}", location.to_str_lossy()));
                 }
             }
-            ChangeDetached::Rewrite { source_location, location, copy, .. } => {
+            ChangeDetached::Rewrite {
+                source_location,
+                location,
+                copy,
+                ..
+            } => {
                 let verb = if *copy { "C" } else { "R" };
-                changed.push(format!("{verb}  {} → {}",
+                changed.push(format!(
+                    "{verb}  {} → {}",
                     source_location.to_str_lossy(),
-                    location.to_str_lossy()));
+                    location.to_str_lossy()
+                ));
             }
         }
     }
@@ -594,7 +644,12 @@ fn cmd_show(
 
     if include_diff {
         out.push('\n');
-        out.push_str(&diff_trees(repo, parent_tree.as_ref(), Some(&new_tree), max_lines)?);
+        out.push_str(&diff_trees(
+            repo,
+            parent_tree.as_ref(),
+            Some(&new_tree),
+            max_lines,
+        )?);
     }
 
     Ok(out)
@@ -773,8 +828,7 @@ fn cmd_diff_worktree(
             output.push_str(&format!("?  {rel}\n"));
         } else {
             let disk_path = work_dir.join(rel.as_ref());
-            let data =
-                std::fs::read(&disk_path).map_err(|e| format!("cannot read {rel}: {e}"))?;
+            let data = std::fs::read(&disk_path).map_err(|e| format!("cannot read {rel}: {e}"))?;
             let patch = unified_diff_add(&rel, &data);
             total_lines += patch.lines().count();
             output.push_str(&patch);
@@ -786,7 +840,10 @@ fn cmd_diff_worktree(
     }
 
     if output.is_empty() {
-        Ok("(working tree is clean — no modifications to tracked files and no untracked files)".into())
+        Ok(
+            "(working tree is clean — no modifications to tracked files and no untracked files)"
+                .into(),
+        )
     } else {
         Ok(output)
     }
@@ -998,7 +1055,12 @@ mod tests {
     #[tokio::test]
     async fn log_runs() {
         let t = GitTool;
-        let r = t.execute(serde_json::json!({"command": "log", "limit": 5}), &test_ctx()).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "log", "limit": 5}),
+                &test_ctx(),
+            )
+            .await;
         assert!(!r.is_error, "log failed: {}", r.content);
         assert!(!r.content.is_empty());
     }
@@ -1006,7 +1068,12 @@ mod tests {
     #[tokio::test]
     async fn show_head() {
         let t = GitTool;
-        let r = t.execute(serde_json::json!({"command": "show", "revision": "HEAD"}), &test_ctx()).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "show", "revision": "HEAD"}),
+                &test_ctx(),
+            )
+            .await;
         assert!(!r.is_error, "show failed: {}", r.content);
         assert!(r.content.contains("commit "));
     }
@@ -1024,7 +1091,9 @@ mod tests {
     #[tokio::test]
     async fn diff_worktree_does_not_panic() {
         let t = GitTool;
-        let r = t.execute(serde_json::json!({"command": "diff_worktree"}), &test_ctx()).await;
+        let r = t
+            .execute(serde_json::json!({"command": "diff_worktree"}), &test_ctx())
+            .await;
         assert!(!r.is_error, "diff_worktree failed: {}", r.content);
     }
 
@@ -1042,7 +1111,9 @@ mod tests {
     #[tokio::test]
     async fn unknown_command_returns_error() {
         let t = GitTool;
-        let r = t.execute(serde_json::json!({"command": "nuke"}), &test_ctx()).await;
+        let r = t
+            .execute(serde_json::json!({"command": "nuke"}), &test_ctx())
+            .await;
         assert!(r.is_error);
         assert!(r.content.contains("unknown command"));
     }
@@ -1129,10 +1200,12 @@ mod tests {
         let dir = init_test_repo();
         commit_file(dir.path(), "hello.txt", b"hello world\n", "add hello");
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "read_file", "path": "hello.txt"}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "read_file", "path": "hello.txt"}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "read_file failed: {}", r.content);
         assert_eq!(r.content.trim(), "hello world");
     }
@@ -1145,10 +1218,12 @@ mod tests {
         data.extend_from_slice(&[0u8; 20]);
         commit_file(dir.path(), "bin.bin", &data, "add binary");
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "read_file", "path": "bin.bin"}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "read_file", "path": "bin.bin"}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(r.is_error, "expected error for binary, got: {}", r.content);
         assert!(
             r.content.to_lowercase().contains("binary"),
@@ -1169,10 +1244,12 @@ mod tests {
             "2022-11-12T13:14:15Z",
         );
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "show", "revision": "HEAD"}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "show", "revision": "HEAD"}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "show failed: {}", r.content);
         assert!(
             r.content.contains("Date:      2022-11-12 13:14:15 UTC"),
@@ -1193,10 +1270,12 @@ mod tests {
         // Modify the tracked file without staging
         std::fs::write(dir.path().join("file.txt"), b"modified\n").expect("write");
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "diff_worktree", "summary_only": true}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "diff_worktree", "summary_only": true}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "diff_worktree failed: {}", r.content);
         assert!(
             r.content.contains("file.txt"),
@@ -1223,10 +1302,12 @@ mod tests {
             .expect("git add");
         assert!(st.success());
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "diff_worktree", "summary_only": true}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "diff_worktree", "summary_only": true}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "diff_worktree failed: {}", r.content);
         assert!(
             r.content.contains("staged_new.txt"),
@@ -1247,10 +1328,12 @@ mod tests {
         // Create an untracked file
         std::fs::write(dir.path().join("new_file.txt"), b"brand new\n").expect("write");
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "diff_worktree", "summary_only": true}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "diff_worktree", "summary_only": true}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "diff_worktree failed: {}", r.content);
         assert!(
             r.content.contains("new_file.txt"),
@@ -1271,10 +1354,12 @@ mod tests {
         // Delete the tracked file from disk
         std::fs::remove_file(dir.path().join("to_delete.txt")).expect("remove");
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({"command": "diff_worktree", "summary_only": true}),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({"command": "diff_worktree", "summary_only": true}),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "diff_worktree failed: {}", r.content);
         assert!(
             r.content.contains("to_delete.txt"),
@@ -1323,15 +1408,17 @@ mod tests {
         let content: String = (0..200).map(|i| format!("line {i}\n")).collect();
         commit_file(dir.path(), "big.txt", content.as_bytes(), "big commit");
         let t = GitTool;
-        let r = t.execute(
-            serde_json::json!({
-                "command": "show",
-                "revision": "HEAD",
-                "include_diff": true,
-                "max_diff_lines": 10
-            }),
-            &ctx_for(dir.path()),
-        ).await;
+        let r = t
+            .execute(
+                serde_json::json!({
+                    "command": "show",
+                    "revision": "HEAD",
+                    "include_diff": true,
+                    "max_diff_lines": 10
+                }),
+                &ctx_for(dir.path()),
+            )
+            .await;
         assert!(!r.is_error, "show failed: {}", r.content);
         assert!(
             r.content.contains("truncated") || r.content.contains("…"),

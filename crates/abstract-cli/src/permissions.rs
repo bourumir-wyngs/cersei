@@ -234,7 +234,10 @@ fn save_persisted_file_to(path: &std::path::Path, persisted: &PersistedPermissio
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(path, serde_json::to_string_pretty(persisted).unwrap_or_default());
+    let _ = std::fs::write(
+        path,
+        serde_json::to_string_pretty(persisted).unwrap_or_default(),
+    );
 }
 
 fn load_persisted_file() -> PersistedPermissions {
@@ -242,10 +245,7 @@ fn load_persisted_file() -> PersistedPermissions {
 }
 
 fn load_persisted_permissions() -> HashSet<String> {
-    load_persisted_file()
-        .tool_permissions
-        .into_iter()
-        .collect()
+    load_persisted_file().tool_permissions.into_iter().collect()
 }
 
 fn save_persisted_permissions(allowed: &HashSet<String>) {

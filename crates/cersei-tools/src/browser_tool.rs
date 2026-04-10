@@ -8,9 +8,9 @@ use chromiumoxide::cdp::browser_protocol::network::{
 };
 use chromiumoxide::cdp::js_protocol::runtime::{EventConsoleApiCalled, RemoteObject};
 use chromiumoxide::{Browser, BrowserConfig, Element, Page};
-use std::collections::HashSet;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tempfile::TempDir;
 use url::Url;
 
@@ -132,7 +132,6 @@ struct BrowserCssInput {
     selector: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct BrowserStorageInput {
     storage: StorageType,
@@ -179,8 +178,9 @@ impl Default for BrowserWindowAction {
     }
 }
 
-static BROWSER_SESSION_REGISTRY: once_cell::sync::Lazy<dashmap::DashMap<String, Arc<BrowserSession>>> =
-    once_cell::sync::Lazy::new(dashmap::DashMap::new);
+static BROWSER_SESSION_REGISTRY: once_cell::sync::Lazy<
+    dashmap::DashMap<String, Arc<BrowserSession>>,
+> = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 fn trim_vec_to_limit<T>(items: &mut Vec<T>, max_entries: usize) {
     if items.len() > max_entries {
@@ -348,7 +348,6 @@ impl Tool for BrowserNavigateTool {
         }
     }
 }
-
 
 #[async_trait]
 impl Tool for BrowserConsoleTool {
@@ -681,7 +680,9 @@ impl Tool for BrowserInputTool {
 
         if let Some(key) = input.key.as_deref().filter(|key| !key.trim().is_empty()) {
             if let Err(err) = element.press_key(key).await {
-                return ToolResult::error(format!("Browser input failed while pressing a key: {err}"));
+                return ToolResult::error(format!(
+                    "Browser input failed while pressing a key: {err}"
+                ));
             }
         }
 
@@ -907,37 +908,33 @@ impl Tool for BrowserStorageTool {
         };
 
         match input.storage {
-            StorageType::Cookies => {
-                match page.get_cookies().await {
-                    Ok(cookies) => {
-                        let items: Vec<Value> = cookies
-                            .iter()
-                            .filter(|c| {
-                                input.name.as_ref().map(|n| c.name == *n).unwrap_or(true)
+            StorageType::Cookies => match page.get_cookies().await {
+                Ok(cookies) => {
+                    let items: Vec<Value> = cookies
+                        .iter()
+                        .filter(|c| input.name.as_ref().map(|n| c.name == *n).unwrap_or(true))
+                        .map(|c| {
+                            serde_json::json!({
+                                "name": c.name,
+                                "value": c.value,
+                                "domain": c.domain,
+                                "path": c.path,
+                                "expires": c.expires,
+                                "http_only": c.http_only,
+                                "secure": c.secure,
+                                "session": c.session,
+                                "same_site": c.same_site.as_ref().map(|s| s.as_ref().to_string()),
                             })
-                            .map(|c| {
-                                serde_json::json!({
-                                    "name": c.name,
-                                    "value": c.value,
-                                    "domain": c.domain,
-                                    "path": c.path,
-                                    "expires": c.expires,
-                                    "http_only": c.http_only,
-                                    "secure": c.secure,
-                                    "session": c.session,
-                                    "same_site": c.same_site.as_ref().map(|s| s.as_ref().to_string()),
-                                })
-                            })
-                            .collect();
-                        success_json(serde_json::json!({
-                            "storage": "cookies",
-                            "count": items.len(),
-                            "items": items,
-                        }))
-                    }
-                    Err(err) => ToolResult::error(format!("Failed to get cookies: {err}")),
+                        })
+                        .collect();
+                    success_json(serde_json::json!({
+                        "storage": "cookies",
+                        "count": items.len(),
+                        "items": items,
+                    }))
                 }
-            }
+                Err(err) => ToolResult::error(format!("Failed to get cookies: {err}")),
+            },
             StorageType::LocalStorage | StorageType::SessionStorage => {
                 let storage_obj = match input.storage {
                     StorageType::LocalStorage => "localStorage",
@@ -1080,8 +1077,8 @@ async fn ensure_browser_page(
         return Ok((session, page));
     }
 
-    let profile_dir =
-        TempDir::new().map_err(|err| format!("Failed to create browser profile directory: {err}"))?;
+    let profile_dir = TempDir::new()
+        .map_err(|err| format!("Failed to create browser profile directory: {err}"))?;
     let config = BrowserConfig::builder()
         .with_head()
         .window_size(browser_config.window.width, browser_config.window.height)
@@ -1090,8 +1087,9 @@ async fn ensure_browser_page(
         .build()
         .map_err(|err| format!("Failed to build browser config: {err}"))?;
 
-    let (mut browser, mut handler) =
-        Browser::launch(config).await.map_err(|err| format!("Failed to launch Chromium: {err}"))?;
+    let (mut browser, mut handler) = Browser::launch(config)
+        .await
+        .map_err(|err| format!("Failed to launch Chromium: {err}"))?;
 
     // chromiumoxide commands only make progress while the handler stream is polled.
     let handler_task = tokio::spawn(async move {
@@ -1119,10 +1117,7 @@ async fn ensure_browser_page(
     }
 
     // Enable the network domain for request/response tracking.
-    if let Err(err) = page
-        .execute(cdp_network::EnableParams::default())
-        .await
-    {
+    if let Err(err) = page.execute(cdp_network::EnableParams::default()).await {
         handler_task.abort();
         let _ = browser.close().await;
         let _ = browser.wait().await;
@@ -1236,7 +1231,10 @@ async fn spawn_page_listener_tasks(
     let console_session = session.clone();
     let console_task = tokio::spawn(async move {
         while let Some(event) = console_events.next().await {
-            push_log_entry(console_session.as_ref(), console_event_to_entry(event.as_ref()));
+            push_log_entry(
+                console_session.as_ref(),
+                console_event_to_entry(event.as_ref()),
+            );
         }
     });
 
@@ -1291,28 +1289,27 @@ async fn spawn_page_listener_tasks(
         .await
         .map_err(|err| format!("Failed to subscribe to network response events: {err}"))?;
     let response_session = session.clone();
-    let response_task = tokio::spawn(async move {
-        while let Some(event) = response_events.next().await {
-            let req_id = event.request_id.inner().clone();
-            let event_timestamp = *event.timestamp.inner();
-            let redirect_url = event.response.url.clone();
-            let mut entries = response_session.network_entries.lock();
-            if let Some(entry) = entries
-                .iter_mut()
-                .rev()
-                .find(|e| e.request_id == req_id && e.status.is_none() && e.error_text.is_none())
-            {
-                entry.url = redirect_url;
-                entry.status = Some(event.response.status);
-                entry.status_text = Some(event.response.status_text.clone());
-                entry.mime_type = Some(event.response.mime_type.clone());
-                entry.response_headers = Some(event.response.headers.inner().clone());
-                entry.encoded_data_length = Some(event.response.encoded_data_length);
-                entry.timestamp = entry.timestamp.max(event_timestamp);
+    let response_task =
+        tokio::spawn(async move {
+            while let Some(event) = response_events.next().await {
+                let req_id = event.request_id.inner().clone();
+                let event_timestamp = *event.timestamp.inner();
+                let redirect_url = event.response.url.clone();
+                let mut entries = response_session.network_entries.lock();
+                if let Some(entry) = entries.iter_mut().rev().find(|e| {
+                    e.request_id == req_id && e.status.is_none() && e.error_text.is_none()
+                }) {
+                    entry.url = redirect_url;
+                    entry.status = Some(event.response.status);
+                    entry.status_text = Some(event.response.status_text.clone());
+                    entry.mime_type = Some(event.response.mime_type.clone());
+                    entry.response_headers = Some(event.response.headers.inner().clone());
+                    entry.encoded_data_length = Some(event.response.encoded_data_length);
+                    entry.timestamp = entry.timestamp.max(event_timestamp);
+                }
+                drop(entries);
             }
-            drop(entries);
-        }
-    });
+        });
 
     let mut finished_events = page
         .event_listener::<EventLoadingFinished>()
@@ -1360,7 +1357,14 @@ async fn spawn_page_listener_tasks(
         }
     });
 
-    Ok(vec![console_task, log_task, request_task, response_task, finished_task, failed_task])
+    Ok(vec![
+        console_task,
+        log_task,
+        request_task,
+        response_task,
+        finished_task,
+        failed_task,
+    ])
 }
 
 async fn browser_status_value(
@@ -1389,8 +1393,8 @@ async fn browser_window_open_value(
     browser_config: &BrowserToolConfig,
     requested_url: Option<&str>,
 ) -> Value {
-        let url = page.url().await.ok().flatten();
-        serde_json::json!({
+    let url = page.url().await.ok().flatten();
+    serde_json::json!({
             "browser_open": true,
             "message": "Visible browser window is open and retained for this session. Use BrowserNavigate, BrowserDom, BrowserConsole, BrowserClick, or BrowserInput on this same window.",
             "url": url,
@@ -1440,11 +1444,7 @@ fn normalize_browser_url(raw_url: &str) -> BrowserResult<String> {
         Url::parse(&candidate).map_err(|err| format!("Invalid browser URL '{trimmed}': {err}"))?;
     match url.scheme() {
         "http" | "https" => {}
-        _ => {
-            return Err(
-                "Browser tools only allow localhost http(s) URLs and about:blank.".into(),
-            )
-        }
+        _ => return Err("Browser tools only allow localhost http(s) URLs and about:blank.".into()),
     }
 
     let host = url
@@ -1533,8 +1533,9 @@ async fn dom_field_value(
             .map_err(|err| format!("Failed to read element value: {err}"))?
             .ok_or_else(|| "Element does not have a value property.".to_string()),
         DomField::Property => {
-            let property =
-                property.ok_or_else(|| "BrowserDom field 'property' requires a property name.".to_string())?;
+            let property = property.ok_or_else(|| {
+                "BrowserDom field 'property' requires a property name.".to_string()
+            })?;
             element
                 .property(property)
                 .await
@@ -1542,8 +1543,7 @@ async fn dom_field_value(
                 .ok_or_else(|| format!("Element property '{property}' was not present."))
         }
         DomField::ComputedStyle => Err(
-            "BrowserDom field 'computed_style' is handled before element-level DOM reads."
-                .into(),
+            "BrowserDom field 'computed_style' is handled before element-level DOM reads.".into(),
         ),
     }
 }
@@ -1558,8 +1558,9 @@ async fn computed_style_value(
 ) -> BrowserResult<Value> {
     let selector = serde_json::to_string(selector)
         .map_err(|err| format!("Failed to encode CSS selector: {err}"))?;
-    let properties = serde_json::to_string(&resolve_computed_style_properties(property, properties))
-        .map_err(|err| format!("Failed to encode computed style properties: {err}"))?;
+    let properties =
+        serde_json::to_string(&resolve_computed_style_properties(property, properties))
+            .map_err(|err| format!("Failed to encode computed style properties: {err}"))?;
     let limit = limit
         .map(|limit| limit.to_string())
         .unwrap_or_else(|| "Number.MAX_SAFE_INTEGER".to_string());
@@ -1723,7 +1724,9 @@ mod tests {
         assert!(!should_track_request_as_active(
             "data:image/svg+xml,%3Csvg%20xmlns%3D%27http://www.w3.org/2000/svg%27%3E"
         ));
-        assert!(should_track_request_as_active("http://localhost:3000/api/v1/experiments"));
+        assert!(should_track_request_as_active(
+            "http://localhost:3000/api/v1/experiments"
+        ));
     }
 
     #[test]
@@ -1844,7 +1847,11 @@ browser:
         assert_eq!(browser.window.width, 1600);
         assert_eq!(browser.window.height, 900);
         assert_eq!(browser.url.as_deref(), Some("http://localhost:3000/"));
-        assert!(browser.notes.as_deref().unwrap().contains("demo@example.com"));
+        assert!(browser
+            .notes
+            .as_deref()
+            .unwrap()
+            .contains("demo@example.com"));
     }
 
     #[test]
@@ -1914,9 +1921,18 @@ browser:
     #[test]
     fn test_normalize_browser_url_restricted_to_localhost() {
         // Valid
-        assert_eq!(normalize_browser_url("http://localhost:8080").unwrap(), "http://localhost:8080/");
-        assert_eq!(normalize_browser_url("https://127.0.0.1/").unwrap(), "https://127.0.0.1/");
-        assert_eq!(normalize_browser_url("app.localhost").unwrap(), "http://app.localhost/");
+        assert_eq!(
+            normalize_browser_url("http://localhost:8080").unwrap(),
+            "http://localhost:8080/"
+        );
+        assert_eq!(
+            normalize_browser_url("https://127.0.0.1/").unwrap(),
+            "https://127.0.0.1/"
+        );
+        assert_eq!(
+            normalize_browser_url("app.localhost").unwrap(),
+            "http://app.localhost/"
+        );
 
         // Invalid
         assert!(normalize_browser_url("https://google.com").is_err());

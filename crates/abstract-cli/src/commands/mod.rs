@@ -19,11 +19,18 @@ pub struct CommandRegistry;
 
 pub enum CommandAction {
     None,
-    SwitchAgent { model: String },
+    SwitchAgent {
+        model: String,
+    },
     ClearHistory,
     Compact,
-    LoadSession { messages: Vec<cersei_types::Message>, session_id: String },
-    SaveSession { name: String },
+    LoadSession {
+        messages: Vec<cersei_types::Message>,
+        session_id: String,
+    },
+    SaveSession {
+        name: String,
+    },
 }
 
 impl CommandRegistry {
@@ -55,15 +62,16 @@ impl CommandRegistry {
                     eprintln!("\x1b[33mUsage: /delete <session-id>\x1b[0m");
                     Ok(CommandAction::None)
                 } else {
-                    crate::sessions::delete(config, args.trim())
-                        .map(|_| CommandAction::None)
+                    crate::sessions::delete(config, args.trim()).map(|_| CommandAction::None)
                 }
             }
             "save" => Ok(if args.trim().is_empty() {
                 eprintln!("\x1b[33mUsage: /save <name>\x1b[0m");
                 CommandAction::None
             } else {
-                CommandAction::SaveSession { name: args.trim().to_string() }
+                CommandAction::SaveSession {
+                    name: args.trim().to_string(),
+                }
             }),
             _ => {
                 eprintln!("\x1b[33mUnknown command: /{cmd}\x1b[0m");

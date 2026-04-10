@@ -162,9 +162,7 @@ impl AutoDream {
     /// Check all gates in order (cheapest first).
     pub fn should_consolidate(&self) -> bool {
         let state = self.load_state();
-        self.time_gate_passes(&state)
-            && self.session_gate_passes(&state)
-            && self.lock_gate_passes()
+        self.time_gate_passes(&state) && self.session_gate_passes(&state) && self.lock_gate_passes()
     }
 
     // ─── Lock management ─────────────────────────────────────────────────
@@ -197,7 +195,7 @@ impl AutoDream {
             3. **Consolidate**: Merge new signal into existing files, convert relative dates to absolute\n\
             4. **Prune**: Keep MEMORY.md under 200 lines / 25KB, remove contradicted facts\n\n\
             Only use read-only tools: ls, find, grep, cat, stat, wc, head, tail.\n\
-            Write changes to memory files using Write and Edit tools.",
+            Write changes to memory files using Write and sed tools.",
             self.memory_dir.display()
         )
     }

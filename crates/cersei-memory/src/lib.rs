@@ -23,7 +23,9 @@ use std::path::PathBuf;
 pub fn strip_frontmatter(content: &str) -> String {
     if content.starts_with("---") {
         if let Some(close_pos) = content[3..].find("\n---") {
-            return content[3 + close_pos + 4..].trim_start_matches('\n').to_string();
+            return content[3 + close_pos + 4..]
+                .trim_start_matches('\n')
+                .to_string();
         }
     }
     content.to_string()

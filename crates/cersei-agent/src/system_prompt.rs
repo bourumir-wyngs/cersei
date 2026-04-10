@@ -94,9 +94,9 @@ impl OutputStyle {
                 "Be maximally concise. Skip preamble, summaries, and filler. \
                 Lead with the answer. One sentence is better than three.",
             ),
-            OutputStyle::Formal => Some(
-                "Maintain a formal, professional tone. Use precise technical language.",
-            ),
+            OutputStyle::Formal => {
+                Some("Maintain a formal, professional tone. Use precise technical language.")
+            }
             OutputStyle::Casual => Some("Use a casual, conversational tone."),
             OutputStyle::Default => None,
         }
@@ -145,19 +145,13 @@ impl SystemPromptPrefix {
     /// The opening attribution string.
     pub fn attribution_text(self) -> &'static str {
         match self {
-            Self::Interactive => {
-                "You are a coding agent built with the Cersei SDK."
-            }
+            Self::Interactive => "You are a coding agent built with the Cersei SDK.",
             Self::SdkPreset => {
                 "You are a coding agent built with the Cersei SDK, \
                 running with custom instructions."
             }
-            Self::Sdk => {
-                "You are an agent built on the Cersei SDK."
-            }
-            Self::SubAgent => {
-                "You are a specialized sub-agent."
-            }
+            Self::Sdk => "You are an agent built on the Cersei SDK.",
+            Self::SubAgent => "You are a specialized sub-agent.",
         }
     }
 }
@@ -276,10 +270,7 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
 
     // 12. Memory
     if !opts.memory_content.is_empty() {
-        parts.push(format!(
-            "\n<memory>\n{}\n</memory>",
-            opts.memory_content
-        ));
+        parts.push(format!("\n<memory>\n{}\n</memory>", opts.memory_content));
     }
 
     // 13. Extra dynamic sections
@@ -301,7 +292,7 @@ const CORE_CAPABILITIES: &str = r#"
 ## Capabilities
 
 You have access to powerful tools for software engineering tasks:
-- **Read/Write files**: Read any file, write new files, edit existing files with precise diffs
+- **Read/Write files**: Read any file, write new files, edit existing files with `sed`, inspect diffs, and undo the last `sed` edit with `revert`
 - **Execute commands**: Run bash commands, PowerShell scripts, background processes
 - **Search**: Glob patterns, regex grep, web search, file content search
 - **Web**: Fetch URLs, search the internet
@@ -322,11 +313,11 @@ You have access to powerful tools for software engineering tasks:
 const TOOL_USE_GUIDELINES: &str = r#"
 ## Tool use guidelines
 
-- Use dedicated tools (Read, Edit, Glob, Grep) instead of bash equivalents
+- Use dedicated tools (Read, Sed, Revert, Glob, Grep) instead of bash equivalents
 - For searches, prefer Grep over `grep`; prefer Glob over `find`
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits
-- Bash commands timeout after 2 minutes; use background mode for long operations
+- Bash commands timeout after 2 minutes; use Process tool for long operations.
 "#;
 
 const ACTIONS_SECTION: &str = r#"

@@ -166,12 +166,7 @@ impl FileHistory {
     }
 
     /// Diff between two stored revisions.
-    pub fn diff_two_revisions(
-        &self,
-        path: &PathBuf,
-        from_rev: u32,
-        to_rev: u32,
-    ) -> Option<String> {
+    pub fn diff_two_revisions(&self, path: &PathBuf, from_rev: u32, to_rev: u32) -> Option<String> {
         let entries = self.entries.lock();
         let entry = entries.get(path)?;
         let from = entry.revisions.iter().find(|r| r.number == from_rev)?;
@@ -187,9 +182,7 @@ impl FileHistory {
     /// Get the number of revisions for a file (0 if untracked).
     pub fn revision_count(&self, path: &PathBuf) -> u32 {
         let entries = self.entries.lock();
-        entries
-            .get(path)
-            .map_or(0, |e| e.revisions.len() as u32)
+        entries.get(path).map_or(0, |e| e.revisions.len() as u32)
     }
 
     pub fn file_count(&self) -> usize {
@@ -268,7 +261,7 @@ pub struct RevisionInfo {
 
 // ─── Diff helper ────────────────────────────────────────────────────────────
 
-fn unified_diff(old: &str, new: &str, old_label: &str, new_label: &str) -> String {
+pub(crate) fn unified_diff(old: &str, new: &str, old_label: &str, new_label: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut out = String::new();
     out.push_str(&format!("--- {}\n+++ {}\n", old_label, new_label));
@@ -322,14 +315,8 @@ mod tests {
         assert_eq!(revs[1].number, 2);
         assert_eq!(revs[1].operation, "edit");
 
-        assert_eq!(
-            history.get_revision_content(&path, 1).unwrap(),
-            "version 1"
-        );
-        assert_eq!(
-            history.get_revision_content(&path, 2).unwrap(),
-            "version 2"
-        );
+        assert_eq!(history.get_revision_content(&path, 1).unwrap(), "version 1");
+        assert_eq!(history.get_revision_content(&path, 2).unwrap(), "version 2");
     }
 
     #[test]

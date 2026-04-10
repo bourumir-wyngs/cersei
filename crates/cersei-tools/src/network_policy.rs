@@ -34,8 +34,10 @@ pub fn sandbox_available() -> bool {
 /// Returns a warning string when sandboxing is unavailable, `None` otherwise.
 pub fn sandbox_warning() -> Option<&'static str> {
     if !*FIREJAIL_AVAILABLE {
-        Some("Network sandboxing unavailable (firejail not found or not functional). \
-              Commands run with full network access.")
+        Some(
+            "Network sandboxing unavailable (firejail not found or not functional). \
+              Commands run with full network access.",
+        )
     } else {
         None
     }
@@ -79,8 +81,12 @@ pub trait NetworkPolicy: Send + Sync {
     /// `requested` is what the tool input declared. When `Blocked` the policy
     /// should return `Blocked` without prompting. When `Full` the policy may
     /// approve, deny, or prompt the user.
-    async fn check(&self, tool_name: &str, command: &str, requested: NetworkAccess)
-        -> NetworkAccess;
+    async fn check(
+        &self,
+        tool_name: &str,
+        command: &str,
+        requested: NetworkAccess,
+    ) -> NetworkAccess;
 }
 
 // ─── Built-in policies ───────────────────────────────────────────────────────
@@ -134,7 +140,15 @@ pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
         _ => "--net=none",
     };
     let mut cmd = Command::new("firejail");
-    cmd.args(["--quiet", "--noprofile", net_flag, "--", "sh", "-c", command]);
+    cmd.args([
+        "--quiet",
+        "--noprofile",
+        net_flag,
+        "--",
+        "sh",
+        "-c",
+        command,
+    ]);
     cmd
 }
 
@@ -149,12 +163,18 @@ mod tests {
 
     #[test]
     fn local_and_full_are_preserved() {
-        assert_eq!(NetworkAccess::from_input(Some("local")), NetworkAccess::Local);
+        assert_eq!(
+            NetworkAccess::from_input(Some("local")),
+            NetworkAccess::Local
+        );
         assert_eq!(NetworkAccess::from_input(Some("full")), NetworkAccess::Full);
     }
 
     #[test]
     fn legacy_none_still_blocks() {
-        assert_eq!(NetworkAccess::from_input(Some("none")), NetworkAccess::Blocked);
+        assert_eq!(
+            NetworkAccess::from_input(Some("none")),
+            NetworkAccess::Blocked
+        );
     }
 }

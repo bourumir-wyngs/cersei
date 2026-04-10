@@ -3,15 +3,15 @@
 pub mod ask_user;
 pub mod bash;
 pub mod bash_classifier;
-pub mod cargo_tool;
 pub mod browser_tool;
+pub mod cargo_tool;
 #[cfg(feature = "cas")]
 pub mod cas;
 pub mod config_tool;
 pub mod cron;
+pub mod file_edit;
 pub mod file_history;
 pub mod file_history_tool;
-pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
 pub mod git_tool;
@@ -21,9 +21,9 @@ pub mod grep_tool;
 pub mod list_directory;
 pub mod mysql_tool;
 pub mod network_policy;
+pub mod notebook_edit;
 pub mod npm_tool;
 pub mod npx_tool;
-pub mod notebook_edit;
 pub mod permissions;
 pub mod plan_mode;
 pub mod postgres_tool;
@@ -288,8 +288,7 @@ pub struct Extensions {
 
 impl Extensions {
     pub fn insert<T: Send + Sync + 'static>(&self, val: T) {
-        self.data
-            .insert(std::any::TypeId::of::<T>(), Arc::new(val));
+        self.data.insert(std::any::TypeId::of::<T>(), Arc::new(val));
     }
 
     pub fn get<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
@@ -392,12 +391,13 @@ pub fn data() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// File system tools: Read, Write, Edit, Glob, Grep, NotebookEdit.
+/// File system tools: Read, Write, sed, revert, Glob, Grep, NotebookEdit.
 pub fn filesystem() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(file_read::FileReadTool),
         Box::new(file_write::FileWriteTool),
-        Box::new(file_edit::FileEditTool),
+        Box::new(file_edit::SedTool),
+        Box::new(file_edit::RevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(grep_tool::GrepTool),
         Box::new(list_directory::ListDirectoryTool),

@@ -39,7 +39,7 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
         when_to_use: Some("When the user asks you to remember something"),
         argument_hint: Some("<what to remember>"),
         prompt_template: "Save the following to memory: $ARGUMENTS",
-        allowed_tools: Some(&["Read", "Write", "Edit", "Glob"]),
+        allowed_tools: Some(&["Read", "Write", "sed", "revert", "Glob"]),
         user_invocable: true,
     },
     BundledSkill {
@@ -115,9 +115,9 @@ pub const BUNDLED_SKILLS: &[BundledSkill] = &[
 /// Find a bundled skill by name or alias (case-insensitive).
 pub fn find_bundled_skill(name: &str) -> Option<&'static BundledSkill> {
     let lower = name.to_lowercase();
-    BUNDLED_SKILLS.iter().find(|s| {
-        s.name == lower || s.aliases.iter().any(|a| *a == lower)
-    })
+    BUNDLED_SKILLS
+        .iter()
+        .find(|s| s.name == lower || s.aliases.iter().any(|a| *a == lower))
 }
 
 /// Get all user-invocable bundled skills.
@@ -134,7 +134,9 @@ pub fn load_bundled(skill: &BundledSkill, _args: Option<&str>) -> LoadedSkill {
             path: None,
             bundled: true,
             aliases: skill.aliases.iter().map(|s| s.to_string()).collect(),
-            allowed_tools: skill.allowed_tools.map(|t| t.iter().map(|s| s.to_string()).collect()),
+            allowed_tools: skill
+                .allowed_tools
+                .map(|t| t.iter().map(|s| s.to_string()).collect()),
             argument_hint: skill.argument_hint.map(|s| s.to_string()),
             format: SkillFormat::Bundled,
         },

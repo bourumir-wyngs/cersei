@@ -82,7 +82,11 @@ pub fn git_diff(path: &Path) -> Option<String> {
         .unwrap_or_default();
 
     let combined = format!("{}\n{}", staged, unstaged).trim().to_string();
-    if combined.is_empty() { None } else { Some(combined) }
+    if combined.is_empty() {
+        None
+    } else {
+        Some(combined)
+    }
 }
 
 /// Get recent commit history (one-line format).

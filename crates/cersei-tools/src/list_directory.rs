@@ -8,7 +8,9 @@ pub struct ListDirectoryTool;
 
 #[async_trait]
 impl Tool for ListDirectoryTool {
-    fn name(&self) -> &str { "ListDirectory" }
+    fn name(&self) -> &str {
+        "ListDirectory"
+    }
 
     fn description(&self) -> &str {
         "List files and directories with metadata (size, permissions, owner). \
@@ -16,8 +18,12 @@ impl Tool for ListDirectoryTool {
         Recursive mode is restricted to the workspace root."
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::ReadOnly }
-    fn category(&self) -> ToolCategory { ToolCategory::FileSystem }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
 
     fn input_schema(&self) -> Value {
         serde_json::json!({
@@ -100,15 +106,33 @@ impl Tool for ListDirectoryTool {
         let mut truncated = false;
 
         if recursive {
-            collect_recursive(&target, &target, &filter, &mut entries, limit, &mut total, &mut truncated);
+            collect_recursive(
+                &target,
+                &target,
+                &filter,
+                &mut entries,
+                limit,
+                &mut total,
+                &mut truncated,
+            );
         } else {
-            collect_flat(&target, &filter, &mut entries, limit, &mut total, &mut truncated);
+            collect_flat(
+                &target,
+                &filter,
+                &mut entries,
+                limit,
+                &mut total,
+                &mut truncated,
+            );
         }
 
         let mut output = format!("{}:\n", target.display());
         output.push_str(&entries.join("\n"));
         if truncated {
-            output.push_str(&format!("\n\n[truncated — showing first {} entries]", limit));
+            output.push_str(&format!(
+                "\n\n[truncated — showing first {} entries]",
+                limit
+            ));
         }
 
         ToolResult::success(output)
@@ -127,10 +151,20 @@ fn format_entry(path: &std::path::Path, base: &std::path::Path) -> String {
             let is_dir = meta.is_dir();
             let is_link = meta.file_type().is_symlink();
 
-            let size = if is_dir { "-".to_string() } else { format_size(meta.len()) };
+            let size = if is_dir {
+                "-".to_string()
+            } else {
+                format_size(meta.len())
+            };
             let perms = format_permissions(meta.permissions().mode());
             let owner = format_owner(meta.uid(), meta.gid());
-            let type_char = if is_link { 'l' } else if is_dir { 'd' } else { 'f' };
+            let type_char = if is_link {
+                'l'
+            } else if is_dir {
+                'd'
+            } else {
+                'f'
+            };
 
             let name = if is_dir {
                 format!("{}/", display)
@@ -149,7 +183,11 @@ fn format_entry(path: &std::path::Path, base: &std::path::Path) -> String {
     }
 }
 
-fn matches_filter(path: &std::path::Path, base: &std::path::Path, filter: &Option<regex::Regex>) -> bool {
+fn matches_filter(
+    path: &std::path::Path,
+    base: &std::path::Path,
+    filter: &Option<regex::Regex>,
+) -> bool {
     match filter {
         None => true,
         Some(re) => {
@@ -237,9 +275,15 @@ fn format_size(bytes: u64) -> String {
 
 fn format_permissions(mode: u32) -> String {
     let chars: Vec<char> = [
-        (0o400, 'r'), (0o200, 'w'), (0o100, 'x'),
-        (0o040, 'r'), (0o020, 'w'), (0o010, 'x'),
-        (0o004, 'r'), (0o002, 'w'), (0o001, 'x'),
+        (0o400, 'r'),
+        (0o200, 'w'),
+        (0o100, 'x'),
+        (0o040, 'r'),
+        (0o020, 'w'),
+        (0o010, 'x'),
+        (0o004, 'r'),
+        (0o002, 'w'),
+        (0o001, 'x'),
     ]
     .iter()
     .map(|(bit, ch)| if mode & bit != 0 { *ch } else { '-' })

@@ -1,35 +1,46 @@
-//! File edit tool: performs exact string replacements or line-range replacements.
+//! sed-backed file editing with one-step session-local revert.
 
 use super::*;
-use crate::file_history::FileHistory;
+use crate::file_history::{unified_diff, FileHistory};
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::path::{Component, Path, PathBuf};
 
-pub struct FileEditTool;
+#[derive(Debug, Clone)]
+struct LastSedSnapshot {
+    file_path: PathBuf,
+    content: Vec<u8>,
+}
+
+static LAST_SED_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastSedSnapshot>> =
+    Lazy::new(dashmap::DashMap::new);
+
+pub struct SedTool;
+pub struct RevertTool;
+
+/// Legacy type alias kept so downstream imports still compile.
+pub type FileEditTool = SedTool;
 
 #[async_trait]
-impl Tool for FileEditTool {
-    fn name(&self) -> &str { "Edit" }
-
-    fn description(&self) -> &str {
-        "Edit a file by replacing text. Two modes:\n\
-         \n\
-         **Mode 1 — String replacement** (provide `old_string` + `new_string`):\n\
-         Replace an exact substring. The `old_string` must match the file content \
-         exactly, including whitespace and indentation. Always Read the file first \
-         to get the exact text. If the match is not unique, provide more surrounding \
-         context or set `replace_all`.\n\
-         \n\
-         **Mode 2 — Line-range replacement** (provide `start_line` + `new_string`):\n\
-         Replace lines by number. Use `start_line` alone to replace a single line, \
-         or `start_line` + `end_line` for a range (inclusive). Line numbers correspond \
-         to the output of the Read tool. To insert before a line without removing it, \
-         set `insert_only` to true.\n\
-         \n\
-         To delete text, set `new_string` to an empty string."
+impl Tool for SedTool {
+    fn name(&self) -> &str {
+        "Sed"
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Write }
-    fn category(&self) -> ToolCategory { ToolCategory::FileSystem }
+    fn description(&self) -> &str {
+        "Apply a GNU-compatible sed script to a file using sed-rs. The file is checkpointed \
+         before the write, the result is written back to disk, and the tool returns a unified \
+         diff plus the reminder \"use 'revert' command if wrong\". Use `revert` to undo the \
+         most recent successful sed edit in this session."
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
 
     fn input_schema(&self) -> Value {
         serde_json::json!({
@@ -37,36 +48,24 @@ impl Tool for FileEditTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path to the file to edit"
+                    "description": "Path to the file relative to the current workspace root. Absolute paths and `..` segments are not allowed."
                 },
-                "old_string": {
+                "script": {
                     "type": "string",
-                    "description": "Exact text to find and replace (must match file content exactly, including whitespace)"
+                    "description": "GNU-compatible sed script, for example `s/foo/bar/g` or `2,4d`"
                 },
-                "new_string": {
-                    "type": "string",
-                    "description": "Replacement text (use empty string to delete)"
-                },
-                "replace_all": {
+                "quiet": {
                     "type": "boolean",
-                    "description": "Replace all occurrences of old_string (default: false)",
+                    "description": "Suppress automatic printing of the pattern space (`-n` behavior)",
                     "default": false
                 },
-                "start_line": {
-                    "type": "integer",
-                    "description": "First line number to replace (1-based, as shown by Read). Use instead of old_string for line-based editing."
-                },
-                "end_line": {
-                    "type": "integer",
-                    "description": "Last line number to replace, inclusive (defaults to start_line)"
-                },
-                "insert_only": {
+                "null_data": {
                     "type": "boolean",
-                    "description": "If true with start_line, insert new_string before that line instead of replacing it (default: false)",
+                    "description": "Use NUL as the record delimiter (`-z` behavior)",
                     "default": false
                 }
             },
-            "required": ["file_path", "new_string"]
+            "required": ["file_path", "script"]
         })
     }
 
@@ -74,14 +73,11 @@ impl Tool for FileEditTool {
         #[derive(Deserialize)]
         struct Input {
             file_path: String,
-            old_string: Option<String>,
-            new_string: String,
+            script: String,
             #[serde(default)]
-            replace_all: bool,
-            start_line: Option<usize>,
-            end_line: Option<usize>,
+            quiet: bool,
             #[serde(default)]
-            insert_only: bool,
+            null_data: bool,
         }
 
         let input: Input = match serde_json::from_value(input) {
@@ -89,468 +85,750 @@ impl Tool for FileEditTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let path = std::path::Path::new(&input.file_path);
-        let content = match tokio::fs::read_to_string(path).await {
-            Ok(c) => c,
+        let path = match resolve_existing_workspace_path(ctx, &input.file_path) {
+            Ok(path) => path,
+            Err(err) => return err,
+        };
+
+        let original_bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
+        let original_text = String::from_utf8_lossy(&original_bytes).into_owned();
 
-        // Snapshot before mutation
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.snapshot_before_write(&path.to_path_buf(), &content, "edit");
-        }
-
-        // Dispatch to the appropriate mode
-        if let Some(start_line) = input.start_line {
-            edit_by_lines(&input.file_path, &content, start_line, input.end_line, &input.new_string, input.insert_only).await
-        } else if let Some(old_string) = &input.old_string {
-            edit_by_string(&input.file_path, &content, old_string, &input.new_string, input.replace_all).await
-        } else {
-            ToolResult::error(
-                "Either `old_string` or `start_line` must be provided.\n\
-                 - Use `old_string` to find and replace an exact substring.\n\
-                 - Use `start_line` to replace lines by number."
-            )
-        }
-    }
-}
-
-/// Line-range based editing.
-async fn edit_by_lines(
-    file_path: &str,
-    content: &str,
-    start_line: usize,
-    end_line: Option<usize>,
-    new_string: &str,
-    insert_only: bool,
-) -> ToolResult {
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-
-    if start_line == 0 || start_line > total + 1 {
-        return ToolResult::error(format!(
-            "start_line {} is out of range (file has {} lines)",
-            start_line, total
-        ));
-    }
-
-    let end_line = end_line.unwrap_or(start_line);
-    if end_line < start_line {
-        return ToolResult::error(format!(
-            "end_line ({}) must be >= start_line ({})",
-            end_line, start_line
-        ));
-    }
-    if end_line > total {
-        return ToolResult::error(format!(
-            "end_line {} is out of range (file has {} lines)",
-            end_line, total
-        ));
-    }
-
-    let idx_start = start_line - 1; // 0-based
-    let idx_end = if insert_only { idx_start } else { end_line }; // exclusive end
-
-    let mut result_lines: Vec<&str> = Vec::with_capacity(total);
-    result_lines.extend_from_slice(&lines[..idx_start]);
-
-    // Insert the new content (may be multiple lines)
-    let new_lines: Vec<&str> = if new_string.is_empty() {
-        vec![]
-    } else {
-        new_string.lines().collect()
-    };
-    for nl in &new_lines {
-        result_lines.push(nl);
-    }
-
-    if idx_end < total {
-        result_lines.extend_from_slice(&lines[idx_end..]);
-    }
-
-    let mut new_content = result_lines.join("\n");
-    // Preserve trailing newline if original had one
-    if content.ends_with('\n') {
-        new_content.push('\n');
-    }
-
-    match tokio::fs::write(std::path::Path::new(file_path), &new_content).await {
-        Ok(()) => {
-            let verb = if insert_only { "Inserted before" } else { "Replaced" };
-            let range = if start_line == end_line && !insert_only {
-                format!("line {}", start_line)
-            } else if insert_only {
-                format!("line {}", start_line)
-            } else {
-                format!("lines {}-{}", start_line, end_line)
-            };
-            ToolResult::success(format!(
-                "{} {} in {} ({} lines written)",
-                verb, range, file_path, new_lines.len()
-            ))
-        }
-        Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
-    }
-}
-
-/// Exact-string based editing with diagnostic error messages.
-async fn edit_by_string(
-    file_path: &str,
-    content: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-) -> ToolResult {
-    if old_string.is_empty() {
-        return ToolResult::error(
-            "old_string is empty. To insert text, use start_line with insert_only, \
-             or use the Write tool to write the whole file."
-        );
-    }
-
-    if content.contains(old_string) {
-        // Exact case-sensitive match
-        let new_content = if replace_all {
-            content.replace(old_string, new_string)
-        } else {
-            let count = content.matches(old_string).count();
-            if count > 1 {
-                return ToolResult::error(format!(
-                    "old_string matches {} locations. Provide more surrounding context to make it unique, \
-                     or set replace_all to true.",
-                    count
-                ));
-            }
-            content.replacen(old_string, new_string, 1)
+        let mut sed = match sed_rs::Sed::new(&input.script) {
+            Ok(sed) => sed,
+            Err(e) => return ToolResult::error(format!("Invalid sed script: {}", e)),
         };
-        write_content(file_path, &new_content).await
-    } else {
-        // No exact match — try case-insensitive fallback
-        match try_case_insensitive_replace(content, old_string, new_string, replace_all) {
-            CaseInsensitiveResult::SingleMatch(new_content) => {
-                return write_content(file_path, &new_content).await;
+        sed.quiet(input.quiet).null_data(input.null_data);
+
+        let updated_text = match sed.eval_bytes(&original_bytes) {
+            Ok(output) => output,
+            Err(e) => return ToolResult::error(format!("Failed to run sed script: {}", e)),
+        };
+
+        if updated_text.as_bytes() == original_bytes.as_slice() {
+            return ToolResult::success(format!(
+                "sed script produced no changes in {}.",
+                path.display()
+            ));
+        }
+
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            history.snapshot_before_write(&path, &original_text, "edit");
+        }
+
+        let snapshot = LastSedSnapshot {
+            file_path: path.clone(),
+            content: original_bytes.clone(),
+        };
+        let previous_snapshot = LAST_SED_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
+
+        if let Err(e) = write_bytes(&path, updated_text.as_bytes()).await {
+            restore_previous_snapshot(&ctx.session_id, previous_snapshot);
+            return ToolResult::error(format!("Failed to write file: {}", e));
+        }
+
+        let diff = unified_diff(
+            &original_text,
+            &updated_text,
+            &format!("{} (before)", path.display()),
+            &format!("{} (after)", path.display()),
+        );
+
+        ToolResult::success(format!(
+            "Applied sed script to {}.\n{}\n\nuse 'revert' command if wrong",
+            path.display(),
+            diff.trim_end()
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for RevertTool {
+    fn name(&self) -> &str {
+        "Revert"
+    }
+
+    fn description(&self) -> &str {
+        "Restore the previous checkpoint from the most recent successful `sed` edit in this \
+         session. Only one checkpoint is retained."
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Optional safety check. If provided, it must be a workspace-relative path matching the file from the most recent sed edit."
+                }
             }
-            CaseInsensitiveResult::MultipleMatches(count) => {
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        #[derive(Deserialize, Default)]
+        struct Input {
+            file_path: Option<String>,
+        }
+
+        let input: Input = match serde_json::from_value(input) {
+            Ok(i) => i,
+            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
+        };
+
+        let snapshot = match LAST_SED_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
+            Some(entry) => entry.clone(),
+            None => {
+                return ToolResult::error(
+                    "No sed snapshot is available to revert. Run `sed` first.",
+                )
+            }
+        };
+
+        if let Some(requested) = input.file_path.as_ref() {
+            let requested_path = match resolve_workspace_path(ctx, requested, false) {
+                Ok(path) => path,
+                Err(err) => return err,
+            };
+            if requested_path != snapshot.file_path {
                 return ToolResult::error(format!(
-                    "old_string not found with exact case in {}. \
-                     Found {} case-insensitive matches — check the case of your query.",
-                    file_path, count
+                    "The last sed snapshot is for {}, not {}.",
+                    snapshot.file_path.display(),
+                    requested
                 ));
             }
-            CaseInsensitiveResult::NoMatch => {}
         }
 
-        // No match — produce a diagnostic error
-        ToolResult::error(build_not_found_diagnostic(file_path, content, old_string))
-    }
-}
+        let current_bytes = tokio::fs::read(&snapshot.file_path)
+            .await
+            .unwrap_or_default();
+        let current_text = String::from_utf8_lossy(&current_bytes).into_owned();
+        let restored_text = String::from_utf8_lossy(&snapshot.content).into_owned();
 
-async fn write_content(file_path: &str, content: &str) -> ToolResult {
-    match tokio::fs::write(std::path::Path::new(file_path), content).await {
-        Ok(()) => ToolResult::success(format!(
-            "The file {} has been updated successfully.",
-            file_path
-        )),
-        Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
-    }
-}
-
-enum CaseInsensitiveResult {
-    SingleMatch(String),
-    MultipleMatches(usize),
-    NoMatch,
-}
-
-/// Try case-insensitive matching.
-fn try_case_insensitive_replace(
-    content: &str,
-    old_string: &str,
-    new_string: &str,
-    replace_all: bool,
-) -> CaseInsensitiveResult {
-    let content_lower = content.to_lowercase();
-    let old_lower = old_string.to_lowercase();
-
-    let matches: Vec<usize> = content_lower
-        .match_indices(&old_lower)
-        .map(|(pos, _)| pos)
-        .collect();
-
-    if matches.is_empty() {
-        return CaseInsensitiveResult::NoMatch;
-    }
-
-    if !replace_all && matches.len() > 1 {
-        return CaseInsensitiveResult::MultipleMatches(matches.len());
-    }
-
-    // Build the result by replacing matched ranges (iterate in reverse to preserve offsets)
-    let mut result = content.to_string();
-    for &pos in matches.iter().rev() {
-        result.replace_range(pos..pos + old_string.len(), new_string);
-        if !replace_all {
-            break;
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            history.snapshot_before_write(&snapshot.file_path, &current_text, "revert");
         }
-    }
-    CaseInsensitiveResult::SingleMatch(result)
-}
 
-/// Build a helpful error message when old_string is not found.
-fn build_not_found_diagnostic(file_path: &str, content: &str, old_string: &str) -> String {
-    let mut msg = format!("old_string not found in {}\n", file_path);
+        if let Err(e) = write_bytes(&snapshot.file_path, &snapshot.content).await {
+            return ToolResult::error(format!("Failed to write file: {}", e));
+        }
 
-    // Check for whitespace-only differences
-    let normalized_content = normalize_whitespace(content);
-    let normalized_old = normalize_whitespace(old_string);
-    if normalized_content.contains(&normalized_old) {
-        msg.push_str(
-            "\nHint: A match exists if whitespace differences are ignored. \
-             The old_string likely has incorrect indentation or trailing spaces. \
-             Re-read the file and copy the exact text including whitespace."
+        LAST_SED_SNAPSHOT_REGISTRY.remove(&ctx.session_id);
+
+        let diff = unified_diff(
+            &current_text,
+            &restored_text,
+            &format!("{} (current)", snapshot.file_path.display()),
+            &format!("{} (reverted)", snapshot.file_path.display()),
         );
-        // Find approximately where the match is
-        if let Some(line_num) = find_approx_line(&normalized_content, &normalized_old, content) {
-            msg.push_str(&format!(" The closest match is near line {}.", line_num));
-        }
-        return msg;
-    }
 
-    // Check if all individual lines exist (possibly non-contiguous or reordered)
-    let old_lines: Vec<&str> = old_string.lines().collect();
-    if old_lines.len() > 1 {
-        let content_lines: Vec<&str> = content.lines().collect();
-        let missing: Vec<&&str> = old_lines.iter()
-            .filter(|l| !l.trim().is_empty())
-            .filter(|l| !content_lines.iter().any(|cl| cl == *l))
-            .collect();
-        if missing.is_empty() {
-            msg.push_str(
-                "\nHint: All lines from old_string exist in the file but not as a contiguous block. \
-                 The lines may be in a different order or have other lines between them. \
-                 Re-read the file to get the exact contiguous text."
-            );
-            return msg;
+        ToolResult::success(format!(
+            "Reverted {} to the previous sed snapshot.\n{}",
+            snapshot.file_path.display(),
+            diff.trim_end()
+        ))
+    }
+}
+
+async fn write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, bytes).await
+}
+
+fn resolve_existing_workspace_path(
+    ctx: &ToolContext,
+    input: &str,
+) -> std::result::Result<PathBuf, ToolResult> {
+    resolve_workspace_path(ctx, input, true)
+}
+
+fn resolve_workspace_path(
+    ctx: &ToolContext,
+    input: &str,
+    require_exists: bool,
+) -> std::result::Result<PathBuf, ToolResult> {
+    let root = ctx.working_dir.canonicalize().map_err(|e| {
+        ToolResult::error(format!(
+            "Cannot resolve workspace root '{}': {}",
+            ctx.working_dir.display(),
+            e
+        ))
+    })?;
+
+    let relative = normalize_relative_workspace_path(input)?;
+    let candidate = root.join(&relative);
+
+    if require_exists {
+        let canonical = candidate
+            .canonicalize()
+            .map_err(|e| ToolResult::error(format!("Cannot access file '{}': {}", input, e)))?;
+        if !canonical.starts_with(&root) {
+            return Err(ToolResult::error(format!(
+                "Path '{}' resolves outside the current workspace root.",
+                input
+            )));
         }
-        if missing.len() < old_lines.len() {
-            msg.push_str(&format!(
-                "\nHint: Some lines from old_string were not found in the file:\n"
-            ));
-            for (i, line) in missing.iter().enumerate() {
-                if i >= 3 {
-                    msg.push_str(&format!("  ... and {} more\n", missing.len() - 3));
-                    break;
-                }
-                msg.push_str(&format!("  {:?}\n", line));
+        Ok(canonical)
+    } else {
+        if let Ok(canonical) = candidate.canonicalize() {
+            if !canonical.starts_with(&root) {
+                return Err(ToolResult::error(format!(
+                    "Path '{}' resolves outside the current workspace root.",
+                    input
+                )));
             }
-            msg.push_str("Re-read the file to get the current content.");
-            return msg;
+            Ok(canonical)
+        } else {
+            Ok(candidate)
         }
     }
+}
 
-    // Find the best partial match to give a location hint
-    if let Some((line_num, similarity)) = find_best_line_match(content, old_string) {
-        msg.push_str(&format!(
-            "\nHint: The closest match is near line {} ({:.0}% similar). \
-             Re-read the file around that area to get the exact text.",
-            line_num, similarity * 100.0
+fn normalize_relative_workspace_path(input: &str) -> std::result::Result<PathBuf, ToolResult> {
+    let raw = Path::new(input);
+    if raw.is_absolute() {
+        return Err(ToolResult::error(
+            "file_path must be relative to the current workspace root; absolute paths are not allowed.",
         ));
-    } else {
-        msg.push_str(
-            "\nHint: No similar text found. The file content may have changed. \
-             Re-read the file before editing."
-        );
     }
 
-    msg
-}
-
-/// Collapse runs of whitespace to single spaces for comparison.
-fn normalize_whitespace(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Given a normalized match, find the approximate line number in the original content.
-fn find_approx_line(normalized_content: &str, normalized_old: &str, original: &str) -> Option<usize> {
-    let match_pos = normalized_content.find(normalized_old)?;
-    // Count words before the match position, then map back to original line
-    let target_count = normalized_content[..match_pos].split_whitespace().count();
-    let mut word_count = 0;
-    for (i, line) in original.lines().enumerate() {
-        word_count += line.split_whitespace().count();
-        if word_count >= target_count {
-            return Some(i + 1);
-        }
-    }
-    None
-}
-
-/// Find the best matching region in the file for a multi-line old_string.
-/// Returns (line_number, similarity_score).
-fn find_best_line_match(content: &str, old_string: &str) -> Option<(usize, f64)> {
-    let content_lines: Vec<&str> = content.lines().collect();
-    let old_lines: Vec<&str> = old_string.lines().collect();
-
-    if old_lines.is_empty() || content_lines.is_empty() {
-        return None;
-    }
-
-    // For single-line old_string, compare against each line
-    if old_lines.len() == 1 {
-        let target = old_lines[0].trim();
-        if target.is_empty() {
-            return None;
-        }
-        let mut best_score = 0.0_f64;
-        let mut best_line = 0;
-        for (i, line) in content_lines.iter().enumerate() {
-            let score = line_similarity(target, line.trim());
-            if score > best_score {
-                best_score = score;
-                best_line = i + 1;
+    let mut normalized = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                return Err(ToolResult::error(
+                    "file_path must stay within the current workspace root; `..` is not allowed.",
+                ))
             }
-        }
-        if best_score > 0.4 {
-            return Some((best_line, best_score));
-        }
-        return None;
-    }
-
-    // For multi-line: slide a window of the same size and find best match
-    let window_size = old_lines.len();
-    if window_size > content_lines.len() {
-        return None;
-    }
-
-    let mut best_score = 0.0_f64;
-    let mut best_line = 0;
-    for start in 0..=(content_lines.len() - window_size) {
-        let mut total = 0.0;
-        for (j, old_line) in old_lines.iter().enumerate() {
-            total += line_similarity(old_line.trim(), content_lines[start + j].trim());
-        }
-        let avg = total / window_size as f64;
-        if avg > best_score {
-            best_score = avg;
-            best_line = start + 1;
-        }
-    }
-
-    if best_score > 0.4 {
-        Some((best_line, best_score))
-    } else {
-        None
-    }
-}
-
-/// Simple character-level similarity between two strings (Sørensen–Dice on bigrams).
-fn line_similarity(a: &str, b: &str) -> f64 {
-    if a == b {
-        return 1.0;
-    }
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
-    }
-    if a.len() < 2 || b.len() < 2 {
-        return if a == b { 1.0 } else { 0.0 };
-    }
-
-    let bigrams_a: Vec<(char, char)> = a.chars().zip(a.chars().skip(1)).collect();
-    let bigrams_b: Vec<(char, char)> = b.chars().zip(b.chars().skip(1)).collect();
-
-    let mut matches = 0;
-    let mut used = vec![false; bigrams_b.len()];
-    for ba in &bigrams_a {
-        for (j, bb) in bigrams_b.iter().enumerate() {
-            if !used[j] && ba == bb {
-                matches += 1;
-                used[j] = true;
-                break;
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(ToolResult::error(
+                    "file_path must be relative to the current workspace root.",
+                ))
             }
         }
     }
 
-    (2.0 * matches as f64) / (bigrams_a.len() + bigrams_b.len()) as f64
+    if normalized.as_os_str().is_empty() {
+        return Err(ToolResult::error(
+            "file_path must point to a file inside the current workspace root.",
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn restore_previous_snapshot(session_id: &str, previous: Option<LastSedSnapshot>) {
+    if let Some(snapshot) = previous {
+        LAST_SED_SNAPSHOT_REGISTRY.insert(session_id.to_string(), snapshot);
+    } else {
+        LAST_SED_SNAPSHOT_REGISTRY.remove(session_id);
+    }
+}
+
+#[cfg(test)]
+fn clear_last_snapshot(session_id: &str) {
+    LAST_SED_SNAPSHOT_REGISTRY.remove(session_id);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_history::FileHistory;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use uuid::Uuid;
 
-    #[test]
-    fn test_normalize_whitespace() {
-        assert_eq!(normalize_whitespace("  foo   bar  "), "foo bar");
-        assert_eq!(normalize_whitespace("a\n  b\n  c"), "a b c");
+    struct TestWorkspace {
+        dir: TempDir,
+        ctx: ToolContext,
     }
 
-    #[test]
-    fn test_line_similarity() {
-        assert!((line_similarity("hello world", "hello world") - 1.0).abs() < f64::EPSILON);
-        assert!(line_similarity("hello world", "hello worl") > 0.8);
-        assert!(line_similarity("abcdef", "xyz") < 0.3);
+    impl TestWorkspace {
+        fn new(session_id: String) -> Self {
+            let dir = TempDir::new().unwrap();
+            let ctx = ToolContext {
+                session_id,
+                working_dir: dir.path().to_path_buf(),
+                ..ToolContext::default()
+            };
+            Self { dir, ctx }
+        }
+
+        fn with_history(session_id: String) -> (Self, Arc<FileHistory>) {
+            let ws = Self::new(session_id);
+            ws.ctx.extensions.insert(FileHistory::new());
+            let history = ws.ctx.extensions.get::<FileHistory>().unwrap();
+            (ws, history)
+        }
+
+        fn write_file(&self, rel: &str, content: &[u8]) -> PathBuf {
+            let path = self.dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+            path
+        }
+
+        fn read_string(&self, rel: &str) -> String {
+            std::fs::read_to_string(self.dir.path().join(rel)).unwrap()
+        }
+
+        fn read_bytes(&self, rel: &str) -> Vec<u8> {
+            std::fs::read(self.dir.path().join(rel)).unwrap()
+        }
     }
 
-    #[test]
-    fn test_find_best_line_match_single() {
-        let content = "fn main() {\n    println!(\"hello\");\n}\n";
-        let old = "    println!(\"helo\");";
-        let result = find_best_line_match(content, old);
-        assert!(result.is_some());
-        let (line, score) = result.unwrap();
-        assert_eq!(line, 2);
-        assert!(score > 0.7);
+    fn unique_session(prefix: &str) -> String {
+        format!("{prefix}-{}", Uuid::new_v4())
     }
 
-    #[test]
-    fn test_find_best_line_match_multi() {
-        let content = "line 1\nfn foo() {\n    bar();\n}\nline 5\n";
-        let old = "fn foo() {\n    baz();\n}";
-        let result = find_best_line_match(content, old);
-        assert!(result.is_some());
-        let (line, _) = result.unwrap();
-        assert_eq!(line, 2);
+    #[tokio::test]
+    async fn sed_edit_returns_diff_and_revert_restores_previous_content() {
+        let session_id = unique_session("sed-test");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id.clone());
+
+        ws.write_file("sample.txt", b"hello world\n");
+
+        let tool = SedTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/world/rust/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "sed failed: {}", result.content);
+        assert!(result.content.contains("@@"));
+        assert!(result.content.contains("-hello world"));
+        assert!(result.content.contains("+hello rust"));
+        assert!(result.content.contains("use 'revert' command if wrong"));
+        assert_eq!(ws.read_string("sample.txt"), "hello rust\n");
+
+        let revert = RevertTool;
+        let reverted = revert.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(!reverted.is_error, "revert failed: {}", reverted.content);
+        assert!(reverted.content.contains("Reverted"));
+        assert_eq!(ws.read_string("sample.txt"), "hello world\n");
+
+        let second_revert = revert.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(second_revert.is_error);
+        assert!(second_revert.content.contains("No sed snapshot"));
     }
 
-    #[test]
-    fn test_diagnostic_whitespace_hint() {
-        let content = "    fn foo() {\n        bar();\n    }\n";
-        let old_string = "fn foo() {\n    bar();\n}";
-        let diag = build_not_found_diagnostic("test.rs", content, old_string);
-        assert!(diag.contains("whitespace"));
+    #[tokio::test]
+    async fn sed_reports_when_script_changes_nothing() {
+        let session_id = unique_session("sed-noop");
+        clear_last_snapshot(&session_id);
+        let (ws, history) = TestWorkspace::with_history(session_id.clone());
+
+        let file = ws.write_file("sample.txt", b"hello world\n");
+
+        let tool = SedTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/xyz/abc/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "sed failed: {}", result.content);
+        assert!(result.content.contains("produced no changes"));
+        assert_eq!(history.revision_count(&file), 0);
+
+        let revert = RevertTool;
+        let reverted = revert.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(reverted.is_error);
+        assert!(reverted.content.contains("No sed snapshot"));
     }
 
-    #[test]
-    fn test_diagnostic_no_match() {
-        let content = "fn main() {}\n";
-        let old_string = "completely unrelated text that does not exist";
-        let diag = build_not_found_diagnostic("test.rs", content, old_string);
-        assert!(diag.contains("not found"));
+    #[tokio::test]
+    async fn sed_rejects_invalid_script() {
+        let session_id = unique_session("sed-invalid");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        ws.write_file("sample.txt", b"hello world\n");
+
+        let tool = SedTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/[invalid/x/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Invalid sed script"));
     }
 
-    #[test]
-    fn test_case_insensitive_single_match() {
-        let content = "Hello World\nfoo bar\n";
-        let result = try_case_insensitive_replace(content, "hello world", "hi", false);
-        assert!(matches!(result, CaseInsensitiveResult::SingleMatch(ref s) if s == "hi\nfoo bar\n"));
+    #[tokio::test]
+    async fn sed_rejects_absolute_paths() {
+        let session_id = unique_session("sed-absolute");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        let path = ws.write_file("sample.txt", b"hello world\n");
+
+        let result = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.to_string_lossy().into_owned(),
+                    "script": "s/world/rust/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("absolute paths are not allowed"));
     }
 
-    #[test]
-    fn test_case_insensitive_no_match() {
-        let content = "Hello World\n";
-        let result = try_case_insensitive_replace(content, "goodbye", "hi", false);
-        assert!(matches!(result, CaseInsensitiveResult::NoMatch));
+    #[tokio::test]
+    async fn sed_rejects_parent_dir_traversal() {
+        let session_id = unique_session("sed-traversal");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        let outside_dir = TempDir::new().unwrap();
+        let outside = outside_dir.path().join("secret.txt");
+        std::fs::write(&outside, "secret\n").unwrap();
+
+        let result = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "../secret.txt",
+                    "script": "s/secret/public/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("`..` is not allowed"));
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "secret\n");
     }
 
-    #[test]
-    fn test_case_insensitive_ambiguous_without_replace_all() {
-        let content = "Hello hello HELLO\n";
-        let result = try_case_insensitive_replace(content, "hello", "hi", false);
-        assert!(matches!(result, CaseInsensitiveResult::MultipleMatches(3)));
+    #[tokio::test]
+    async fn revert_rejects_mismatched_file_path() {
+        let session_id = unique_session("sed-mismatch");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        ws.write_file("sample.txt", b"hello world\n");
+
+        SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/world/rust/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        let result = RevertTool
+            .execute(serde_json::json!({"file_path": "other.txt"}), &ws.ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("not other.txt"));
+        assert_eq!(ws.read_string("sample.txt"), "hello rust\n");
     }
 
-    #[test]
-    fn test_case_insensitive_replace_all() {
-        let content = "Hello hello HELLO\n";
-        let result = try_case_insensitive_replace(content, "hello", "hi", true);
-        assert!(matches!(result, CaseInsensitiveResult::SingleMatch(ref s) if s == "hi hi hi\n"));
+    #[tokio::test]
+    async fn revert_uses_only_the_latest_snapshot_in_a_session() {
+        let session_id = unique_session("sed-latest");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        ws.write_file("sample.txt", b"one two\n");
+
+        let first = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/one/ONE/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+        assert!(!first.is_error, "first sed failed: {}", first.content);
+        assert_eq!(ws.read_string("sample.txt"), "ONE two\n");
+
+        let second = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/two/TWO/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+        assert!(!second.is_error, "second sed failed: {}", second.content);
+        assert_eq!(ws.read_string("sample.txt"), "ONE TWO\n");
+
+        let reverted = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(!reverted.is_error, "revert failed: {}", reverted.content);
+        assert_eq!(ws.read_string("sample.txt"), "ONE two\n");
+
+        let second_revert = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(second_revert.is_error);
+        assert!(second_revert.content.contains("No sed snapshot"));
+    }
+
+    #[tokio::test]
+    async fn snapshots_are_isolated_per_session() {
+        let session_a = unique_session("sed-session-a");
+        let session_b = unique_session("sed-session-b");
+        clear_last_snapshot(&session_a);
+        clear_last_snapshot(&session_b);
+
+        let ws_a = TestWorkspace::new(session_a);
+        let ws_b = TestWorkspace::new(session_b);
+        ws_a.write_file("a.txt", b"alpha\n");
+        ws_b.write_file("b.txt", b"beta\n");
+
+        let result_a = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "a.txt",
+                    "script": "s/alpha/ALPHA/"
+                }),
+                &ws_a.ctx,
+            )
+            .await;
+        let result_b = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "b.txt",
+                    "script": "s/beta/BETA/"
+                }),
+                &ws_b.ctx,
+            )
+            .await;
+
+        assert!(
+            !result_a.is_error,
+            "session A sed failed: {}",
+            result_a.content
+        );
+        assert!(
+            !result_b.is_error,
+            "session B sed failed: {}",
+            result_b.content
+        );
+
+        let revert_a = RevertTool.execute(serde_json::json!({}), &ws_a.ctx).await;
+        assert!(
+            !revert_a.is_error,
+            "session A revert failed: {}",
+            revert_a.content
+        );
+        assert_eq!(ws_a.read_string("a.txt"), "alpha\n");
+        assert_eq!(ws_b.read_string("b.txt"), "BETA\n");
+
+        let revert_b = RevertTool.execute(serde_json::json!({}), &ws_b.ctx).await;
+        assert!(
+            !revert_b.is_error,
+            "session B revert failed: {}",
+            revert_b.content
+        );
+        assert_eq!(ws_b.read_string("b.txt"), "beta\n");
+    }
+
+    #[tokio::test]
+    async fn sed_and_revert_record_file_history_revisions() {
+        let session_id = unique_session("sed-history");
+        clear_last_snapshot(&session_id);
+        let (ws, history) = TestWorkspace::with_history(session_id);
+        let path_buf = ws
+            .write_file("sample.txt", b"hello world\n")
+            .canonicalize()
+            .unwrap();
+
+        let edit = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/world/rust/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+        assert!(!edit.is_error, "sed failed: {}", edit.content);
+
+        let revert = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(!revert.is_error, "revert failed: {}", revert.content);
+
+        let revisions = history.get_revisions(&path_buf).unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].operation, "edit");
+        assert_eq!(revisions[1].operation, "revert");
+        assert_eq!(
+            history.get_revision_content(&path_buf, 1).unwrap(),
+            "hello world\n"
+        );
+        assert_eq!(
+            history.get_revision_content(&path_buf, 2).unwrap(),
+            "hello rust\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn sed_reports_missing_file_read_failures() {
+        let session_id = unique_session("sed-missing");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id.clone());
+
+        let result = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "missing.txt",
+                    "script": "s/foo/bar/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Cannot access file"));
+
+        let revert = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(revert.is_error);
+        assert!(revert.content.contains("No sed snapshot"));
+    }
+
+    #[tokio::test]
+    async fn sed_write_failure_does_not_leave_a_revert_snapshot() {
+        let session_id = unique_session("sed-write-fail");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id.clone());
+        let path = ws.write_file("sample.txt", b"hello world\n");
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions.clone()).unwrap();
+
+        let result = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/world/rust/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Failed to write file"));
+        assert_eq!(ws.read_string("sample.txt"), "hello world\n");
+
+        let revert = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(revert.is_error);
+        assert!(revert.content.contains("No sed snapshot"));
+    }
+
+    #[tokio::test]
+    async fn failed_revert_keeps_the_snapshot_available() {
+        let session_id = unique_session("sed-revert-fail");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id.clone());
+        let path = ws.write_file("sample.txt", b"hello world\n");
+
+        let edit = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "s/world/rust/"
+                }),
+                &ws.ctx,
+            )
+            .await;
+        assert!(!edit.is_error, "sed failed: {}", edit.content);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello rust\n");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+
+        let failed_revert = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(failed_revert.is_error);
+        assert!(failed_revert.content.contains("Failed to write file"));
+
+        std::fs::remove_dir(&path).unwrap();
+
+        let recovered_revert = RevertTool.execute(serde_json::json!({}), &ws.ctx).await;
+        assert!(
+            !recovered_revert.is_error,
+            "recovered revert failed: {}",
+            recovered_revert.content
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn sed_supports_quiet_mode() {
+        let session_id = unique_session("sed-quiet");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        ws.write_file("sample.txt", b"a\nb\nc\n");
+
+        let result = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "sample.txt",
+                    "script": "2p",
+                    "quiet": true
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "sed failed: {}", result.content);
+        assert_eq!(ws.read_string("sample.txt"), "b\n");
+    }
+
+    #[tokio::test]
+    async fn sed_supports_null_delimited_data() {
+        let session_id = unique_session("sed-null");
+        clear_last_snapshot(&session_id);
+        let ws = TestWorkspace::new(session_id);
+        ws.write_file("null.bin", b"foo\0bar\0");
+
+        let result = SedTool
+            .execute(
+                serde_json::json!({
+                    "file_path": "null.bin",
+                    "script": "s/bar/baz/",
+                    "null_data": true
+                }),
+                &ws.ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "sed failed: {}", result.content);
+        assert_eq!(ws.read_bytes("null.bin"), b"foo\0baz\0");
     }
 }

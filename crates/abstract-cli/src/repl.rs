@@ -8,9 +8,9 @@ use crate::commands;
 use crate::config::AppConfig;
 use crate::input::InputReader;
 use crate::render::{self, StreamRenderer};
+use crate::signals::SignalHandle;
 use crate::status::StatusLine;
 use crate::theme::Theme;
-use crate::signals::SignalHandle;
 use cersei::events::AgentEvent;
 use cersei::Agent;
 use cersei_memory::manager::MemoryManager;
@@ -188,11 +188,15 @@ pub async fn run_repl(
                                 Err(e) => eprintln!("\x1b[31m  Save failed: {e}\x1b[0m"),
                             }
                         }
-                        Ok(commands::CommandAction::LoadSession { messages, session_id: loaded_id }) => {
+                        Ok(commands::CommandAction::LoadSession {
+                            messages,
+                            session_id: loaded_id,
+                        }) => {
                             agent.clear_messages();
                             agent.set_messages(messages);
                             is_first_turn = true;
-                            status = StatusLine::new(theme, &repl_config.model, &loaded_id, !json_mode);
+                            status =
+                                StatusLine::new(theme, &repl_config.model, &loaded_id, !json_mode);
                         }
                         Ok(commands::CommandAction::Compact) => {
                             let before = agent.messages().len();

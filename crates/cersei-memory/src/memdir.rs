@@ -89,7 +89,10 @@ pub fn auto_memory_path(project_root: &Path) -> PathBuf {
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let sanitized = sanitize_path_component(&project_root.display().to_string());
-    home.join(".claude").join("projects").join(sanitized).join("memory")
+    home.join(".claude")
+        .join("projects")
+        .join(sanitized)
+        .join("memory")
 }
 
 /// Create the memory directory if it doesn't exist.
@@ -114,7 +117,9 @@ fn parse_frontmatter_quick(content: &str) -> (Option<String>, Option<String>, Op
 
     let mut in_frontmatter = false;
     for (i, line) in content.lines().enumerate() {
-        if i > 30 { break; }
+        if i > 30 {
+            break;
+        }
         if i == 0 && line.trim() == "---" {
             in_frontmatter = true;
             continue;
@@ -122,7 +127,9 @@ fn parse_frontmatter_quick(content: &str) -> (Option<String>, Option<String>, Op
         if in_frontmatter && line.trim() == "---" {
             break;
         }
-        if !in_frontmatter { continue; }
+        if !in_frontmatter {
+            continue;
+        }
 
         if let Some(colon) = line.find(':') {
             let key = line[..colon].trim().to_lowercase();
@@ -229,14 +236,14 @@ pub fn load_memory_index(memory_dir: &Path) -> Option<MemoryIndex> {
     let truncated = total_lines > MAX_INDEX_LINES || content.len() > MAX_INDEX_BYTES;
 
     let output = if truncated {
-        let mut result: String = lines[..MAX_INDEX_LINES.min(total_lines)]
-            .join("\n");
+        let mut result: String = lines[..MAX_INDEX_LINES.min(total_lines)].join("\n");
         if result.len() > MAX_INDEX_BYTES {
             result.truncate(MAX_INDEX_BYTES);
         }
         result.push_str(&format!(
             "\n\n<!-- MEMORY.md truncated: {} total lines, showing {} -->",
-            total_lines, MAX_INDEX_LINES.min(total_lines)
+            total_lines,
+            MAX_INDEX_LINES.min(total_lines)
         ));
         result
     } else {
@@ -327,7 +334,6 @@ pub fn load_memory_file(path: &Path) -> Option<MemoryFile> {
     })
 }
 
-
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -344,9 +350,21 @@ mod tests {
         let mem_dir = tmp.path();
 
         create_memory_file(mem_dir, "user_role.md", "---\nname: User Role\ndescription: Developer preferences\ntype: user\n---\n\nI prefer Rust.");
-        create_memory_file(mem_dir, "project_arch.md", "---\nname: Architecture\ntype: project\n---\n\nMicroservices.");
-        create_memory_file(mem_dir, "feedback_style.md", "---\ntype: feedback\n---\n\nBe concise.");
-        create_memory_file(mem_dir, "MEMORY.md", "- [User Role](user_role.md)\n- [Architecture](project_arch.md)");
+        create_memory_file(
+            mem_dir,
+            "project_arch.md",
+            "---\nname: Architecture\ntype: project\n---\n\nMicroservices.",
+        );
+        create_memory_file(
+            mem_dir,
+            "feedback_style.md",
+            "---\ntype: feedback\n---\n\nBe concise.",
+        );
+        create_memory_file(
+            mem_dir,
+            "MEMORY.md",
+            "- [User Role](user_role.md)\n- [Architecture](project_arch.md)",
+        );
         create_memory_file(mem_dir, "no_frontmatter.md", "Just plain content.");
 
         let metas = scan_memory_dir(mem_dir);
@@ -360,14 +378,21 @@ mod tests {
         assert_eq!(user.memory_type, Some(MemoryType::User));
 
         // No frontmatter still scanned
-        let plain = metas.iter().find(|m| m.filename == "no_frontmatter.md").unwrap();
+        let plain = metas
+            .iter()
+            .find(|m| m.filename == "no_frontmatter.md")
+            .unwrap();
         assert!(plain.name.is_none());
     }
 
     #[test]
     fn test_load_memory_index() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("MEMORY.md"), "- [Test](test.md) — hook\n".repeat(10)).unwrap();
+        std::fs::write(
+            tmp.path().join("MEMORY.md"),
+            "- [Test](test.md) — hook\n".repeat(10),
+        )
+        .unwrap();
 
         let index = load_memory_index(tmp.path());
         assert!(index.is_some());
@@ -397,14 +422,20 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_component() {
-        assert_eq!(sanitize_path_component("/Users/foo/project"), "_Users_foo_project");
+        assert_eq!(
+            sanitize_path_component("/Users/foo/project"),
+            "_Users_foo_project"
+        );
         assert_eq!(sanitize_path_component("simple-name"), "simple-name");
         assert_eq!(sanitize_path_component("a/b:c"), "a_b_c");
     }
 
     #[test]
     fn test_memory_age() {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert_eq!(memory_age_days(now), 0);
         assert_eq!(memory_age_text(now), "today");
         assert_eq!(memory_age_text(now - 86400), "yesterday");
@@ -413,7 +444,10 @@ mod tests {
 
     #[test]
     fn test_freshness_warning() {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         assert!(memory_freshness_text(now).is_none()); // today = fresh
         assert!(memory_freshness_text(now - 86400 * 3).is_some()); // 3 days = stale
     }
@@ -428,7 +462,11 @@ mod tests {
     #[test]
     fn test_load_memory_file() {
         let tmp = tempfile::tempdir().unwrap();
-        create_memory_file(tmp.path(), "test.md", "---\nname: Test\ntype: user\n---\n\nContent here.");
+        create_memory_file(
+            tmp.path(),
+            "test.md",
+            "---\nname: Test\ntype: user\n---\n\nContent here.",
+        );
 
         let file = load_memory_file(&tmp.path().join("test.md"));
         assert!(file.is_some());
@@ -441,7 +479,11 @@ mod tests {
     #[test]
     fn test_build_memory_prompt() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("MEMORY.md"), "- [Role](role.md) — my role\n- [Project](proj.md) — the project").unwrap();
+        std::fs::write(
+            tmp.path().join("MEMORY.md"),
+            "- [Role](role.md) — my role\n- [Project](proj.md) — the project",
+        )
+        .unwrap();
 
         let content = build_memory_prompt_content(tmp.path());
         assert!(content.contains("Role"));

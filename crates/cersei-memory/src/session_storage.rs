@@ -236,7 +236,9 @@ mod tests {
         let path = tmp.path().join("session.jsonl");
 
         let uuid1 = write_user_entry(&path, "s1", Message::user("Hello"), "/tmp").unwrap();
-        let uuid2 = write_assistant_entry(&path, "s1", Message::assistant("Hi!"), "/tmp", Some(&uuid1)).unwrap();
+        let uuid2 =
+            write_assistant_entry(&path, "s1", Message::assistant("Hi!"), "/tmp", Some(&uuid1))
+                .unwrap();
         write_user_entry(&path, "s1", Message::user("How are you?"), "/tmp").unwrap();
 
         let entries = load_transcript(&path).unwrap();
@@ -287,7 +289,10 @@ mod tests {
         write_user_entry(&path, "s1", Message::user("Valid"), "/tmp").unwrap();
         // Append malformed line
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(f, "{{not valid json}}").unwrap();
         write_user_entry(&path, "s1", Message::user("Also valid"), "/tmp").unwrap();
 

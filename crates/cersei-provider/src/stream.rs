@@ -43,7 +43,13 @@ impl StreamAccumulator {
                 self.message_id = Some(id);
                 self.model = Some(model);
             }
-            StreamEvent::ContentBlockStart { index, block_type, id, name, thought_signature } => {
+            StreamEvent::ContentBlockStart {
+                index,
+                block_type,
+                id,
+                name,
+                thought_signature,
+            } => {
                 self.block_types.insert(index, block_type);
                 if let Some(id) = id {
                     self.tool_use_ids.insert(index, id);
@@ -56,12 +62,12 @@ impl StreamAccumulator {
                 }
             }
             StreamEvent::TextDelta { index, text } => {
-                self.partial_text
-                    .entry(index)
-                    .or_default()
-                    .push_str(&text);
+                self.partial_text.entry(index).or_default().push_str(&text);
             }
-            StreamEvent::InputJsonDelta { index, partial_json } => {
+            StreamEvent::InputJsonDelta {
+                index,
+                partial_json,
+            } => {
                 self.partial_json
                     .entry(index)
                     .or_default()
@@ -81,7 +87,8 @@ impl StreamAccumulator {
                     },
                     "tool_use" => {
                         let json_str = self.partial_json.remove(&index).unwrap_or_default();
-                        let input = serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}));
+                        let input =
+                            serde_json::from_str(&json_str).unwrap_or(serde_json::json!({}));
                         ContentBlock::ToolUse {
                             id: self.tool_use_ids.remove(&index).unwrap_or_default(),
                             name: self.tool_use_names.remove(&index).unwrap_or_default(),
@@ -99,7 +106,9 @@ impl StreamAccumulator {
                 };
                 // Ensure we have enough slots
                 while self.content_blocks.len() <= index {
-                    self.content_blocks.push(ContentBlock::Text { text: String::new() });
+                    self.content_blocks.push(ContentBlock::Text {
+                        text: String::new(),
+                    });
                 }
                 self.content_blocks[index] = block;
             }

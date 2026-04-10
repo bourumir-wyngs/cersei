@@ -1,7 +1,11 @@
 use super::CommandAction;
 use crate::config::AppConfig;
 
-pub fn run(args: &str, config: &AppConfig, messages: &[cersei_types::Message]) -> anyhow::Result<CommandAction> {
+pub fn run(
+    args: &str,
+    config: &AppConfig,
+    messages: &[cersei_types::Message],
+) -> anyhow::Result<CommandAction> {
     let name = args.trim();
     if name.is_empty() {
         anyhow::bail!("Usage: /save <name>");

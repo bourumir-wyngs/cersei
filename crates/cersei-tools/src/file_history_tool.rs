@@ -176,11 +176,18 @@ fn action_revisions(history: &FileHistory, path: &std::path::PathBuf) -> ToolRes
             }
             ToolResult::success(out)
         }
-        None => ToolResult::error(format!("File {} is not tracked in this session.", path.display())),
+        None => ToolResult::error(format!(
+            "File {} is not tracked in this session.",
+            path.display()
+        )),
     }
 }
 
-fn action_get_revision(history: &FileHistory, path: &std::path::PathBuf, revision: u32) -> ToolResult {
+fn action_get_revision(
+    history: &FileHistory,
+    path: &std::path::PathBuf,
+    revision: u32,
+) -> ToolResult {
     match history.get_revision_content(path, revision) {
         Some(content) => ToolResult::success(content),
         None => ToolResult::error(format!(
@@ -205,7 +212,9 @@ async fn action_diff(
                 Some(_) => ToolResult::success("No differences between the two revisions."),
                 None => ToolResult::error(format!(
                     "Could not diff rev {} and rev {} for {}. Check that both revisions exist.",
-                    from, to, path.display()
+                    from,
+                    to,
+                    path.display()
                 )),
             }
         }
@@ -214,10 +223,13 @@ async fn action_diff(
             match tokio::fs::read_to_string(path).await {
                 Ok(current) => match history.diff_revisions(path, from, &current, "current") {
                     Some(diff) if diff.contains("@@") => ToolResult::success(diff),
-                    Some(_) => ToolResult::success("No differences between the revision and current file."),
+                    Some(_) => {
+                        ToolResult::success("No differences between the revision and current file.")
+                    }
                     None => ToolResult::error(format!(
                         "Revision {} not found for {}.",
-                        from, path.display()
+                        from,
+                        path.display()
                     )),
                 },
                 Err(e) => ToolResult::error(format!("Failed to read current file: {}", e)),
@@ -227,10 +239,13 @@ async fn action_diff(
             // Diff from revision 1 to the specified revision
             match history.diff_two_revisions(path, 1, to) {
                 Some(diff) if diff.contains("@@") => ToolResult::success(diff),
-                Some(_) => ToolResult::success("No differences between rev 1 and the specified revision."),
+                Some(_) => {
+                    ToolResult::success("No differences between rev 1 and the specified revision.")
+                }
                 None => ToolResult::error(format!(
                     "Could not diff rev 1 and rev {} for {}. Check that both revisions exist.",
-                    to, path.display()
+                    to,
+                    path.display()
                 )),
             }
         }
@@ -244,15 +259,13 @@ async fn action_diff(
                 ));
             }
             match tokio::fs::read_to_string(path).await {
-                Ok(current) => {
-                    match history.diff_revisions(path, rev_count, &current, "current") {
-                        Some(diff) if diff.contains("@@") => ToolResult::success(diff),
-                        Some(_) => ToolResult::success(
-                            "No differences between the latest revision and current file.",
-                        ),
-                        None => ToolResult::error("Internal error: revision not found."),
-                    }
-                }
+                Ok(current) => match history.diff_revisions(path, rev_count, &current, "current") {
+                    Some(diff) if diff.contains("@@") => ToolResult::success(diff),
+                    Some(_) => ToolResult::success(
+                        "No differences between the latest revision and current file.",
+                    ),
+                    None => ToolResult::error("Internal error: revision not found."),
+                },
                 Err(e) => ToolResult::error(format!("Failed to read current file: {}", e)),
             }
         }
@@ -305,8 +318,8 @@ async fn action_revert(
 mod tests {
     use super::*;
     use crate::file_history::FileHistory;
-    use tempfile::NamedTempFile;
     use std::io::Write as IoWrite;
+    use tempfile::NamedTempFile;
 
     /// Create a ToolContext with FileHistory in Extensions.
     /// Returns the context. Use `ctx.extensions.get::<FileHistory>()` to access the history.
@@ -330,7 +343,9 @@ mod tests {
     async fn test_list_empty() {
         let ctx = make_ctx_with_history();
         let tool = FileHistoryTool;
-        let result = tool.execute(json_input("list", serde_json::json!({})), &ctx).await;
+        let result = tool
+            .execute(json_input("list", serde_json::json!({})), &ctx)
+            .await;
         assert!(!result.is_error);
         assert!(result.content.contains("No files tracked"));
     }
@@ -343,7 +358,9 @@ mod tests {
         history.snapshot_before_write(&PathBuf::from("/tmp/b.rs"), "content", "edit");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(json_input("list", serde_json::json!({})), &ctx).await;
+        let result = tool
+            .execute(json_input("list", serde_json::json!({})), &ctx)
+            .await;
         assert!(!result.is_error);
         assert!(result.content.contains("/tmp/a.rs"));
         assert!(result.content.contains("/tmp/b.rs"));
@@ -353,7 +370,9 @@ mod tests {
     async fn test_no_history_in_extensions() {
         let ctx = ToolContext::default();
         let tool = FileHistoryTool;
-        let result = tool.execute(json_input("list", serde_json::json!({})), &ctx).await;
+        let result = tool
+            .execute(json_input("list", serde_json::json!({})), &ctx)
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("not available"));
     }
@@ -362,10 +381,15 @@ mod tests {
     async fn test_revisions_untracked_file() {
         let ctx = make_ctx_with_history();
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("revisions", serde_json::json!({"file_path": "/no/such/file.rs"})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "revisions",
+                    serde_json::json!({"file_path": "/no/such/file.rs"}),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("not tracked"));
     }
@@ -379,10 +403,15 @@ mod tests {
         history.snapshot_before_write(&path, "v2", "edit");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("revisions", serde_json::json!({"file_path": "/tmp/test.rs"})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "revisions",
+                    serde_json::json!({"file_path": "/tmp/test.rs"}),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(!result.is_error);
         assert!(result.content.contains("rev 1"));
         assert!(result.content.contains("rev 2"));
@@ -396,10 +425,15 @@ mod tests {
         history.snapshot_before_write(&path, "hello world", "write");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("get_revision", serde_json::json!({"file_path": "/tmp/test.rs", "revision": 1})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "get_revision",
+                    serde_json::json!({"file_path": "/tmp/test.rs", "revision": 1}),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(!result.is_error);
         assert_eq!(result.content, "hello world");
     }
@@ -411,10 +445,15 @@ mod tests {
         history.snapshot_before_write(&PathBuf::from("/tmp/test.rs"), "v1", "write");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("get_revision", serde_json::json!({"file_path": "/tmp/test.rs", "revision": 99})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "get_revision",
+                    serde_json::json!({"file_path": "/tmp/test.rs", "revision": 99}),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("not found"));
     }
@@ -425,18 +464,25 @@ mod tests {
         let tool = FileHistoryTool;
 
         // Missing file_path
-        let result = tool.execute(
-            json_input("get_revision", serde_json::json!({"revision": 1})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input("get_revision", serde_json::json!({"revision": 1})),
+                &ctx,
+            )
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("file_path"));
 
         // Missing revision
-        let result = tool.execute(
-            json_input("get_revision", serde_json::json!({"file_path": "/tmp/x.rs"})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "get_revision",
+                    serde_json::json!({"file_path": "/tmp/x.rs"}),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("revision"));
     }
@@ -450,14 +496,19 @@ mod tests {
         history.snapshot_before_write(&path, "line1\nline2\n", "edit");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("diff", serde_json::json!({
-                "file_path": "/tmp/test.rs",
-                "from_revision": 1,
-                "to_revision": 2
-            })),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "diff",
+                    serde_json::json!({
+                        "file_path": "/tmp/test.rs",
+                        "from_revision": 1,
+                        "to_revision": 2
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(!result.is_error);
         assert!(result.content.contains("+line2"));
     }
@@ -474,13 +525,18 @@ mod tests {
         history.snapshot_before_write(&path, "old content\n", "write");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("diff", serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "from_revision": 1
-            })),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "diff",
+                    serde_json::json!({
+                        "file_path": path.to_str().unwrap(),
+                        "from_revision": 1
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(!result.is_error);
         assert!(result.content.contains("-old content"));
         assert!(result.content.contains("+current content"));
@@ -490,10 +546,12 @@ mod tests {
     async fn test_diff_no_revisions() {
         let ctx = make_ctx_with_history();
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("diff", serde_json::json!({"file_path": "/tmp/none.rs"})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input("diff", serde_json::json!({"file_path": "/tmp/none.rs"})),
+                &ctx,
+            )
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("No revisions"));
     }
@@ -510,13 +568,18 @@ mod tests {
         history.snapshot_before_write(&path, "original content", "write");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("revert", serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "revision": 1
-            })),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "revert",
+                    serde_json::json!({
+                        "file_path": path.to_str().unwrap(),
+                        "revision": 1
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(!result.is_error);
         assert!(result.content.contains("Reverted"));
 
@@ -537,13 +600,18 @@ mod tests {
         history.snapshot_before_write(&PathBuf::from("/tmp/x.rs"), "v1", "write");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("revert", serde_json::json!({
-                "file_path": "/tmp/x.rs",
-                "revision": 99
-            })),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "revert",
+                    serde_json::json!({
+                        "file_path": "/tmp/x.rs",
+                        "revision": 99
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("not found"));
     }
@@ -560,13 +628,18 @@ mod tests {
         history.snapshot_before_write(&path, "old", "write");
 
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("restore", serde_json::json!({
-                "file_path": path.to_str().unwrap(),
-                "revision": 1
-            })),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(
+                json_input(
+                    "restore",
+                    serde_json::json!({
+                        "file_path": path.to_str().unwrap(),
+                        "revision": 1
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
         assert!(!result.is_error);
 
         let restored = tokio::fs::read_to_string(&path).await.unwrap();
@@ -577,10 +650,9 @@ mod tests {
     async fn test_unknown_action() {
         let ctx = make_ctx_with_history();
         let tool = FileHistoryTool;
-        let result = tool.execute(
-            json_input("explode", serde_json::json!({})),
-            &ctx,
-        ).await;
+        let result = tool
+            .execute(json_input("explode", serde_json::json!({})), &ctx)
+            .await;
         assert!(result.is_error);
         assert!(result.content.contains("Unknown action"));
     }

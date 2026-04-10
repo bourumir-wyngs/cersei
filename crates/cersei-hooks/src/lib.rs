@@ -83,11 +83,7 @@ pub struct ShellHook {
 }
 
 impl ShellHook {
-    pub fn new(
-        command: impl Into<String>,
-        events: &[HookEvent],
-        blocking: bool,
-    ) -> Self {
+    pub fn new(command: impl Into<String>, events: &[HookEvent], blocking: bool) -> Self {
         let cmd = command.into();
         let name = format!("shell:{}", cmd.chars().take(40).collect::<String>());
         Self {
@@ -159,10 +155,7 @@ impl Hook for ShellHook {
 // ─── Hook runner ─────────────────────────────────────────────────────────────
 
 /// Execute all matching hooks for a given event, returning the first non-Continue action.
-pub async fn run_hooks(
-    hooks: &[std::sync::Arc<dyn Hook>],
-    ctx: &HookContext,
-) -> HookAction {
+pub async fn run_hooks(hooks: &[std::sync::Arc<dyn Hook>], ctx: &HookContext) -> HookAction {
     for hook in hooks {
         if hook.events().contains(&ctx.event) {
             let action = hook.on_event(ctx).await;

@@ -9,17 +9,17 @@ pub mod coordinator;
 pub mod effort;
 pub mod events;
 pub mod reporters;
+mod runner;
 pub mod session_memory;
 pub mod system_prompt;
-mod runner;
 
 // Re-export runner utilities
 pub use runner::apply_tool_result_budget;
 pub use runner::strip_thinking_blocks;
 
 use cersei_hooks::Hook;
-use cersei_memory::Memory;
 use cersei_mcp::McpServerConfig;
+use cersei_memory::Memory;
 use cersei_provider::Provider;
 use cersei_tools::network_policy::NetworkPolicy;
 use cersei_tools::permissions::{AllowAll, PermissionPolicy};
@@ -119,7 +119,8 @@ impl Agent {
         };
 
         tokio::spawn(async move {
-            let result = runner::run_agent_streaming(agent_ptr, &prompt, event_tx.clone(), control_rx).await;
+            let result =
+                runner::run_agent_streaming(agent_ptr, &prompt, event_tx.clone(), control_rx).await;
             match result {
                 Ok(output) => {
                     let _ = event_tx.send(AgentEvent::Complete(output)).await;
@@ -428,10 +429,7 @@ impl AgentBuilder {
         self
     }
 
-    pub fn event_filter(
-        mut self,
-        f: impl Fn(&AgentEvent) -> bool + Send + Sync + 'static,
-    ) -> Self {
+    pub fn event_filter(mut self, f: impl Fn(&AgentEvent) -> bool + Send + Sync + 'static) -> Self {
         self.event_filter = Some(Box::new(f));
         self
     }
@@ -492,9 +490,7 @@ impl AgentBuilder {
             temperature: self.temperature,
             thinking_budget: self.thinking_budget,
             working_dir,
-            permission_policy: self
-                .permission_policy
-                .unwrap_or_else(|| Arc::new(AllowAll)),
+            permission_policy: self.permission_policy.unwrap_or_else(|| Arc::new(AllowAll)),
             network_policy: self.network_policy,
             memory: self.memory,
             session_id: self.session_id,
@@ -508,7 +504,9 @@ impl AgentBuilder {
             auto_compact: self.auto_compact,
             compact_threshold: self.compact_threshold,
             tool_result_budget: self.tool_result_budget,
-            messages: Arc::new(parking_lot::Mutex::new(self.initial_messages.unwrap_or_default())),
+            messages: Arc::new(parking_lot::Mutex::new(
+                self.initial_messages.unwrap_or_default(),
+            )),
             cumulative_usage: Arc::new(parking_lot::Mutex::new(Usage::default())),
             cancel_token: self
                 .cancel_token

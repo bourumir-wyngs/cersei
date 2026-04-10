@@ -85,7 +85,8 @@ impl Provider for OpenAi {
 
         // Build a map of tool_use_id → tool name for tool result messages.
         // Gemini requires the function name on tool result (function_response) entries.
-        let mut tool_id_to_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut tool_id_to_name: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for msg in &request.messages {
             if let MessageContent::Blocks(blocks) = &msg.content {
                 for block in blocks {
@@ -156,7 +157,13 @@ impl Provider for OpenAi {
                             let tool_calls: Vec<serde_json::Value> = tool_uses
                                 .iter()
                                 .map(|b| {
-                                    if let ContentBlock::ToolUse { id, name, input, thought_signature } = b {
+                                    if let ContentBlock::ToolUse {
+                                        id,
+                                        name,
+                                        input,
+                                        thought_signature,
+                                    } = b
+                                    {
                                         let mut tc = serde_json::json!({
                                             "id": id,
                                             "type": "function",
@@ -299,8 +306,10 @@ impl Provider for OpenAi {
                     // OpenAI sends: tool_calls[i].id, tool_calls[i].function.name (first chunk)
                     //               tool_calls[i].function.arguments (subsequent chunks, accumulated)
                     // index -> (id, name, args_json, thought_signature)
-                    let mut tool_calls: std::collections::HashMap<usize, (String, String, String, Option<String>)> =
-                        std::collections::HashMap::new();
+                    let mut tool_calls: std::collections::HashMap<
+                        usize,
+                        (String, String, String, Option<String>),
+                    > = std::collections::HashMap::new();
                     let mut has_tool_calls = false;
 
                     while let Some(chunk) = stream.next().await {
@@ -398,14 +407,19 @@ impl Provider for OpenAi {
 
                                             // thought_signature may arrive at the delta level
                                             // (applies to all tool calls in this chunk).
-                                            let delta_sig = delta["thought_signature"].as_str()
+                                            let delta_sig = delta["thought_signature"]
+                                                .as_str()
                                                 .map(|s| s.to_string());
 
                                             // Tool calls (accumulated across chunks)
                                             if let Some(tc_array) = delta["tool_calls"].as_array() {
                                                 has_tool_calls = true;
                                                 if std::env::var("CERSEI_DEBUG_REQUEST").is_ok() {
-                                                    eprintln!("\x1b[90m[stream] delta: {}\x1b[0m", serde_json::to_string(delta).unwrap_or_default());
+                                                    eprintln!(
+                                                        "\x1b[90m[stream] delta: {}\x1b[0m",
+                                                        serde_json::to_string(delta)
+                                                            .unwrap_or_default()
+                                                    );
                                                 }
                                                 for tc in tc_array {
                                                     let idx =
@@ -437,9 +451,17 @@ impl Provider for OpenAi {
                                                         entry.2.push_str(args);
                                                     }
                                                     // Gemini thought_signature — check all known locations.
-                                                    let sig = tc["thought_signature"].as_str()
-                                                        .or_else(|| tc["extra_content"]["google"]["thought_signature"].as_str())
-                                                        .or_else(|| tc["function"]["thought_signature"].as_str())
+                                                    let sig = tc["thought_signature"]
+                                                        .as_str()
+                                                        .or_else(|| {
+                                                            tc["extra_content"]["google"]
+                                                                ["thought_signature"]
+                                                                .as_str()
+                                                        })
+                                                        .or_else(|| {
+                                                            tc["function"]["thought_signature"]
+                                                                .as_str()
+                                                        })
                                                         .map(|s| s.to_string())
                                                         .or_else(|| delta_sig.clone());
                                                     if let Some(sig) = sig {
@@ -654,7 +676,8 @@ impl OpenAi {
                                                                 .as_str()
                                                                 .unwrap_or_default()
                                                                 .to_string();
-                                                            let thought_signature = item["thought_signature"]
+                                                            let thought_signature = item
+                                                                ["thought_signature"]
                                                                 .as_str()
                                                                 .map(|s| s.to_string());
                                                             let _ = tx.send(StreamEvent::ContentBlockStart {

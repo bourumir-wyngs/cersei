@@ -5,9 +5,8 @@ use std::path::PathBuf;
 
 /// Get the sessions directory for the current project.
 fn sessions_dir(config: &AppConfig) -> PathBuf {
-    let sanitized = cersei_memory::memdir::sanitize_path_component(
-        &config.working_dir.display().to_string(),
-    );
+    let sanitized =
+        cersei_memory::memdir::sanitize_path_component(&config.working_dir.display().to_string());
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".claude").join("projects").join(sanitized)
 }
@@ -46,10 +45,7 @@ pub fn list(config: &AppConfig) -> anyhow::Result<()> {
     entries.sort_by(|a, b| {
         b.1.modified()
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-            .cmp(
-                &a.1.modified()
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            )
+            .cmp(&a.1.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH))
     });
 
     println!("{:<40} {:>10} {:>12}", "SESSION ID", "SIZE", "MODIFIED");
@@ -165,9 +161,7 @@ pub fn last_session_id(config: &AppConfig) -> Option<String> {
             let path = entry.path();
             if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
                 if let Ok(meta) = entry.metadata() {
-                    let modified = meta
-                        .modified()
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                     let name = path
                         .file_stem()
                         .unwrap_or_default()
@@ -200,7 +194,11 @@ pub fn show_memory(config: &AppConfig) -> anyhow::Result<()> {
 }
 
 /// Save messages under a named session file.
-pub fn save_named(config: &AppConfig, name: &str, messages: &[cersei_types::Message]) -> anyhow::Result<()> {
+pub fn save_named(
+    config: &AppConfig,
+    name: &str,
+    messages: &[cersei_types::Message],
+) -> anyhow::Result<()> {
     use cersei_memory::session_storage;
 
     // Reject names that would escape the sessions dir or cause fs issues

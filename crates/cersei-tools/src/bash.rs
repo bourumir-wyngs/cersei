@@ -9,14 +9,20 @@ pub struct BashTool;
 
 #[async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &str { "Bash" }
+    fn name(&self) -> &str {
+        "Bash"
+    }
 
     fn description(&self) -> &str {
         "Execute a bash command and return its output. The working directory persists between commands."
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Execute }
-    fn category(&self) -> ToolCategory { ToolCategory::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Execute
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
+    }
 
     fn input_schema(&self) -> Value {
         serde_json::json!({
@@ -80,11 +86,8 @@ impl Tool for BashTool {
             cmd.env(k, v);
         }
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            cmd.output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
@@ -123,18 +126,11 @@ impl Tool for BashTool {
                     }
                 } else {
                     let code = output.status.code().unwrap_or(-1);
-                    ToolResult::error(format!(
-                        "Exit code {}\n{}",
-                        code,
-                        content
-                    ))
+                    ToolResult::error(format!("Exit code {}\n{}", code, content))
                 }
             }
             Ok(Err(e)) => ToolResult::error(format!("Failed to execute: {}", e)),
-            Err(_) => ToolResult::error(format!(
-                "Command timed out after {}ms",
-                timeout_ms
-            )),
+            Err(_) => ToolResult::error(format!("Command timed out after {}ms", timeout_ms)),
         }
     }
 }

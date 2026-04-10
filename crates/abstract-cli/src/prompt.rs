@@ -7,10 +7,7 @@ use cersei_agent::system_prompt::{
 use cersei_memory::manager::MemoryManager;
 
 /// Build the complete system prompt for the CLI agent.
-pub fn build_cli_system_prompt(
-    config: &AppConfig,
-    memory_manager: &MemoryManager,
-) -> String {
+pub fn build_cli_system_prompt(config: &AppConfig, memory_manager: &MemoryManager) -> String {
     let memory_content = memory_manager.build_context();
 
     let mut extra_dynamic = Vec::new();

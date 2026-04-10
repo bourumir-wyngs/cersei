@@ -205,7 +205,8 @@ pub async fn run_agent_streaming(
 
         // Build completion request
         let messages = agent.messages.lock().clone();
-        let tool_defs: Vec<ToolDefinition> = agent.tools.iter().map(|t| t.to_definition()).collect();
+        let tool_defs: Vec<ToolDefinition> =
+            agent.tools.iter().map(|t| t.to_definition()).collect();
 
         let model = agent
             .model
@@ -230,28 +231,54 @@ pub async fn run_agent_streaming(
 
         // Debug: print request when CERSEI_DEBUG_REQUEST is set
         if std::env::var("CERSEI_DEBUG_REQUEST").is_ok() {
-            eprintln!("\n\x1b[90m─── REQUEST (turn {}) ───────────────────────────────\x1b[0m", turn);
+            eprintln!(
+                "\n\x1b[90m─── REQUEST (turn {}) ───────────────────────────────\x1b[0m",
+                turn
+            );
             eprintln!("\x1b[90mModel: {}\x1b[0m", request.model);
             let sys_chars = request.system.as_deref().map(|s| s.len()).unwrap_or(0);
-            eprintln!("\x1b[90mSystem prompt: {} chars (~{} tokens)\x1b[0m", sys_chars, sys_chars / 4);
+            eprintln!(
+                "\x1b[90mSystem prompt: {} chars (~{} tokens)\x1b[0m",
+                sys_chars,
+                sys_chars / 4
+            );
             let tools_json = serde_json::to_string(&request.tools).unwrap_or_default();
-            eprintln!("\x1b[90mTools: {} ({} chars, ~{} tokens)\x1b[0m",
-                request.tools.len(), tools_json.len(), tools_json.len() / 4);
+            eprintln!(
+                "\x1b[90mTools: {} ({} chars, ~{} tokens)\x1b[0m",
+                request.tools.len(),
+                tools_json.len(),
+                tools_json.len() / 4
+            );
             eprintln!("\x1b[90mMessages: {}\x1b[0m", request.messages.len());
             let mut msg_total_chars = 0usize;
             for (i, msg) in request.messages.iter().enumerate() {
                 let full = serde_json::to_string(&msg.content).unwrap_or_default();
                 msg_total_chars += full.len();
                 let preview_src = msg.get_all_text();
-                let preview_src = if preview_src.trim().is_empty() { &full } else { &preview_src };
+                let preview_src = if preview_src.trim().is_empty() {
+                    &full
+                } else {
+                    &preview_src
+                };
                 let preview: String = preview_src.chars().take(100).collect();
                 let ellipsis = if preview_src.len() > 100 { "…" } else { "" };
-                eprintln!("\x1b[90m  [{}] {:?} ({} chars): {}{}\x1b[0m",
-                    i, msg.role, full.len(), preview, ellipsis);
+                eprintln!(
+                    "\x1b[90m  [{}] {:?} ({} chars): {}{}\x1b[0m",
+                    i,
+                    msg.role,
+                    full.len(),
+                    preview,
+                    ellipsis
+                );
             }
             let total_chars = sys_chars + tools_json.len() + msg_total_chars;
-            eprintln!("\x1b[90mTotal: ~{} tokens (sys={} tools={} msgs={})\x1b[0m",
-                total_chars / 4, sys_chars / 4, tools_json.len() / 4, msg_total_chars / 4);
+            eprintln!(
+                "\x1b[90mTotal: ~{} tokens (sys={} tools={} msgs={})\x1b[0m",
+                total_chars / 4,
+                sys_chars / 4,
+                tools_json.len() / 4,
+                msg_total_chars / 4
+            );
             eprintln!("\x1b[90m─────────────────────────────────────────────────────\x1b[0m\n");
         }
 
@@ -348,7 +375,10 @@ pub async fn run_agent_streaming(
         };
         let hook_action = cersei_hooks::run_hooks(&agent.hooks, &hook_ctx).await;
         if let HookAction::Block(reason) = hook_action {
-            return Err(CerseiError::Provider(format!("Blocked by hook: {}", reason)));
+            return Err(CerseiError::Provider(format!(
+                "Blocked by hook: {}",
+                reason
+            )));
         }
 
         let _ = event_tx
@@ -374,7 +404,10 @@ pub async fn run_agent_streaming(
                     .content_blocks()
                     .into_iter()
                     .filter_map(|b| {
-                        if let ContentBlock::ToolUse { id, name, input, .. } = b {
+                        if let ContentBlock::ToolUse {
+                            id, name, input, ..
+                        } = b
+                        {
                             Some((id, name, input))
                         } else {
                             None

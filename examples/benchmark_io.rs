@@ -131,8 +131,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Create a test file for read/edit benchmarks
     let test_file = tmp.path().join("test_file.txt");
-    let test_content = "Hello, world!\nThis is a test file.\nLine three.\nLine four.\nLine five.\n"
-        .repeat(100);
+    let test_content =
+        "Hello, world!\nThis is a test file.\nLine three.\nLine four.\nLine five.\n".repeat(100);
     std::fs::write(&test_file, &test_content)?;
 
     // Create some .rs files for glob/grep
@@ -154,15 +154,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Get tools
     let tools = cersei::tools::all();
-    let find_tool = |name: &str| -> &dyn Tool {
-        tools.iter().find(|t| t.name() == name).unwrap().as_ref()
-    };
+    let find_tool =
+        |name: &str| -> &dyn Tool { tools.iter().find(|t| t.name() == name).unwrap().as_ref() };
 
     println!("╔══════════════════════════════════════════════════════════════╗");
     println!("║           Cersei SDK — Tool I/O Benchmark                   ║");
     println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║  {} iterations per test, --release recommended              ║", ITERATIONS);
-    println!("║  Working dir: {}║", format!("{:<42}", tmp.path().display()));
+    println!(
+        "║  {} iterations per test, --release recommended              ║",
+        ITERATIONS
+    );
+    println!(
+        "║  Working dir: {}║",
+        format!("{:<42}", tmp.path().display())
+    );
     println!("╚══════════════════════════════════════════════════════════════╝\n");
 
     let mut results: Vec<BenchResult> = Vec::new();
@@ -174,7 +179,8 @@ async fn main() -> anyhow::Result<()> {
         serde_json::json!({ "file_path": test_file.display().to_string() }),
         &ctx,
         ITERATIONS,
-    ).await;
+    )
+    .await;
     r.print();
     results.push(r);
 
@@ -189,7 +195,8 @@ async fn main() -> anyhow::Result<()> {
         }),
         &ctx,
         ITERATIONS,
-    ).await;
+    )
+    .await;
     r.print();
     results.push(r);
 
@@ -215,7 +222,13 @@ async fn main() -> anyhow::Result<()> {
             min = min.min(elapsed);
             max = max.max(elapsed);
         }
-        let r = BenchResult { name: "Edit".into(), total, min, max, iters: ITERATIONS };
+        let r = BenchResult {
+            name: "Edit".into(),
+            total,
+            min,
+            max,
+            iters: ITERATIONS,
+        };
         r.print();
         results.push(r);
     }
@@ -230,7 +243,8 @@ async fn main() -> anyhow::Result<()> {
         }),
         &ctx,
         ITERATIONS,
-    ).await;
+    )
+    .await;
     r.print();
     results.push(r);
 
@@ -244,7 +258,8 @@ async fn main() -> anyhow::Result<()> {
         }),
         &ctx,
         ITERATIONS,
-    ).await;
+    )
+    .await;
     r.print();
     results.push(r);
 
@@ -255,23 +270,40 @@ async fn main() -> anyhow::Result<()> {
         serde_json::json!({ "command": "echo hello && ls -la" }),
         &ctx,
         ITERATIONS,
-    ).await;
+    )
+    .await;
     r.print();
     results.push(r);
 
     // ── Summary ──────────────────────────────────────────────────────────
     println!("\n─── Cersei Summary ───");
     let total_avg: f64 = results.iter().map(|r| r.avg().as_secs_f64() * 1000.0).sum();
-    println!("  Combined avg: {:.2}ms across {} tools", total_avg, results.len());
+    println!(
+        "  Combined avg: {:.2}ms across {} tools",
+        total_avg,
+        results.len()
+    );
     println!(
         "  Fastest: {} ({:.2}ms avg)",
         results.iter().min_by_key(|r| r.avg()).unwrap().name,
-        results.iter().min_by_key(|r| r.avg()).unwrap().avg().as_secs_f64() * 1000.0,
+        results
+            .iter()
+            .min_by_key(|r| r.avg())
+            .unwrap()
+            .avg()
+            .as_secs_f64()
+            * 1000.0,
     );
     println!(
         "  Slowest: {} ({:.2}ms avg)",
         results.iter().max_by_key(|r| r.avg()).unwrap().name,
-        results.iter().max_by_key(|r| r.avg()).unwrap().avg().as_secs_f64() * 1000.0,
+        results
+            .iter()
+            .max_by_key(|r| r.avg())
+            .unwrap()
+            .avg()
+            .as_secs_f64()
+            * 1000.0,
     );
 
     // ── Claude CLI comparison ────────────────────────────────────────────
@@ -304,7 +336,9 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let r = BenchResult {
                     name: "claude --help".into(),
-                    total, min, max,
+                    total,
+                    min,
+                    max,
                     iters: cli_iters,
                 };
                 r.print();
@@ -313,14 +347,8 @@ async fn main() -> anyhow::Result<()> {
                 let cersei_avg = results[0].avg(); // File Read
                 let cli_avg = r.avg();
                 println!("\n  \x1b[36mCersei Read vs Claude startup:\x1b[0m");
-                println!(
-                    "    Cersei:  {:.3}ms",
-                    cersei_avg.as_secs_f64() * 1000.0
-                );
-                println!(
-                    "    Claude:  {:.3}ms",
-                    cli_avg.as_secs_f64() * 1000.0
-                );
+                println!("    Cersei:  {:.3}ms", cersei_avg.as_secs_f64() * 1000.0);
+                println!("    Claude:  {:.3}ms", cli_avg.as_secs_f64() * 1000.0);
                 if cli_avg > cersei_avg && cersei_avg.as_nanos() > 0 {
                     println!(
                         "    \x1b[32mCersei is {:.0}× faster for tool dispatch\x1b[0m",

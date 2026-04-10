@@ -90,10 +90,13 @@ pub fn estimate_tokens(text: &str) -> u64 {
 /// Uses JSON serialization to capture all block types (ToolResult, ToolUse, etc.),
 /// not just plain text content.
 pub fn estimate_messages_tokens(messages: &[Message]) -> u64 {
-    messages.iter().map(|m| {
-        let json = serde_json::to_string(m).unwrap_or_default();
-        estimate_tokens(&json)
-    }).sum()
+    messages
+        .iter()
+        .map(|m| {
+            let json = serde_json::to_string(m).unwrap_or_default();
+            estimate_tokens(&json)
+        })
+        .sum()
 }
 
 /// Get context window size for a model.
@@ -245,7 +248,12 @@ pub fn collapse_read_tool_results(messages: Vec<Message>) -> Vec<Message> {
         let dominated = match &msg.content {
             MessageContent::Blocks(blocks) => {
                 blocks.iter().all(|b| {
-                    if let ContentBlock::ToolResult { tool_use_id, content, .. } = b {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } = b
+                    {
                         // Check if this is a file read result we've already seen
                         if let ToolResultContent::Text(text) = content {
                             if text.contains('\t') {

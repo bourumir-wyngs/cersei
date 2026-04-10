@@ -10,15 +10,21 @@ pub struct CargoTool;
 
 #[async_trait]
 impl Tool for CargoTool {
-    fn name(&self) -> &str { "Cargo" }
+    fn name(&self) -> &str {
+        "Cargo"
+    }
 
     fn description(&self) -> &str {
         "Run a cargo command (e.g. build, test, run, check, clippy, fmt, publish). \
         The working directory persists between commands."
     }
 
-    fn permission_level(&self) -> PermissionLevel { PermissionLevel::Execute }
-    fn category(&self) -> ToolCategory { ToolCategory::Shell }
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Execute
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Shell
+    }
 
     fn input_schema(&self) -> Value {
         serde_json::json!({
@@ -74,7 +80,9 @@ impl Tool for CargoTool {
             };
             let canonical_candidate = match candidate.canonicalize() {
                 Ok(p) => p,
-                Err(e) => return ToolResult::error(format!("Cannot resolve directory '{}': {}", dir, e)),
+                Err(e) => {
+                    return ToolResult::error(format!("Cannot resolve directory '{}': {}", dir, e))
+                }
             };
             if !canonical_candidate.starts_with(&canonical_root) {
                 return ToolResult::error(format!(
@@ -103,11 +111,8 @@ impl Tool for CargoTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            cmd.output(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), cmd.output()).await;
 
         match result {
             Ok(Ok(output)) => {
