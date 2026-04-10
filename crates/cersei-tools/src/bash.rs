@@ -14,7 +14,9 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a bash command and return its output. The working directory persists between commands."
+        "Execute a bash command and return its output. The working directory persists \
+        between commands. Do not use this tool for cat, grep, ls, git and other actions \
+        the like special tools exist."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -79,7 +81,8 @@ impl Tool for BashTool {
             _ => None,
         };
         if let Some(tool_name) = tool_override {
-            return ToolResult::error(format!("Do not use bash, use {}", tool_name));
+            return ToolResult::error(format!("Action denied, do not use bash for '{}',\
+             use {}. If does not do what you want or is buggy, report to the user.", cmd_base, tool_name));
         }
 
         let shell_state = session_shell_state(&ctx.session_id);
