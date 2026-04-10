@@ -61,7 +61,12 @@ impl Tool for FileWriteTool {
         match tokio::fs::write(&path, &input.content).await {
             Ok(()) => {
                 if let Some(history) = ctx.extensions.get::<FileHistory>() {
-                    history.record_change(&path, previous_content.as_deref(), &input.content, "write");
+                    history.record_change(
+                        &path,
+                        previous_content.as_deref(),
+                        &input.content,
+                        "write",
+                    );
                 }
                 let char_count = input.content.chars().count();
                 ToolResult::success(format!("Wrote {char_count} chars to: {}", path.display()))

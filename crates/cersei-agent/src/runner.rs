@@ -20,7 +20,12 @@ fn assistant_message_has_progress_summary(message: &Message) -> bool {
     }
 
     let lower = text.to_lowercase();
-    if lower.contains("summary:") || lower.contains("progress:") || lower.contains("results:") || lower.contains("next steps:") || lower.contains("next:") {
+    if lower.contains("summary:")
+        || lower.contains("progress:")
+        || lower.contains("results:")
+        || lower.contains("next steps:")
+        || lower.contains("next:")
+    {
         return true;
     }
 
@@ -36,7 +41,13 @@ fn assistant_message_has_progress_summary(message: &Message) -> bool {
     }
 
     let keywords = [
-        "completed", "done", "implemented", "verified", "next step", "remaining", "progress",
+        "completed",
+        "done",
+        "implemented",
+        "verified",
+        "next step",
+        "remaining",
+        "progress",
     ];
     let mut matches = 0;
     for kw in &keywords {
@@ -434,7 +445,9 @@ pub async fn run_agent_streaming(
         // Handle stop reason
         match &response.stop_reason {
             StopReason::EndTurn => {
-                if !auto_summary_requested && !assistant_message_has_progress_summary(&response.message) {
+                if !auto_summary_requested
+                    && !assistant_message_has_progress_summary(&response.message)
+                {
                     agent
                         .messages
                         .lock()
@@ -857,7 +870,10 @@ mod tests {
             }
         }
 
-        async fn complete(&self, request: CompletionRequest) -> cersei_types::Result<CompletionStream> {
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> cersei_types::Result<CompletionStream> {
             let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let response_text = self.responses.get(call).copied().unwrap_or("done");
             let (tx, rx) = tokio::sync::mpsc::channel(16);
@@ -913,7 +929,10 @@ mod tests {
     async fn end_turn_without_summary_triggers_follow_up_prompt() {
         let agent = Agent::builder()
             .provider(SummaryProvider {
-                responses: vec!["done", "Summary: implemented validator\nNext steps: add more tests"],
+                responses: vec![
+                    "done",
+                    "Summary: implemented validator\nNext steps: add more tests",
+                ],
                 calls: std::sync::atomic::AtomicUsize::new(0),
             })
             .working_dir(std::env::temp_dir())

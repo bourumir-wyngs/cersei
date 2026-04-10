@@ -399,13 +399,14 @@ pub fn data() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// File system tools: Read, Write, Edit, Sed, Revert, Glob, Grep, NotebookEdit.
+/// File system tools: Read, Write, Edit, Sed, Ed, Revert, Glob, Grep, NotebookEdit.
 pub fn filesystem() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(file_read::FileReadTool),
         Box::new(file_write::FileWriteTool),
         Box::new(file_edit::EditTool),
         Box::new(file_edit::SedTool),
+        Box::new(file_edit::EdTool),
         Box::new(file_edit::RevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(grep_tool::GrepTool),

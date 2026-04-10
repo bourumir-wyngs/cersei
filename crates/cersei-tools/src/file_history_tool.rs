@@ -953,7 +953,9 @@ mod tests {
         assert!(revisions.content.contains("rev 3"));
         assert!(revisions.content.contains("change: 1, stage: base"));
         assert!(revisions.content.contains("change: 1, stage: result"));
-        assert!(revisions.content.contains("change: 2, stage: result, current"));
+        assert!(revisions
+            .content
+            .contains("change: 2, stage: result, current"));
         assert!(!revisions.content.contains("only reads so far"));
 
         let diff = tool
