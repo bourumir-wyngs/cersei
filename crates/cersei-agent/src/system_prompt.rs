@@ -292,7 +292,7 @@ const CORE_CAPABILITIES: &str = r#"
 ## Capabilities
 
 You have access to powerful tools for software engineering tasks:
-- **Read/Write files**: Read any file, write new files, edit existing files with `sed`, inspect diffs, and undo the last `sed` edit with `revert`
+- **Read/Write files**: Read any file, write new files, make exact position-based edits with `Edit`, use `sed` for regex-driven transforms, inspect diffs, and undo the last `Edit` or `sed` change with `revert`
 - **Filesystem navigation**: Use `ListDirectory`, `Glob`, and `Grep` to inspect directories and search files
 - **Package managers**: Use `Cargo`, `Npm`, and `Npx` for package-manager workflows instead of shelling out through bash
 - **Git**: Use the `Git` tool for all git operations (log, show, diff, status, etc.) instead of bash

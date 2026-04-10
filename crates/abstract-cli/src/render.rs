@@ -326,15 +326,15 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "Edit" | "file_edit" | "sed" => input
+        "Edit" | "file_edit" | "Sed" | "sed" => input
             .get("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "revert" => input
+        "Revert" | "revert" => input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .unwrap_or("last sed edit")
+            .unwrap_or("last edit")
             .to_string(),
         "Glob" | "glob" => input
             .get("pattern")
