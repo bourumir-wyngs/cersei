@@ -13,6 +13,7 @@ use crate::Cli;
 use cersei_agent::effort::EffortLevel;
 use cersei_mcp::McpServerConfig;
 use cersei_memory::manager::MemoryManager;
+use cersei_tools::file_history::FileHistory;
 use cersei_tools::network_policy::sandbox_warning;
 use cersei_tools::permissions::AllowAll;
 use cersei_tools::Extensions;
@@ -127,6 +128,9 @@ pub fn build_agent(
             cfg
         })
         .collect();
+
+    // Seed Extensions with FileHistory so FileHistoryTool works out of the box.
+    tool_extensions.insert(FileHistory::new());
 
     let mut builder = cersei::Agent::builder()
         .provider(provider)
