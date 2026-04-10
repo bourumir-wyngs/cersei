@@ -15,7 +15,6 @@ use std::time::Duration;
 // ─── OAuth constants (same as Claude Code) ─────────────────────────────────
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
 const CLAUDE_AI_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const API_KEY_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";

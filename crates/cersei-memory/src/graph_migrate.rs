@@ -41,13 +41,6 @@ mod queries {
         )
     }
 
-    /// Migration v1→v2: add decay and embedding fields to Memory nodes that lack them.
-    /// Grafeo is schema-less, so we SET properties on existing nodes.
-    /// Idempotent: only targets nodes where last_validated_at is not already set.
-    ///
-    /// Since Grafeo may not support `WHERE ... IS NULL` or `SET` in a single query,
-    /// we do this in Rust by iterating. See `migrate_v1_to_v2`.
-    pub const MATCH_ALL_MEMORIES: &str = "MATCH (m:Memory) RETURN m.id, m.created_at";
 }
 
 // ─── Version check ─────────────────────────────────────────────────────────

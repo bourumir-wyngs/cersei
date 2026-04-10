@@ -101,7 +101,7 @@ mod gql {
         format!("MATCH (:Topic {{name: '{topic}'}})-[:TAGGED]->(m:Memory) RETURN m.content")
     }
 
-    pub fn revalidate(memory_id: &str, now: &str) -> String {
+    pub fn revalidate(memory_id: &str, _now: &str) -> String {
         // Since Grafeo may not support SET, we use a workaround:
         // Delete and re-insert would lose data. Instead we just track validation
         // through the SchemaVersion system. For now this is a no-op query that
