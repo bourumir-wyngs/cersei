@@ -305,14 +305,16 @@ impl Tool for EdTool {
     }
 
     fn description(&self) -> &str {
-        "Apply an ed script to a file using the add-ed crate. The tool automatically loads the \
-         target file into the editor, applies the script, writes the final buffer back to disk, \
-         returns a unified diff, and supports the shared `revert` command. NOTE: this is not \
-         GNU ed. Verified add-ed documentation differences include: `g`/`v`/`G`/`V` take command \
-         lists in input mode terminated by the regex separator instead of `.`, the `I` \
-         case-insensitive regex suffix is not implemented, and add-ed tracks the last selected \
-         span instead of a single current line. File and shell commands inside the script are \
-         disabled because the tool manages loading/saving the requested file itself."
+        "Apply an ed-like script to a file using the add-ed crate. The tool automatically loads \
+         the target file into the editor, applies the script, writes the final buffer back to \
+         disk, returns a unified diff, and supports the shared `revert` command. NOTE: this is \
+         not GNU/POSIX ed. add-ed tracks the last selected span rather than a single current \
+         line, so commands that rely on `.` or omitted addresses can behave differently from \
+         classic ed; prefer explicit addresses and ranges whenever possible. Other known \
+         differences: `g`/`v`/`G`/`V` take command lists in input mode terminated by the regex \
+         separator instead of `.`, and the `I` case-insensitive regex suffix is not \
+         implemented. File and shell commands inside the script are disabled because the tool \
+         manages loading/saving the requested file itself."
     }
 
     fn permission_level(&self) -> PermissionLevel {
