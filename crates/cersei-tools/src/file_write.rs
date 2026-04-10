@@ -3,6 +3,7 @@
 use super::*;
 use crate::file_history::FileHistory;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 pub struct FileWriteTool;
 
@@ -25,7 +26,10 @@ impl Tool for FileWriteTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Absolute path to the file" },
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file. Absolute paths and workspace-relative paths are accepted."
+                },
                 "content": { "type": "string", "description": "Content to write" }
             },
             "required": ["file_path", "content"]
@@ -44,12 +48,12 @@ impl Tool for FileWriteTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let path = std::path::Path::new(&input.file_path);
+        let path = resolve_path(ctx, &input.file_path);
 
         // Snapshot existing content before overwriting
         if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            if let Ok(existing) = tokio::fs::read_to_string(path).await {
-                history.snapshot_before_write(&path.to_path_buf(), &existing, "write");
+            if let Ok(existing) = tokio::fs::read_to_string(&path).await {
+                history.snapshot_before_write(&path, &existing, "write");
             }
         }
 
@@ -59,11 +63,34 @@ impl Tool for FileWriteTool {
             }
         }
 
-        match tokio::fs::write(path, &input.content).await {
+        match tokio::fs::write(&path, &input.content).await {
             Ok(()) => {
-                ToolResult::success(format!("File created successfully at: {}", input.file_path))
+                ToolResult::success(format!("File created successfully at: {}", path.display()))
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
     }
+}
+
+fn resolve_path(ctx: &ToolContext, input: &str) -> PathBuf {
+    let candidate = Path::new(input);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        ctx.working_dir.join(candidate)
+    };
+
+    if let Ok(canonical) = resolved.canonicalize() {
+        return canonical;
+    }
+
+    if let Some(parent) = resolved.parent() {
+        if let Ok(parent_canonical) = parent.canonicalize() {
+            if let Some(file_name) = resolved.file_name() {
+                return parent_canonical.join(file_name);
+            }
+        }
+    }
+
+    resolved
 }

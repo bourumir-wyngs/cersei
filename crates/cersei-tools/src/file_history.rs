@@ -8,7 +8,7 @@
 use parking_lot::Mutex;
 use similar::TextDiff;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A single revision of a file's content, captured *before* a mutation.
@@ -66,14 +66,23 @@ impl FileHistory {
         Self::default()
     }
 
+    fn normalize_key(path: &Path) -> PathBuf {
+        if path.is_absolute() {
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        }
+    }
+
     // ── Recording helpers (called by Read / Edit / Write tools) ─────────
 
     /// Record that a file was read.
     pub fn record_read(&self, path: &PathBuf) {
+        let key = Self::normalize_key(path);
         let mut entries = self.entries.lock();
         let entry = entries
-            .entry(path.clone())
-            .or_insert_with(|| FileEntry::new(path.clone()));
+            .entry(key.clone())
+            .or_insert_with(|| FileEntry::new(key));
         entry.read_count += 1;
         entry.last_accessed = now_secs();
     }
@@ -81,10 +90,11 @@ impl FileHistory {
     /// Capture a snapshot of the file's current content *before* a mutation.
     /// Returns the revision number assigned.
     pub fn snapshot_before_write(&self, path: &PathBuf, content: &str, operation: &str) -> u32 {
+        let key = Self::normalize_key(path);
         let mut entries = self.entries.lock();
         let entry = entries
-            .entry(path.clone())
-            .or_insert_with(|| FileEntry::new(path.clone()));
+            .entry(key.clone())
+            .or_insert_with(|| FileEntry::new(key));
         let rev = entry.next_revision_number();
         entry.revisions.push(Revision {
             number: rev,
@@ -122,8 +132,9 @@ impl FileHistory {
 
     /// Get the list of revisions for a file.
     pub fn get_revisions(&self, path: &PathBuf) -> Option<Vec<RevisionInfo>> {
+        let key = Self::normalize_key(path);
         let entries = self.entries.lock();
-        entries.get(path).map(|e| {
+        entries.get(&key).map(|e| {
             e.revisions
                 .iter()
                 .map(|r| RevisionInfo {
@@ -138,8 +149,9 @@ impl FileHistory {
 
     /// Get the content of a specific revision.
     pub fn get_revision_content(&self, path: &PathBuf, revision: u32) -> Option<String> {
+        let key = Self::normalize_key(path);
         let entries = self.entries.lock();
-        entries.get(path).and_then(|e| {
+        entries.get(&key).and_then(|e| {
             e.revisions
                 .iter()
                 .find(|r| r.number == revision)
@@ -167,8 +179,9 @@ impl FileHistory {
 
     /// Diff between two stored revisions.
     pub fn diff_two_revisions(&self, path: &PathBuf, from_rev: u32, to_rev: u32) -> Option<String> {
+        let key = Self::normalize_key(path);
         let entries = self.entries.lock();
-        let entry = entries.get(path)?;
+        let entry = entries.get(&key)?;
         let from = entry.revisions.iter().find(|r| r.number == from_rev)?;
         let to = entry.revisions.iter().find(|r| r.number == to_rev)?;
         Some(unified_diff(
@@ -181,8 +194,9 @@ impl FileHistory {
 
     /// Get the number of revisions for a file (0 if untracked).
     pub fn revision_count(&self, path: &PathBuf) -> u32 {
+        let key = Self::normalize_key(path);
         let entries = self.entries.lock();
-        entries.get(path).map_or(0, |e| e.revisions.len() as u32)
+        entries.get(&key).map_or(0, |e| e.revisions.len() as u32)
     }
 
     pub fn file_count(&self) -> usize {

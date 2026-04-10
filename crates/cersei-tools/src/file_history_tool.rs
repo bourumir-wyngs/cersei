@@ -5,6 +5,7 @@
 use super::*;
 use crate::file_history::FileHistory;
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub struct FileHistoryTool;
@@ -138,10 +139,13 @@ impl Tool for FileHistoryTool {
 /// that differs by symlink resolution. Read/Write tools accept and store absolute paths
 /// directly. This function tries several forms in order:
 ///
-/// 1. The path exactly as given — hits if the AI used the same form the tool stored.
+/// 1. The path exactly as given.
 /// 2. `working_dir.join(path)` — hits when the AI used a relative path but Edit stored absolute.
 /// 3. Canonical (symlink-resolved) form of #1 — handles `/tmp/foo` vs `/private/tmp/foo`.
 /// 4. Canonical form of #2 — belt-and-suspenders.
+///
+/// If multiple candidates are tracked, prefer the one with actual revisions so a stale
+/// read-only alias like `foo.txt` does not shadow `/abs/path/foo.txt` after an edit.
 ///
 /// Falls back to the absolute form (#2) so callers produce a sensible "not tracked" error.
 fn resolve_history_path(
@@ -149,39 +153,51 @@ fn resolve_history_path(
     ctx: &ToolContext,
     history: &FileHistory,
 ) -> std::path::PathBuf {
-    let is_tracked = |p: &std::path::PathBuf| -> bool {
+    let tracked_revision_count = |p: &std::path::PathBuf| -> Option<usize> {
         // get_revisions returns Some(_) for any file that was ever touched (even read-only).
-        history.get_revisions(p).is_some()
+        history.get_revisions(p).map(|revs| revs.len())
     };
 
-    // 1. Exact match.
     let given = path.to_path_buf();
-    if is_tracked(&given) {
-        return given;
-    }
-
-    // 2. Absolute via working_dir (relative path → absolute).
     let abs = if path.is_relative() {
         ctx.working_dir.join(path)
     } else {
         given.clone()
     };
-    if is_tracked(&abs) {
-        return abs;
-    }
 
-    // 3. Canonical form of the given path.
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_candidate = |candidate: std::path::PathBuf| {
+        if seen.insert(candidate.clone()) {
+            candidates.push(candidate);
+        }
+    };
+
+    push_candidate(given.clone());
+    push_candidate(abs.clone());
+
     if let Ok(canonical) = given.canonicalize() {
-        if is_tracked(&canonical) {
-            return canonical;
-        }
+        push_candidate(canonical);
+    }
+    if let Ok(canonical) = abs.canonicalize() {
+        push_candidate(canonical);
     }
 
-    // 4. Canonical form of the absolute path.
-    if let Ok(canonical) = abs.canonicalize() {
-        if is_tracked(&canonical) {
-            return canonical;
-        }
+    if let Some((best_path, _)) = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            tracked_revision_count(&candidate).map(|revision_count| (candidate, revision_count))
+        })
+        .max_by_key(|(candidate, revision_count)| {
+            (
+                *revision_count > 0,
+                *revision_count,
+                candidate.is_absolute(),
+                candidate.components().count(),
+            )
+        })
+    {
+        return best_path;
     }
 
     // Nothing matched — return the absolute form so errors display a full path.
@@ -379,7 +395,9 @@ async fn action_revert(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_edit::EditTool;
     use crate::file_history::FileHistory;
+    use crate::file_read::FileReadTool;
     use std::io::Write as IoWrite;
     use tempfile::NamedTempFile;
 
@@ -399,6 +417,10 @@ mod tests {
         let mut map = extra.as_object().cloned().unwrap_or_default();
         map.insert("action".to_string(), serde_json::json!(action));
         Value::Object(map)
+    }
+
+    fn compute_version(content: &str) -> String {
+        format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
     }
 
     #[tokio::test]
@@ -739,14 +761,15 @@ mod tests {
         // Query with relative path (as the AI would after using Edit with "src/main.rs")
         let result = tool
             .execute(
-                json_input(
-                    "revisions",
-                    serde_json::json!({"file_path": "src/main.rs"}),
-                ),
+                json_input("revisions", serde_json::json!({"file_path": "src/main.rs"})),
                 &ctx,
             )
             .await;
-        assert!(!result.is_error, "should resolve relative path: {}", result.content);
+        assert!(
+            !result.is_error,
+            "should resolve relative path: {}",
+            result.content
+        );
         assert!(result.content.contains("rev 1"));
     }
 
@@ -781,7 +804,10 @@ mod tests {
         let tool = FileHistoryTool;
         let result = tool
             .execute(
-                json_input("revisions", serde_json::json!({"file_path": "never_seen.rs"})),
+                json_input(
+                    "revisions",
+                    serde_json::json!({"file_path": "never_seen.rs"}),
+                ),
                 &ctx,
             )
             .await;
@@ -818,7 +844,154 @@ mod tests {
             )
             .await;
         assert!(!result.is_error, "diff failed: {}", result.content);
-        assert!(result.content.contains("-v1"), "expected -v1 in diff: {}", result.content);
-        assert!(result.content.contains("+v2"), "expected +v2 in diff: {}", result.content);
+        assert!(
+            result.content.contains("-v1"),
+            "expected -v1 in diff: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("+v2"),
+            "expected +v2 in diff: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_relative_read_then_edit_stays_on_one_history_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_name = "edit_test.txt";
+        let file_path = tmp.path().join(file_name);
+
+        let initial = "Line 1: alpha\nLine 2: beta\n";
+        let after_first = "Line 1: alpha\nLine 2: BETA\n";
+        let after_second = "Line 1: ALPHA\nLine 2: BETA\n";
+        std::fs::write(&file_path, initial).unwrap();
+
+        let mut ctx = make_ctx_with_history();
+        ctx.working_dir = tmp.path().to_path_buf();
+
+        let read_tool = FileReadTool;
+        let read_result = read_tool
+            .execute(serde_json::json!({ "file_path": file_name }), &ctx)
+            .await;
+        assert!(
+            !read_result.is_error,
+            "read failed: {}",
+            read_result.content
+        );
+
+        let edit_tool = EditTool;
+        let first_edit = edit_tool
+            .execute(
+                serde_json::json!({
+                    "file_path": file_name,
+                    "base_version": compute_version(initial),
+                    "edits": [{
+                        "start_line": 2,
+                        "start_column": 9,
+                        "end_line": 2,
+                        "end_column": 13,
+                        "expected_text": "beta",
+                        "new_text": "BETA"
+                    }]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            !first_edit.is_error,
+            "first edit failed: {}",
+            first_edit.content
+        );
+
+        let second_edit = edit_tool
+            .execute(
+                serde_json::json!({
+                    "file_path": file_name,
+                    "base_version": compute_version(after_first),
+                    "edits": [{
+                        "start_line": 1,
+                        "start_column": 9,
+                        "end_line": 1,
+                        "end_column": 14,
+                        "expected_text": "alpha",
+                        "new_text": "ALPHA"
+                    }]
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(
+            !second_edit.is_error,
+            "second edit failed: {}",
+            second_edit.content
+        );
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), after_second);
+
+        let history = get_history(&ctx);
+        let files = history.list_files();
+        assert_eq!(
+            files.len(),
+            1,
+            "history should not split relative and absolute keys"
+        );
+        assert_eq!(files[0].read_count, 1);
+        assert_eq!(files[0].revision_count, 2);
+
+        let tool = FileHistoryTool;
+        let revisions = tool
+            .execute(
+                json_input("revisions", serde_json::json!({ "file_path": file_name })),
+                &ctx,
+            )
+            .await;
+        assert!(!revisions.is_error, "{}", revisions.content);
+        assert!(revisions.content.contains("rev 1"));
+        assert!(revisions.content.contains("rev 2"));
+        assert!(!revisions.content.contains("only reads so far"));
+
+        let diff = tool
+            .execute(
+                json_input(
+                    "diff",
+                    serde_json::json!({
+                        "file_path": file_name,
+                        "from_revision": 1,
+                        "to_revision": 2
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(!diff.is_error, "diff failed: {}", diff.content);
+        assert!(diff.content.contains("-Line 2: beta"), "{}", diff.content);
+        assert!(diff.content.contains("+Line 2: BETA"), "{}", diff.content);
+    }
+
+    #[tokio::test]
+    async fn test_relative_query_prefers_revision_entry_over_read_only_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = make_ctx_with_history();
+        ctx.working_dir = tmp.path().to_path_buf();
+
+        let abs_path = tmp.path().join("edit_test.txt");
+        let history = get_history(&ctx);
+        history.record_read(&PathBuf::from("edit_test.txt"));
+        history.snapshot_before_write(&abs_path, "before\n", "edit");
+
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input(
+                    "revisions",
+                    serde_json::json!({ "file_path": "edit_test.txt" }),
+                ),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("rev 1"));
+        assert!(!result.content.contains("only reads so far"));
     }
 }

@@ -3,6 +3,7 @@
 use super::*;
 use crate::file_history::FileHistory;
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 pub struct FileReadTool;
 
@@ -25,7 +26,10 @@ impl Tool for FileReadTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Absolute path to the file" },
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file. Absolute paths and workspace-relative paths are accepted."
+                },
                 "offset": { "type": "integer", "description": "Line number to start reading from" },
                 "limit": { "type": "integer", "description": "Number of lines to read" }
             },
@@ -46,16 +50,16 @@ impl Tool for FileReadTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let path = std::path::Path::new(&input.file_path);
+        let path = resolve_path(ctx, &input.file_path);
         if !path.exists() {
-            return ToolResult::error(format!("File not found: {}", input.file_path));
+            return ToolResult::error(format!("File not found: {}", path.display()));
         }
 
-        match tokio::fs::read_to_string(path).await {
+        match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
                 // Track the read in file history
                 if let Some(history) = ctx.extensions.get::<FileHistory>() {
-                    history.record_read(&path.to_path_buf());
+                    history.record_read(&path);
                 }
 
                 let lines: Vec<&str> = content.lines().collect();
@@ -75,4 +79,15 @@ impl Tool for FileReadTool {
             Err(e) => ToolResult::error(format!("Failed to read file: {}", e)),
         }
     }
+}
+
+fn resolve_path(ctx: &ToolContext, input: &str) -> PathBuf {
+    let candidate = Path::new(input);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        ctx.working_dir.join(candidate)
+    };
+
+    resolved.canonicalize().unwrap_or(resolved)
 }
