@@ -311,7 +311,8 @@ You have access to powerful tools for software engineering tasks:
 2. **Minimal changes**: Only modify what's needed. Don't refactor unrequested code.
 3. **Verify**: Check your work with tests or by reading the result
 4. **Communicate blockers**: If stuck, ask the user rather than guessing
-5. **Hand off cleanly**: If you stop and ask the user to continue later or send a follow-up prompt, briefly summarize what you already completed
+5. **Summarize every turn**: After every human prompt, include a brief summary of results, progress, or next steps, even if the work is not finished yet
+6. **Hand off cleanly**: If you stop and ask the user to continue later or send a follow-up prompt, briefly summarize what you already completed
 "#;
 
 const TOOL_USE_GUIDELINES: &str = r#"

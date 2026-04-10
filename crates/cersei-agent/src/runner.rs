@@ -167,6 +167,7 @@ pub async fn run_agent_streaming(
     let mut turn: u32 = 0;
     let mut last_stop_reason = StopReason::EndTurn;
     let mut _last_usage = Usage::default();
+    let mut auto_summary_requested = false;
 
     // Build tool context
     let tool_ctx = ToolContext {
@@ -549,6 +550,13 @@ pub async fn run_agent_streaming(
                 agent
                     .messages
                     .lock()
+                if !auto_summary_requested {
+                    agent
+                        .messages
+                        .lock\(\)
+                        .push\(Message::user\("Summarize the current status"\)\);
+                    auto_summary_requested = true;
+                }
                     .push(Message::user("Continue from where you left off."));
             }
             _ => break,
