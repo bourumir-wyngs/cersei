@@ -9,6 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, RwLock};
+
+static PERMISSIONS_PROJECT_NAME: LazyLock<RwLock<Option<String>>> =
+    LazyLock::new(|| RwLock::new(None));
 
 // ─── Config structs ────────────────────────────────────────────────────────
 
@@ -107,9 +111,49 @@ pub fn graph_db_path() -> PathBuf {
     global_config_dir().join("graph.db")
 }
 
-/// ~/.abstract/permissions.yaml
+pub fn initialize_permissions_project_name(start_dir: &Path, explicit_name: Option<&str>) {
+    let project_name = derive_permissions_project_name(start_dir, explicit_name);
+    let mut guard = PERMISSIONS_PROJECT_NAME.write().unwrap();
+    *guard = Some(project_name);
+}
+
+fn permissions_project_name() -> String {
+    if let Some(project_name) = PERMISSIONS_PROJECT_NAME.read().unwrap().clone() {
+        return project_name;
+    }
+
+    let start_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    derive_permissions_project_name(&start_dir, None)
+}
+
+fn derive_permissions_project_name(start_dir: &Path, explicit_name: Option<&str>) -> String {
+    if let Some(name) = explicit_name.map(str::trim).filter(|name| !name.is_empty()) {
+        return sanitize_permissions_project_name(name);
+    }
+
+    if let Some(name) = start_dir.file_name().and_then(|name| name.to_str()) {
+        let sanitized = sanitize_permissions_project_name(name);
+        if !sanitized.is_empty() {
+            return sanitized;
+        }
+    }
+
+    "project".into()
+}
+
+fn sanitize_permissions_project_name(name: &str) -> String {
+    let sanitized = cersei_memory::memdir::sanitize_path_component(name);
+    if sanitized.is_empty() {
+        "project".into()
+    } else {
+        sanitized
+    }
+}
+
+/// ~/.abstract/permissions_{project}.yaml
 pub fn permissions_path() -> PathBuf {
-    global_config_dir().join("permissions.yaml")
+    let project_name = permissions_project_name();
+    global_config_dir().join(format!("permissions_{project_name}.yaml"))
 }
 
 // ─── Loading ───────────────────────────────────────────────────────────────
@@ -217,4 +261,33 @@ pub fn save_to(config: &AppConfig, path: &Path) -> anyhow::Result<()> {
     let content = toml::to_string_pretty(config)?;
     std::fs::write(path, content)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_permissions_project_name_uses_start_dir_folder_name() {
+        let path = PathBuf::from("/tmp/my-project");
+        assert_eq!(derive_permissions_project_name(&path, None), "my-project");
+    }
+
+    #[test]
+    fn derive_permissions_project_name_uses_explicit_override() {
+        let path = PathBuf::from("/tmp/my-project");
+        assert_eq!(
+            derive_permissions_project_name(&path, Some("custom/name")),
+            "custom_name"
+        );
+    }
+
+    #[test]
+    fn permissions_path_uses_project_file_name() {
+        initialize_permissions_project_name(Path::new("/tmp/cersei"), None);
+        assert_eq!(
+            permissions_path(),
+            global_config_dir().join("permissions_cersei.yaml")
+        );
+    }
 }

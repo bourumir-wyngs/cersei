@@ -46,9 +46,9 @@ When the AI requests `network: "full"`, you will see:
 - **N** — block network (run sandboxed)
 - **E** — block for the rest of the session
 - **S** — allow for the rest of the session
-- **R** — append an exact-match rule to `~/.abstract/permissions.yaml` with `network: false` and `allow: false`, then ask again for the current invocation
+- **R** — append an exact-match rule to `~/.abstract/permissions_<project>.yaml` with `network: false` and `allow: false`, then ask again for the current invocation
 
-Persisted permission rules live in `~/.abstract/permissions.yaml` and are reloaded on every tool or network check. Each rule is a YAML item with:
+Persisted permission rules live in `~/.abstract/permissions_<project>.yaml`, where `<project>` defaults to the folder name where `cersei` started. Pass `--project NAME` to override it. The file is reloaded on every tool or network check. Each rule is a YAML item with:
 
 ```yaml
 - regex: "^npm install react$"

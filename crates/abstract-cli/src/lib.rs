@@ -81,6 +81,10 @@ pub struct Cli {
     #[arg(short = 'C', long)]
     pub directory: Option<String>,
 
+    /// Project name override for permission persistence
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -161,6 +165,8 @@ pub enum McpAction {
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let startup_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    config::initialize_permissions_project_name(&startup_dir, cli.project.as_deref());
 
     if cli.verbose {
         tracing_subscriber::fmt()

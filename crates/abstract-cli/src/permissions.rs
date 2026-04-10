@@ -1,8 +1,8 @@
 //! Interactive permission UI for the CLI.
 //!
 //! Session decisions are cached in memory. Persisted decisions live in
-//! `~/.abstract/permissions.yaml` as regex-based rules that are reloaded on
-//! every permission check.
+//! `~/.abstract/permissions_<project>.yaml` as regex-based rules that are
+//! reloaded on every permission check.
 
 use crate::config;
 use crate::theme::Theme;
