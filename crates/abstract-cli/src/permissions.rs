@@ -275,7 +275,7 @@ impl PermissionPolicy for CliPermissionPolicy {
             );
             let _ = io::stderr().flush();
 
-            match read_permission_char() {
+            match read_permission_char(valid_permission_chars(session_scope)) {
                 'y' | 'Y' | '\n' => {
                     if let Some(scope) = session_scope {
                         self.allow_scope_for_session(scope);
@@ -352,6 +352,13 @@ fn permission_prompt_choices(scope: Option<SessionPermissionScope>) -> &'static 
             "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
         }
         None => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister ",
+    }
+}
+
+fn valid_permission_chars(scope: Option<SessionPermissionScope>) -> &'static str {
+    match scope {
+        Some(SessionPermissionScope::WriteWorkspace) => "yYnNeErRxX",
+        None => "yYnNeErRsExX",
     }
 }
 
@@ -515,12 +522,39 @@ fn save_persisted_file_to(path: &Path, persisted: &PersistedPermissions) {
     }
 }
 
-fn read_permission_char() -> char {
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_ok() {
-        line.chars().next().unwrap_or('\n')
+fn read_permission_char(valid_chars: &str) -> char {
+    use crossterm::event::{self, Event, KeyCode, KeyEvent};
+    use crossterm::terminal;
+
+    if terminal::enable_raw_mode().is_ok() {
+        let result = loop {
+            if let Ok(Event::Key(KeyEvent { code, .. })) = event::read() {
+                break match code {
+                    KeyCode::Char(c) => {
+                        if valid_chars.contains(c) {
+                            c
+                        } else {
+                            continue;
+                        }
+                    }
+                    KeyCode::Enter => 'y',
+                    KeyCode::Esc => 'n',
+                    _ => continue,
+                };
+            }
+        };
+        let _ = terminal::disable_raw_mode();
+        eprint!("\n");
+        result
     } else {
-        '\n'
+        // Fallback: read a line
+        let mut input = String::new();
+        let _ = io::stdin().read_line(&mut input);
+        input
+            .trim()
+            .chars()
+            .find(|c| valid_chars.contains(*c))
+            .unwrap_or('n')
     }
 }
 
