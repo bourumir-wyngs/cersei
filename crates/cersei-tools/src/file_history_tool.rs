@@ -53,7 +53,7 @@ impl Tool for FileHistoryTool {
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "Absolute path to the file (required for all actions except `list`)"
+                    "description": "Path to the file. Workspace-relative paths (as used by Edit/Sed/Write tools) and absolute paths are both accepted."
                 },
                 "revision": {
                     "type": "integer",
@@ -101,19 +101,23 @@ impl Tool for FileHistoryTool {
             "list" => action_list(&history),
             "revisions" => {
                 let path = match require_path(&input.file_path) { Ok(p) => p, Err(e) => return e };
+                let path = resolve_history_path(&path, ctx, &history);
                 action_revisions(&history, &path)
             }
             "get_revision" => {
                 let path = match require_path(&input.file_path) { Ok(p) => p, Err(e) => return e };
+                let path = resolve_history_path(&path, ctx, &history);
                 let rev = match require_revision(input.revision) { Ok(r) => r, Err(e) => return e };
                 action_get_revision(&history, &path, rev)
             }
             "diff" => {
                 let path = match require_path(&input.file_path) { Ok(p) => p, Err(e) => return e };
+                let path = resolve_history_path(&path, ctx, &history);
                 action_diff(&history, &path, input.from_revision, input.to_revision).await
             }
             "revert" | "restore" => {
                 let path = match require_path(&input.file_path) { Ok(p) => p, Err(e) => return e };
+                let path = resolve_history_path(&path, ctx, &history);
                 let rev = match require_revision(input.revision) { Ok(r) => r, Err(e) => return e };
                 action_revert(&history, &path, rev).await
             }
@@ -126,6 +130,63 @@ impl Tool for FileHistoryTool {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Resolve the path form that was actually used as the key in FileHistory.
+///
+/// The problem: Edit/Sed tools store keys as absolute paths (`working_dir.join(relative)`),
+/// but the AI may query using a relative path (as it passed to Edit), or an absolute path
+/// that differs by symlink resolution. Read/Write tools accept and store absolute paths
+/// directly. This function tries several forms in order:
+///
+/// 1. The path exactly as given — hits if the AI used the same form the tool stored.
+/// 2. `working_dir.join(path)` — hits when the AI used a relative path but Edit stored absolute.
+/// 3. Canonical (symlink-resolved) form of #1 — handles `/tmp/foo` vs `/private/tmp/foo`.
+/// 4. Canonical form of #2 — belt-and-suspenders.
+///
+/// Falls back to the absolute form (#2) so callers produce a sensible "not tracked" error.
+fn resolve_history_path(
+    path: &std::path::Path,
+    ctx: &ToolContext,
+    history: &FileHistory,
+) -> std::path::PathBuf {
+    let is_tracked = |p: &std::path::PathBuf| -> bool {
+        // get_revisions returns Some(_) for any file that was ever touched (even read-only).
+        history.get_revisions(p).is_some()
+    };
+
+    // 1. Exact match.
+    let given = path.to_path_buf();
+    if is_tracked(&given) {
+        return given;
+    }
+
+    // 2. Absolute via working_dir (relative path → absolute).
+    let abs = if path.is_relative() {
+        ctx.working_dir.join(path)
+    } else {
+        given.clone()
+    };
+    if is_tracked(&abs) {
+        return abs;
+    }
+
+    // 3. Canonical form of the given path.
+    if let Ok(canonical) = given.canonicalize() {
+        if is_tracked(&canonical) {
+            return canonical;
+        }
+    }
+
+    // 4. Canonical form of the absolute path.
+    if let Ok(canonical) = abs.canonicalize() {
+        if is_tracked(&canonical) {
+            return canonical;
+        }
+    }
+
+    // Nothing matched — return the absolute form so errors display a full path.
+    abs
+}
 
 fn require_path(file_path: &Option<String>) -> std::result::Result<std::path::PathBuf, ToolResult> {
     file_path
@@ -177,7 +238,8 @@ fn action_revisions(history: &FileHistory, path: &std::path::PathBuf) -> ToolRes
             ToolResult::success(out)
         }
         None => ToolResult::error(format!(
-            "File {} is not tracked in this session.",
+            "File {} is not tracked in this session. \
+             Use action `list` to see all tracked files.",
             path.display()
         )),
     }
@@ -655,5 +717,108 @@ mod tests {
             .await;
         assert!(result.is_error);
         assert!(result.content.contains("Unknown action"));
+    }
+
+    // ── Path resolution tests ────────────────────────────────────────────
+
+    /// Edit tool stores `working_dir.join("src/main.rs")` (absolute).
+    /// The AI queries with the relative path `"src/main.rs"`.
+    /// resolve_history_path must bridge the gap.
+    #[tokio::test]
+    async fn test_relative_path_resolves_to_absolute_history_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut ctx = make_ctx_with_history();
+        ctx.working_dir = tmp.path().to_path_buf();
+
+        let abs_path = tmp.path().join("src/main.rs");
+        let history = get_history(&ctx);
+        // Simulate what Edit tool stores: absolute path
+        history.snapshot_before_write(&abs_path, "v1 content", "edit");
+
+        let tool = FileHistoryTool;
+        // Query with relative path (as the AI would after using Edit with "src/main.rs")
+        let result = tool
+            .execute(
+                json_input(
+                    "revisions",
+                    serde_json::json!({"file_path": "src/main.rs"}),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "should resolve relative path: {}", result.content);
+        assert!(result.content.contains("rev 1"));
+    }
+
+    /// Absolute path stored, absolute path queried — must still work.
+    #[tokio::test]
+    async fn test_absolute_path_matches_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx_with_history();
+        let abs_path = tmp.path().join("file.rs");
+        let history = get_history(&ctx);
+        history.snapshot_before_write(&abs_path, "content", "write");
+
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input(
+                    "revisions",
+                    serde_json::json!({"file_path": abs_path.to_str().unwrap()}),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("rev 1"));
+    }
+
+    /// Querying a path that was never tracked should return a clear error,
+    /// not a panic or misleading "only reads so far" message.
+    #[tokio::test]
+    async fn test_untracked_path_gives_clear_error() {
+        let ctx = make_ctx_with_history();
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input("revisions", serde_json::json!({"file_path": "never_seen.rs"})),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("not tracked"),
+            "expected 'not tracked' in: {}",
+            result.content
+        );
+    }
+
+    /// diff action with relative path should work after an edit.
+    #[tokio::test]
+    async fn test_diff_with_relative_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Write the "current" file to disk so diff-vs-current can read it
+        std::fs::write(tmp.path().join("f.txt"), "v2\n").unwrap();
+
+        let mut ctx = make_ctx_with_history();
+        ctx.working_dir = tmp.path().to_path_buf();
+
+        let abs_path = tmp.path().join("f.txt");
+        let history = get_history(&ctx);
+        history.snapshot_before_write(&abs_path, "v1\n", "edit");
+
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input(
+                    "diff",
+                    serde_json::json!({"file_path": "f.txt", "from_revision": 1}),
+                ),
+                &ctx,
+            )
+            .await;
+        assert!(!result.is_error, "diff failed: {}", result.content);
+        assert!(result.content.contains("-v1"), "expected -v1 in diff: {}", result.content);
+        assert!(result.content.contains("+v2"), "expected +v2 in diff: {}", result.content);
     }
 }
