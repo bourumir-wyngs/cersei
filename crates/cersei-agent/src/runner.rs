@@ -547,16 +547,16 @@ pub async fn run_agent_streaming(
             }
             StopReason::MaxTokens => {
                 // Inject continuation message
-                agent
-                    .messages
-                    .lock()
                 if !auto_summary_requested {
                     agent
                         .messages
-                        .lock\(\)
-                        .push\(Message::user\("Summarize the current status"\)\);
+                        .lock()
+                        .push(Message::user("Summarize the current status"));
                     auto_summary_requested = true;
                 }
+                agent
+                    .messages
+                    .lock()
                     .push(Message::user("Continue from where you left off."));
             }
             _ => break,

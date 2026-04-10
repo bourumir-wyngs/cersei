@@ -165,7 +165,7 @@ fn stamp_version(db: &GrafeoDB, version: u32) -> cersei_types::Result<()> {
 /// v0 → v1: Stamp initial schema version. No data changes needed —
 /// v1 IS the pre-existing schema.
 #[cfg(feature = "graph")]
-fn migrate_v0_to_v1(db: &GrafeoDB) -> cersei_types::Result<()> {
+fn migrate_v0_to_v1(_db: &GrafeoDB) -> cersei_types::Result<()> {
     tracing::debug!("Running migration v0 → v1 (stamp version, no data changes)");
     // Nothing to change — v1 is the original schema.
     // The stamp_version call after all migrations handles creating the node.
@@ -183,7 +183,7 @@ fn migrate_v0_to_v1(db: &GrafeoDB) -> cersei_types::Result<()> {
 /// Since the INSERT creates new nodes with these fields, and old nodes
 /// just don't have them, the forward-compatible read helpers handle the gap.
 #[cfg(feature = "graph")]
-fn migrate_v1_to_v2(db: &GrafeoDB) -> cersei_types::Result<()> {
+fn migrate_v1_to_v2(_db: &GrafeoDB) -> cersei_types::Result<()> {
     tracing::debug!("Running migration v1 → v2 (add decay/embedding fields)");
 
     // Grafeo is schema-less. "Adding fields" means new INSERT statements include them.

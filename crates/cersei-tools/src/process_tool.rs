@@ -1,7 +1,7 @@
 //! Process tool: start long-running bash processes and interact with their output.
 
 use super::*;
-use crate::network_policy::{shell_command, NetworkAccess};
+use crate::network_policy::{shell_command, NetworkAccess, NetworkDecision};
 use crate::permissions::{PermissionDecision, PermissionRequest};
 use serde::Deserialize;
 use std::collections::VecDeque;
@@ -238,7 +238,12 @@ async fn start_process(
     };
 
     let access = match ctx.network_policy {
-        Some(ref policy) => policy.check("Process", command, requested).await,
+        Some(ref policy) => match policy.check("Process", command, requested).await {
+            NetworkDecision::Allow(access) => access,
+            NetworkDecision::Deny(reason) => {
+                return ToolResult::error(format!("Permission denied: {}", reason));
+            }
+        },
         None => requested,
     };
 
@@ -452,6 +457,7 @@ async fn kill_process(session_id: &str, pid: u32) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network_policy::{NetworkDecision, NetworkPolicy};
     use crate::permissions::PermissionPolicy;
     use parking_lot::Mutex;
     use serde_json::json;
@@ -482,11 +488,39 @@ mod tests {
         }
     }
 
-    fn test_ctx(session_id: String, permissions: Arc<dyn PermissionPolicy>) -> ToolContext {
+    struct FixedNetworkPolicy {
+        decision: NetworkDecision,
+    }
+
+    #[async_trait]
+    impl NetworkPolicy for FixedNetworkPolicy {
+        async fn check(
+            &self,
+            _tool_name: &str,
+            _command: &str,
+            requested: NetworkAccess,
+        ) -> NetworkDecision {
+            match &self.decision {
+                NetworkDecision::Allow(NetworkAccess::Full)
+                | NetworkDecision::Allow(NetworkAccess::Local)
+                | NetworkDecision::Allow(NetworkAccess::Blocked) => {
+                    NetworkDecision::Allow(requested)
+                }
+                NetworkDecision::Deny(reason) => NetworkDecision::Deny(reason.clone()),
+            }
+        }
+    }
+
+    fn test_ctx(
+        session_id: String,
+        permissions: Arc<dyn PermissionPolicy>,
+        network_policy: Option<Arc<dyn NetworkPolicy>>,
+    ) -> ToolContext {
         ToolContext {
             session_id,
             permissions,
             working_dir: std::env::current_dir().expect("cwd"),
+            network_policy,
             ..ToolContext::default()
         }
     }
@@ -505,6 +539,7 @@ mod tests {
         let ctx = test_ctx(
             format!("process-test-{}", uuid::Uuid::new_v4()),
             policy.clone(),
+            None,
         );
         let tool = ProcessTool;
 
@@ -553,6 +588,7 @@ mod tests {
             Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Deny(
                 "User denied".into(),
             ))),
+            None,
         );
         let tool = ProcessTool;
 
@@ -578,10 +614,12 @@ mod tests {
         let owner_ctx = test_ctx(
             format!("process-owner-{}", uuid::Uuid::new_v4()),
             Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow)),
+            None,
         );
         let other_ctx = test_ctx(
             format!("process-other-{}", uuid::Uuid::new_v4()),
             Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow)),
+            None,
         );
         let tool = ProcessTool;
 
@@ -624,5 +662,36 @@ mod tests {
             .execute(json!({"action": "kill", "pid": pid}), &owner_ctx)
             .await;
         assert!(!owner_kill.is_error, "{}", owner_kill.content);
+    }
+
+    #[tokio::test]
+    async fn start_is_blocked_when_network_is_denied() {
+        PROCESS_REGISTRY.clear();
+
+        let ctx = test_ctx(
+            format!("process-test-{}", uuid::Uuid::new_v4()),
+            Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow)),
+            Some(Arc::new(FixedNetworkPolicy {
+                decision: NetworkDecision::Deny("User denied (registered rule)".into()),
+            })),
+        );
+        let tool = ProcessTool;
+
+        let result = tool
+            .execute(
+                json!({
+                    "action": "start",
+                    "command": "sleep 1",
+                    "network": "full"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .contains("Permission denied: User denied (registered rule)"));
+        assert_eq!(list_processes(&ctx.session_id).content, "No processes");
     }
 }

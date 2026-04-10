@@ -106,7 +106,7 @@ impl Provider for OpenAi {
                             if let ContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
-                                is_error,
+                                is_error: _,
                             } = block
                             {
                                 let mut result = serde_json::json!({
@@ -325,7 +325,7 @@ impl Provider for OpenAi {
                                         if data == "[DONE]" {
                                             // Emit accumulated tool calls
                                             for (idx, (id, name, args, sig)) in &tool_calls {
-                                                let input: serde_json::Value =
+                                                let _input: serde_json::Value =
                                                     serde_json::from_str(args)
                                                         .unwrap_or(serde_json::Value::Null);
                                                 let _ = tx

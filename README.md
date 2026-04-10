@@ -43,7 +43,7 @@ When the AI requests `network: "full"`, you will see:
 ```
 
 - **Y** / Enter — allow network for this invocation
-- **N** — block network (run sandboxed)
+- **N** — deny this invocation
 - **E** — block for the rest of the session
 - **S** — allow for the rest of the session
 - **R** — append an exact-match rule to `~/.abstract/permissions_<project>.yaml` with `network: false` and `allow: false`, then ask again for the current invocation
@@ -59,6 +59,8 @@ Persisted permission rules live in `~/.abstract/permissions_<project>.yaml`, whe
 ```
 
 `allow_read` is optional. It lists filesystem roots that path-based read-only tools such as `Read`, `Glob`, `Grep`, `ListDirectory`, and read-only `Git` access may use without prompting, in addition to the current workspace.
+
+For networked commands, a matching `network: true` rule allows or denies networked execution, while a matching `network: false` rule allows no-network execution or denies the command entirely.
 
 Pass `--no-permissions` to skip all prompts and allow everything (CI/headless mode).
 

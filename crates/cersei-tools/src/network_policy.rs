@@ -72,21 +72,28 @@ impl NetworkAccess {
     }
 }
 
+/// Result of evaluating a network request for a tool invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetworkDecision {
+    Allow(NetworkAccess),
+    Deny(String),
+}
+
 // ─── Trait ───────────────────────────────────────────────────────────────────
 
 #[async_trait]
 pub trait NetworkPolicy: Send + Sync {
-    /// Decide the actual access level to grant.
+    /// Decide whether the command may run and, if so, what access level it gets.
     ///
     /// `requested` is what the tool input declared. When `Blocked` the policy
-    /// should return `Blocked` without prompting. When `Full` the policy may
-    /// approve, deny, or prompt the user.
+    /// should allow the command to proceed without prompting. When a command
+    /// requests network access, the policy may approve, deny, or prompt.
     async fn check(
         &self,
         tool_name: &str,
         command: &str,
         requested: NetworkAccess,
-    ) -> NetworkAccess;
+    ) -> NetworkDecision;
 }
 
 // ─── Built-in policies ───────────────────────────────────────────────────────
@@ -96,18 +103,22 @@ pub struct NetworkAllow;
 
 #[async_trait]
 impl NetworkPolicy for NetworkAllow {
-    async fn check(&self, _tool: &str, _cmd: &str, requested: NetworkAccess) -> NetworkAccess {
-        requested
+    async fn check(&self, _tool: &str, _cmd: &str, requested: NetworkAccess) -> NetworkDecision {
+        NetworkDecision::Allow(requested)
     }
 }
 
-/// Block all network regardless of what was requested.
+/// Deny commands that request network access.
 pub struct NetworkDeny;
 
 #[async_trait]
 impl NetworkPolicy for NetworkDeny {
-    async fn check(&self, _tool: &str, _cmd: &str, _requested: NetworkAccess) -> NetworkAccess {
-        NetworkAccess::Blocked
+    async fn check(&self, _tool: &str, _cmd: &str, requested: NetworkAccess) -> NetworkDecision {
+        if requested == NetworkAccess::Blocked {
+            NetworkDecision::Allow(NetworkAccess::Blocked)
+        } else {
+            NetworkDecision::Deny("Network access denied by policy".into())
+        }
     }
 }
 
@@ -115,7 +126,7 @@ impl NetworkPolicy for NetworkDeny {
 
 #[async_trait]
 impl NetworkPolicy for Arc<dyn NetworkPolicy> {
-    async fn check(&self, tool: &str, cmd: &str, requested: NetworkAccess) -> NetworkAccess {
+    async fn check(&self, tool: &str, cmd: &str, requested: NetworkAccess) -> NetworkDecision {
         self.as_ref().check(tool, cmd, requested).await
     }
 }
@@ -154,7 +165,7 @@ pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
 
 #[cfg(test)]
 mod tests {
-    use super::NetworkAccess;
+    use super::{NetworkAccess, NetworkAllow, NetworkDecision, NetworkDeny, NetworkPolicy};
 
     #[test]
     fn missing_network_defaults_to_full() {
@@ -175,6 +186,42 @@ mod tests {
         assert_eq!(
             NetworkAccess::from_input(Some("none")),
             NetworkAccess::Blocked
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_policy_blocks_networked_requests() {
+        let policy = NetworkDeny;
+
+        assert_eq!(
+            policy
+                .check("Bash", "curl https://example.com", NetworkAccess::Full)
+                .await,
+            NetworkDecision::Deny("Network access denied by policy".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_policy_allows_explicitly_blocked_requests() {
+        let policy = NetworkDeny;
+
+        assert_eq!(
+            policy
+                .check("Bash", "echo hello", NetworkAccess::Blocked)
+                .await,
+            NetworkDecision::Allow(NetworkAccess::Blocked)
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_policy_returns_requested_access() {
+        let policy = NetworkAllow;
+
+        assert_eq!(
+            policy
+                .check("Cargo", "cargo build", NetworkAccess::Local)
+                .await,
+            NetworkDecision::Allow(NetworkAccess::Local)
         );
     }
 }

@@ -1,7 +1,7 @@
 //! Bash tool: execute shell commands.
 
 use super::*;
-use crate::network_policy::{shell_command, NetworkAccess};
+use crate::network_policy::{shell_command, NetworkAccess, NetworkDecision};
 use serde::Deserialize;
 use std::process::Stdio;
 
@@ -114,7 +114,12 @@ impl Tool for BashTool {
 
         let requested = NetworkAccess::from_input(input.network.as_deref());
         let access = match ctx.network_policy {
-            Some(ref policy) => policy.check(self.name(), &input.command, requested).await,
+            Some(ref policy) => match policy.check(self.name(), &input.command, requested).await {
+                NetworkDecision::Allow(access) => access,
+                NetworkDecision::Deny(reason) => {
+                    return ToolResult::error(format!("Permission denied: {}", reason));
+                }
+            },
             None => requested,
         };
 
