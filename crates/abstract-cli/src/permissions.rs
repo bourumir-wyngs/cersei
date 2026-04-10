@@ -27,7 +27,16 @@ pub struct CliPermissionPolicy {
     session_allowed: Mutex<HashSet<String>>,
     /// Commands denied for the entire session.
     session_denied: Mutex<HashSet<String>>,
+    /// Permission scopes allowed for the entire session.
+    session_scopes_allowed: Mutex<HashSet<SessionPermissionScope>>,
+    /// Permission scopes denied for the entire session.
+    session_scopes_denied: Mutex<HashSet<SessionPermissionScope>>,
     theme: Theme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SessionPermissionScope {
+    WriteWorkspace,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -138,8 +147,25 @@ impl CliPermissionPolicy {
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             session_denied: Mutex::new(HashSet::new()),
+            session_scopes_allowed: Mutex::new(HashSet::new()),
+            session_scopes_denied: Mutex::new(HashSet::new()),
             theme: theme.clone(),
         }
+    }
+
+    fn session_scope_for_request(request: &PermissionRequest) -> Option<SessionPermissionScope> {
+        match request.permission_level {
+            PermissionLevel::Write => Some(SessionPermissionScope::WriteWorkspace),
+            _ => None,
+        }
+    }
+
+    fn allow_scope_for_session(&self, scope: SessionPermissionScope) {
+        self.session_scopes_allowed.lock().insert(scope);
+    }
+
+    fn deny_scope_for_session(&self, scope: SessionPermissionScope) {
+        self.session_scopes_denied.lock().insert(scope);
     }
 }
 
@@ -153,6 +179,7 @@ impl PermissionPolicy for CliPermissionPolicy {
         let command_line = command_line_from_request(request);
         let persisted = load_persisted_file();
         let request_uses_network = request_uses_network(request);
+        let session_scope = Self::session_scope_for_request(request);
 
         if let Some(rule) =
             match_persisted_rule_for_request_in(&persisted, &command_line, request_uses_network)
@@ -176,15 +203,32 @@ impl PermissionPolicy for CliPermissionPolicy {
             _ => {}
         }
 
+        if let Some(scope) = session_scope {
+            if self.session_scopes_denied.lock().contains(&scope) {
+                return PermissionDecision::Deny(scope.session_denied_reason().into());
+            }
+        }
+
         if self.session_denied.lock().contains(&command_line) {
             return PermissionDecision::Deny("User denied (session)".into());
         }
+
+        if let Some(scope) = session_scope {
+            if self.session_scopes_allowed.lock().contains(&scope) {
+                return PermissionDecision::Allow;
+            }
+        }
+
         if self.session_allowed.lock().contains(&command_line) {
             return PermissionDecision::Allow;
         }
 
+        let permission_subject = session_scope
+            .map(SessionPermissionScope::label)
+            .unwrap_or_else(|| request.tool_name.as_str());
         let level_str = format!("{:?}", request.permission_level);
         let preview = permission_preview(request, &command_line);
+        let scope_notice = session_scope.map(SessionPermissionScope::session_notice);
 
         loop {
             let _ = execute!(
@@ -192,7 +236,7 @@ impl PermissionPolicy for CliPermissionPolicy {
                 Print("\n"),
                 SetForegroundColor(self.theme.permission_accent),
                 SetAttribute(crossterm::style::Attribute::Bold),
-                Print(format!("  Permission required: {}", request.tool_name)),
+                Print(format!("  Permission required: {permission_subject}")),
                 ResetColor,
                 SetAttribute(crossterm::style::Attribute::Reset),
                 Print("\n"),
@@ -201,6 +245,15 @@ impl PermissionPolicy for CliPermissionPolicy {
                 ResetColor,
                 Print("\n"),
             );
+            if let Some(scope_notice) = scope_notice {
+                let _ = execute!(
+                    io::stderr(),
+                    SetForegroundColor(self.theme.dim),
+                    Print(format!("  {scope_notice}")),
+                    ResetColor,
+                    Print("\n"),
+                );
+            }
             if let Some(preview) = &preview {
                 let _ = execute!(
                     io::stderr(),
@@ -217,18 +270,32 @@ impl PermissionPolicy for CliPermissionPolicy {
                 ResetColor,
                 Print("\n"),
                 SetForegroundColor(self.theme.permission_accent),
-                Print("  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "),
+                Print(permission_prompt_choices(session_scope)),
                 ResetColor,
             );
             let _ = io::stderr().flush();
 
             match read_permission_char() {
-                'y' | 'Y' | '\n' => return PermissionDecision::AllowOnce,
+                'y' | 'Y' | '\n' => {
+                    if let Some(scope) = session_scope {
+                        self.allow_scope_for_session(scope);
+                        return PermissionDecision::AllowForSession;
+                    }
+                    return PermissionDecision::AllowOnce;
+                }
                 's' | 'S' => {
+                    if let Some(scope) = session_scope {
+                        self.allow_scope_for_session(scope);
+                        return PermissionDecision::AllowForSession;
+                    }
                     self.session_allowed.lock().insert(command_line.clone());
                     return PermissionDecision::AllowForSession;
                 }
                 'e' | 'E' => {
+                    if let Some(scope) = session_scope {
+                        self.deny_scope_for_session(scope);
+                        return PermissionDecision::Deny(scope.session_denied_reason().into());
+                    }
                     self.session_denied.lock().insert(command_line.clone());
                     return PermissionDecision::Deny("User denied (session)".into());
                 }
@@ -254,6 +321,37 @@ impl PermissionPolicy for CliPermissionPolicy {
                 _ => return PermissionDecision::Deny("User denied".into()),
             }
         }
+    }
+}
+
+impl SessionPermissionScope {
+    fn label(self) -> &'static str {
+        match self {
+            Self::WriteWorkspace => "Write workspace",
+        }
+    }
+
+    fn session_notice(self) -> &'static str {
+        match self {
+            Self::WriteWorkspace => {
+                "Granting this allows all Write-risk tools for the rest of this session."
+            }
+        }
+    }
+
+    fn session_denied_reason(self) -> &'static str {
+        match self {
+            Self::WriteWorkspace => "User denied write workspace (session)",
+        }
+    }
+}
+
+fn permission_prompt_choices(scope: Option<SessionPermissionScope>) -> &'static str {
+    match scope {
+        Some(SessionPermissionScope::WriteWorkspace) => {
+            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
+        }
+        None => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister ",
     }
 }
 
@@ -439,10 +537,18 @@ mod tests {
     }
 
     fn make_request(tool_name: &str, input: serde_json::Value) -> PermissionRequest {
+        make_request_with_level(tool_name, input, PermissionLevel::ReadOnly)
+    }
+
+    fn make_request_with_level(
+        tool_name: &str,
+        input: serde_json::Value,
+        permission_level: PermissionLevel,
+    ) -> PermissionRequest {
         PermissionRequest {
             tool_name: tool_name.into(),
             tool_input: input,
-            permission_level: PermissionLevel::ReadOnly,
+            permission_level,
             description: "test".into(),
             id: "test-id".into(),
             working_dir: PathBuf::from("/tmp"),
@@ -722,6 +828,72 @@ mod tests {
         assert_eq!(
             exact_command_line_regex("cargo test -- --exact foo::bar"),
             r"^cargo test \-\- \-\-exact foo::bar$"
+        );
+    }
+
+    #[test]
+    fn write_requests_use_global_workspace_scope() {
+        let request = make_request_with_level(
+            "Write",
+            json!({ "file_path": "/tmp/demo.txt", "content": "demo" }),
+            PermissionLevel::Write,
+        );
+
+        assert_eq!(
+            CliPermissionPolicy::session_scope_for_request(&request),
+            Some(SessionPermissionScope::WriteWorkspace)
+        );
+        assert_eq!(
+            CliPermissionPolicy::session_scope_for_request(&request)
+                .map(SessionPermissionScope::label),
+            Some("Write workspace")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_write_scope_allows_other_write_tools() {
+        let policy = CliPermissionPolicy::new(&Theme::dark());
+        policy.allow_scope_for_session(SessionPermissionScope::WriteWorkspace);
+
+        let write_request = make_request_with_level(
+            "Write",
+            json!({ "file_path": "/tmp/a.txt", "content": "hello" }),
+            PermissionLevel::Write,
+        );
+        let notebook_request = make_request_with_level(
+            "NotebookEdit",
+            json!({ "file_path": "/tmp/demo.ipynb", "cell_index": 0, "new_source": "print(1)" }),
+            PermissionLevel::Write,
+        );
+
+        assert!(matches!(
+            policy.check(&write_request).await,
+            PermissionDecision::Allow
+        ));
+        assert!(matches!(
+            policy.check(&notebook_request).await,
+            PermissionDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_write_scope_does_not_affect_execute_requests() {
+        let policy = CliPermissionPolicy::new(&Theme::dark());
+        policy.allow_scope_for_session(SessionPermissionScope::WriteWorkspace);
+
+        let request = make_request_with_level(
+            "Bash",
+            json!({ "command": "echo hi" }),
+            PermissionLevel::Execute,
+        );
+
+        assert!(!matches!(
+            CliPermissionPolicy::session_scope_for_request(&request),
+            Some(SessionPermissionScope::WriteWorkspace)
+        ));
+        assert_eq!(
+            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
+            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "
         );
     }
 }
