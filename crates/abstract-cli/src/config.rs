@@ -107,9 +107,9 @@ pub fn graph_db_path() -> PathBuf {
     global_config_dir().join("graph.db")
 }
 
-/// ~/.abstract/permissions.json
+/// ~/.abstract/permissions.yaml
 pub fn permissions_path() -> PathBuf {
-    global_config_dir().join("permissions.json")
+    global_config_dir().join("permissions.yaml")
 }
 
 // ─── Loading ───────────────────────────────────────────────────────────────

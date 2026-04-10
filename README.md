@@ -39,13 +39,22 @@ When the AI requests `network: "full"`, you will see:
 ```
   Network access: Npm
   npm install react
-  [Y]es  [N]o  [S]ession  [A]lways
+  [Y]es  [N]o  n[E]ver  [S]ession  [R]egister
 ```
 
 - **Y** / Enter — allow network for this invocation
 - **N** — block network (run sandboxed)
+- **E** — block for the rest of the session
 - **S** — allow for the rest of the session
-- **A** — always allow for this tool
+- **R** — append an exact-match rule to `~/.abstract/permissions.yaml` with `network: false` and `allow: false`, then ask again for the current invocation
+
+Persisted permission rules live in `~/.abstract/permissions.yaml` and are reloaded on every tool or network check. Each rule is a YAML item with:
+
+```yaml
+- regex: "^npm install react$"
+  network: true
+  allow: true
+```
 
 Pass `--no-permissions` to skip all prompts and allow everything (CI/headless mode).
 
@@ -69,4 +78,3 @@ firejail --net=sandbox node app.js
 
 IMPORTANT: It is your responsibility to create the "sandbox" bridge before running cersei, and ensure it is 
 configured correctly.
-

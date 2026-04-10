@@ -1,8 +1,8 @@
 //! Interactive permission UI for the CLI.
 //!
-//! Implements PermissionPolicy by prompting the user in the terminal.
-//! Caches session-level and permanent allow decisions.
-//! Permanent ("always") decisions are persisted to ~/.abstract/permissions.json.
+//! Session decisions are cached in memory. Persisted decisions live in
+//! `~/.abstract/permissions.yaml` as regex-based rules that are reloaded on
+//! every permission check.
 
 use crate::config;
 use crate::theme::Theme;
@@ -11,47 +11,102 @@ use cersei_tools::PermissionLevel;
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetAttribute, SetForegroundColor};
 use parking_lot::Mutex;
+use regex::Regex;
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 const MAX_REVIEW_PREVIEW_LINES: usize = 5;
 const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
 
 /// Interactive permission policy for the CLI.
-/// Prompts user for Write/Execute/Dangerous tools, auto-allows ReadOnly/None.
+/// Prompts user for Write/Execute/Dangerous tools, auto-allows ReadOnly/None
+/// unless an explicit persisted rule says otherwise.
 pub struct CliPermissionPolicy {
-    /// Tools allowed for the entire session (by composite key).
+    /// Commands allowed for the entire session.
     session_allowed: Mutex<HashSet<String>>,
-    /// Tools denied for the entire session (by composite key).
+    /// Commands denied for the entire session.
     session_denied: Mutex<HashSet<String>>,
-    /// Tools permanently allowed (by composite key), persisted to disk.
-    always_allowed: Mutex<HashSet<String>>,
     theme: Theme,
 }
 
-/// Build a composite permission key from a request.
-/// For tools with a `command` field (Bash, Process), the key includes the command
-/// so that "always allow" is scoped to the specific command, not the tool globally.
-fn permission_key(request: &PermissionRequest) -> String {
-    let command = request
-        .tool_input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if command.is_empty() {
-        request.tool_name.clone()
-    } else {
-        format!("{}:{}", request.tool_name, command)
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PersistedPermissionRule {
+    regex: String,
+    network: bool,
+    allow: bool,
+}
+
+type PersistedPermissions = Vec<PersistedPermissionRule>;
+
+pub(crate) fn command_line_from_request(request: &PermissionRequest) -> String {
+    command_line_from_tool_input(&request.tool_name, &request.tool_input)
+}
+
+pub(crate) fn command_line_from_tool_input(
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> String {
+    let direct_command = || {
+        tool_input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+
+    match tool_name {
+        "Bash" | "bash" | "Process" | "PowerShell" => direct_command(),
+        "Cargo" => tool_input
+            .get("args")
+            .and_then(|value| value.as_str())
+            .map(|args| format!("cargo {args}")),
+        "Npm" => tool_input
+            .get("args")
+            .and_then(|value| value.as_str())
+            .map(|args| format!("npm {args}")),
+        "Npx" => tool_input
+            .get("args")
+            .and_then(|value| value.as_str())
+            .map(|args| format!("npx --yes {args}")),
+        _ => direct_command(),
     }
+    .or_else(|| compact_tool_input(tool_input).map(|input| format!("{tool_name} {input}")))
+    .unwrap_or_else(|| tool_name.to_string())
+}
+
+pub(crate) fn match_persisted_permission(command_line: &str, network: bool) -> Option<bool> {
+    load_persisted_file().into_iter().find_map(|rule| {
+        if rule.network != network {
+            return None;
+        }
+        let regex = Regex::new(&rule.regex).ok()?;
+        regex.is_match(command_line).then_some(rule.allow)
+    })
+}
+
+pub(crate) fn register_command_line(command_line: &str) {
+    let path = config::permissions_path();
+    let mut persisted = load_persisted_file_from(&path);
+    let regex = exact_command_line_regex(command_line);
+
+    if persisted.iter().any(|rule| rule.regex == regex) {
+        return;
+    }
+
+    persisted.push(PersistedPermissionRule {
+        regex,
+        network: false,
+        allow: false,
+    });
+    save_persisted_file_to(&path, &persisted);
 }
 
 impl CliPermissionPolicy {
     pub fn new(theme: &Theme) -> Self {
-        let always_allowed = load_persisted_permissions();
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             session_denied: Mutex::new(HashSet::new()),
-            always_allowed: Mutex::new(always_allowed),
             theme: theme.clone(),
         }
     }
@@ -60,116 +115,128 @@ impl CliPermissionPolicy {
 #[async_trait::async_trait]
 impl PermissionPolicy for CliPermissionPolicy {
     async fn check(&self, request: &PermissionRequest) -> PermissionDecision {
-        // Auto-allow safe operations
+        if request.permission_level == PermissionLevel::Forbidden {
+            return PermissionDecision::Deny("Operation is forbidden".into());
+        }
+
+        let command_line = command_line_from_request(request);
+
+        if let Some(allow) = match_persisted_permission(&command_line, false) {
+            return if allow {
+                PermissionDecision::Allow
+            } else {
+                PermissionDecision::Deny("User denied (registered rule)".into())
+            };
+        }
+
         match request.permission_level {
             PermissionLevel::None | PermissionLevel::ReadOnly => {
                 return PermissionDecision::Allow;
             }
-            PermissionLevel::Forbidden => {
-                return PermissionDecision::Deny("Operation is forbidden".into());
-            }
             _ => {}
         }
 
-        let key = permission_key(request);
-
-        // Check caches
-        if self.always_allowed.lock().contains(&key) {
-            return PermissionDecision::Allow;
-        }
-        if self.session_denied.lock().contains(&key) {
+        if self.session_denied.lock().contains(&command_line) {
             return PermissionDecision::Deny("User denied (session)".into());
         }
-        if self.session_allowed.lock().contains(&key) {
+        if self.session_allowed.lock().contains(&command_line) {
             return PermissionDecision::Allow;
         }
 
-        // Prompt user
         let level_str = format!("{:?}", request.permission_level);
-        let preview = permission_preview(request);
-        let _ = execute!(
-            io::stderr(),
-            Print("\n"),
-            SetForegroundColor(self.theme.permission_accent),
-            SetAttribute(crossterm::style::Attribute::Bold),
-            Print(format!("  Permission required: {}", request.tool_name)),
-            ResetColor,
-            SetAttribute(crossterm::style::Attribute::Reset),
-            Print("\n"),
-            SetForegroundColor(self.theme.dim),
-            Print(format!("  {}", request.description)),
-            ResetColor,
-            Print("\n"),
-        );
-        if let Some(preview) = preview {
+        let preview = permission_preview(request, &command_line);
+
+        loop {
             let _ = execute!(
                 io::stderr(),
-                SetForegroundColor(self.theme.review_text),
-                Print(indent_review_text(&preview)),
+                Print("\n"),
+                SetForegroundColor(self.theme.permission_accent),
+                SetAttribute(crossterm::style::Attribute::Bold),
+                Print(format!("  Permission required: {}", request.tool_name)),
+                ResetColor,
+                SetAttribute(crossterm::style::Attribute::Reset),
+                Print("\n"),
+                SetForegroundColor(self.theme.dim),
+                Print(format!("  {}", request.description)),
                 ResetColor,
                 Print("\n"),
             );
-        }
-        let _ = execute!(
-            io::stderr(),
-            SetForegroundColor(self.theme.dim),
-            Print(format!("  Risk: {level_str}")),
-            ResetColor,
-            Print("\n"),
-            SetForegroundColor(self.theme.permission_accent),
-            Print("  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [A]lways "),
-            ResetColor,
-        );
-        let _ = io::stderr().flush();
-
-        let decision = read_permission_char();
-
-        match decision {
-            'y' | 'Y' | '\n' => PermissionDecision::AllowOnce,
-            's' | 'S' => {
-                self.session_allowed.lock().insert(key);
-                PermissionDecision::AllowForSession
-            }
-            'e' | 'E' => {
-                self.session_denied.lock().insert(key);
-                PermissionDecision::Deny("User denied (session)".into())
-            }
-            'a' | 'A' => {
-                self.always_allowed.lock().insert(key);
-                save_persisted_permissions(&self.always_allowed.lock());
-                PermissionDecision::Allow
-            }
-            'x' | 'X' => {
+            if let Some(preview) = &preview {
                 let _ = execute!(
                     io::stderr(),
-                    SetForegroundColor(self.theme.permission_accent),
-                    Print("\n  Why denied? "),
+                    SetForegroundColor(self.theme.review_text),
+                    Print(indent_review_text(preview)),
                     ResetColor,
+                    Print("\n"),
                 );
-                let _ = io::stderr().flush();
-                let mut explanation = String::new();
-                let _ = io::stdin().read_line(&mut explanation);
-                PermissionDecision::Deny(format!("User denied: {}", explanation.trim()))
             }
-            _ => PermissionDecision::Deny("User denied".into()),
+            let _ = execute!(
+                io::stderr(),
+                SetForegroundColor(self.theme.dim),
+                Print(format!("  Risk: {level_str}")),
+                ResetColor,
+                Print("\n"),
+                SetForegroundColor(self.theme.permission_accent),
+                Print("  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "),
+                ResetColor,
+            );
+            let _ = io::stderr().flush();
+
+            match read_permission_char() {
+                'y' | 'Y' | '\n' => return PermissionDecision::AllowOnce,
+                's' | 'S' => {
+                    self.session_allowed.lock().insert(command_line.clone());
+                    return PermissionDecision::AllowForSession;
+                }
+                'e' | 'E' => {
+                    self.session_denied.lock().insert(command_line.clone());
+                    return PermissionDecision::Deny("User denied (session)".into());
+                }
+                'r' | 'R' => {
+                    register_command_line(&command_line);
+                    continue;
+                }
+                'x' | 'X' => {
+                    let _ = execute!(
+                        io::stderr(),
+                        SetForegroundColor(self.theme.permission_accent),
+                        Print("\n  Why denied? "),
+                        ResetColor,
+                    );
+                    let _ = io::stderr().flush();
+                    let mut explanation = String::new();
+                    let _ = io::stdin().read_line(&mut explanation);
+                    return PermissionDecision::Deny(format!(
+                        "User denied: {}",
+                        explanation.trim()
+                    ));
+                }
+                _ => return PermissionDecision::Deny("User denied".into()),
+            }
         }
     }
 }
 
-fn permission_preview(request: &PermissionRequest) -> Option<String> {
+fn permission_preview(request: &PermissionRequest, command_line: &str) -> Option<String> {
     match request.tool_name.as_str() {
-        "Bash" | "bash" => request
-            .tool_input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(truncate_review_text),
-        "Process" => request
-            .tool_input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(truncate_review_text),
+        "Bash" | "bash" | "Process" | "Cargo" | "Npm" | "Npx" | "PowerShell" => {
+            Some(truncate_review_text(command_line))
+        }
+        _ if command_line != request.tool_name => Some(truncate_review_text(command_line)),
         _ => None,
     }
+}
+
+fn compact_tool_input(tool_input: &serde_json::Value) -> Option<String> {
+    match tool_input {
+        serde_json::Value::Null => None,
+        serde_json::Value::Object(map) if map.is_empty() => None,
+        _ => serde_json::to_string(tool_input).ok(),
+    }
+}
+
+fn exact_command_line_regex(command_line: &str) -> String {
+    format!("^{}$", regex::escape(command_line))
 }
 
 fn truncate_review_text(s: &str) -> String {
@@ -209,7 +276,6 @@ fn indent_review_text(s: &str) -> String {
 }
 
 fn read_permission_char() -> char {
-    // Try to read a single character
     use crossterm::event::{self, Event, KeyCode, KeyEvent};
     use crossterm::terminal;
 
@@ -228,79 +294,35 @@ fn read_permission_char() -> char {
         eprint!("\n");
         result
     } else {
-        // Fallback: read a line
         let mut input = String::new();
         let _ = io::stdin().read_line(&mut input);
         input.trim().chars().next().unwrap_or('n')
     }
 }
 
-// ─── Persistence ──────────────────────────────────────────────────────────
-
-#[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq)]
-struct PersistedPermissions {
-    #[serde(default)]
-    tool_permissions: Vec<String>,
-    #[serde(default)]
-    network_permissions: Vec<String>,
-}
-
-fn load_persisted_file_from(path: &std::path::Path) -> PersistedPermissions {
+fn load_persisted_file_from(path: &Path) -> PersistedPermissions {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
+        .and_then(|content| serde_saphyr::from_str(&content).ok())
         .unwrap_or_default()
 }
 
-fn save_persisted_file_to(path: &std::path::Path, persisted: &PersistedPermissions) {
+fn save_persisted_file_to(path: &Path, persisted: &PersistedPermissions) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(
-        path,
-        serde_json::to_string_pretty(persisted).unwrap_or_default(),
-    );
+    let _ = std::fs::write(path, serde_saphyr::to_string(persisted).unwrap_or_default());
 }
 
 fn load_persisted_file() -> PersistedPermissions {
     load_persisted_file_from(&config::permissions_path())
 }
 
-fn load_persisted_permissions() -> HashSet<String> {
-    load_persisted_file().tool_permissions.into_iter().collect()
-}
-
-fn save_persisted_permissions(allowed: &HashSet<String>) {
-    let path = config::permissions_path();
-    let mut persisted = load_persisted_file_from(&path);
-    persisted.tool_permissions = allowed.iter().cloned().collect();
-    persisted.tool_permissions.sort();
-    save_persisted_file_to(&path, &persisted);
-}
-
-pub fn load_persisted_network_permissions() -> HashSet<String> {
-    load_persisted_file()
-        .network_permissions
-        .into_iter()
-        .collect()
-}
-
-pub fn save_persisted_network_permissions(allowed: &HashSet<String>) {
-    let path = config::permissions_path();
-    let mut persisted = load_persisted_file_from(&path);
-    persisted.network_permissions = allowed.iter().cloned().collect();
-    persisted.network_permissions.sort();
-    save_persisted_file_to(&path, &persisted);
-}
-
-// ─── Tests ────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use cersei_tools::PermissionLevel;
     use serde_json::json;
-    use std::path::PathBuf;
 
     fn make_request(tool_name: &str, input: serde_json::Value) -> PermissionRequest {
         PermissionRequest {
@@ -312,130 +334,143 @@ mod tests {
         }
     }
 
-    // ── permission_key tests ──────────────────────────────────────────────
-
-    #[test]
-    fn key_includes_command_for_bash() {
-        let req = make_request("Bash", json!({"command": "cargo build"}));
-        assert_eq!(permission_key(&req), "Bash:cargo build");
-    }
-
-    #[test]
-    fn key_includes_command_for_process() {
-        let req = make_request("Process", json!({"command": "npm start"}));
-        assert_eq!(permission_key(&req), "Process:npm start");
-    }
-
-    #[test]
-    fn key_is_tool_name_only_when_no_command() {
-        let req = make_request("Write", json!({"file_path": "/tmp/foo.txt"}));
-        assert_eq!(permission_key(&req), "Write");
-    }
-
-    #[test]
-    fn key_is_tool_name_only_for_empty_command() {
-        let req = make_request("Bash", json!({"command": ""}));
-        assert_eq!(permission_key(&req), "Bash");
-    }
-
-    #[test]
-    fn different_commands_produce_different_keys() {
-        let a = make_request("Bash", json!({"command": "cargo build"}));
-        let b = make_request("Bash", json!({"command": "rm -rf /"}));
-        assert_ne!(permission_key(&a), permission_key(&b));
-    }
-
-    // ── persistence round-trip tests ──────────────────────────────────────
-
     fn temp_permissions_path() -> PathBuf {
         let dir = tempfile::tempdir().unwrap();
-        // Leak the tempdir so it stays alive for the test
-        let path = dir.path().join("permissions.json");
+        let path = dir.path().join("permissions.yaml");
         std::mem::forget(dir);
         path
     }
 
     #[test]
-    fn load_from_missing_file_returns_empty() {
-        let path = PathBuf::from("/tmp/nonexistent_test_permissions_42.json");
-        let loaded = load_persisted_file_from(&path);
-        assert_eq!(loaded, PersistedPermissions::default());
+    fn command_line_uses_literal_bash_command() {
+        let req = make_request("Bash", json!({"command": "cargo build"}));
+        assert_eq!(command_line_from_request(&req), "cargo build");
     }
 
     #[test]
-    fn round_trip_tool_permissions() {
-        let path = temp_permissions_path();
-        let mut perms = PersistedPermissions::default();
-        perms.tool_permissions = vec!["Bash:cargo build".into(), "Process:npm test".into()];
-        save_persisted_file_to(&path, &perms);
-
-        let loaded = load_persisted_file_from(&path);
-        assert_eq!(loaded.tool_permissions, perms.tool_permissions);
-        assert!(loaded.network_permissions.is_empty());
+    fn command_line_reconstructs_npm_command() {
+        let req = make_request("Npm", json!({"args": "install react"}));
+        assert_eq!(command_line_from_request(&req), "npm install react");
     }
 
     #[test]
-    fn round_trip_network_permissions() {
-        let path = temp_permissions_path();
-        let mut perms = PersistedPermissions::default();
-        perms.network_permissions = vec!["Npm:npm install react".into()];
-        save_persisted_file_to(&path, &perms);
-
-        let loaded = load_persisted_file_from(&path);
-        assert_eq!(loaded.network_permissions, perms.network_permissions);
-        assert!(loaded.tool_permissions.is_empty());
+    fn command_line_reconstructs_npx_command() {
+        let req = make_request("Npx", json!({"args": "eslint ."}));
+        assert_eq!(command_line_from_request(&req), "npx --yes eslint .");
     }
 
     #[test]
-    fn saving_tool_permissions_preserves_network_permissions() {
-        let path = temp_permissions_path();
-
-        // First save network permissions
-        let mut perms = PersistedPermissions::default();
-        perms.network_permissions = vec!["Npm:npm install".into()];
-        save_persisted_file_to(&path, &perms);
-
-        // Now simulate saving tool permissions (read-modify-write)
-        let mut loaded = load_persisted_file_from(&path);
-        loaded.tool_permissions = vec!["Bash:cargo build".into()];
-        loaded.tool_permissions.sort();
-        save_persisted_file_to(&path, &loaded);
-
-        // Both should be present
-        let final_state = load_persisted_file_from(&path);
-        assert_eq!(final_state.tool_permissions, vec!["Bash:cargo build"]);
-        assert_eq!(final_state.network_permissions, vec!["Npm:npm install"]);
-    }
-
-    #[test]
-    fn saved_permissions_are_sorted() {
-        let path = temp_permissions_path();
-        let mut perms = PersistedPermissions::default();
-        perms.tool_permissions = vec!["Process:z".into(), "Bash:a".into(), "Bash:m".into()];
-        perms.tool_permissions.sort();
-        save_persisted_file_to(&path, &perms);
-
-        let loaded = load_persisted_file_from(&path);
+    fn command_line_falls_back_to_tool_and_json() {
+        let req = make_request("Write", json!({"file_path": "/tmp/foo.txt"}));
         assert_eq!(
-            loaded.tool_permissions,
-            vec!["Bash:a", "Bash:m", "Process:z"]
+            command_line_from_request(&req),
+            r#"Write {"file_path":"/tmp/foo.txt"}"#
         );
     }
 
     #[test]
-    fn malformed_json_returns_empty() {
-        let path = temp_permissions_path();
-        std::fs::write(&path, "not valid json {{{").unwrap();
+    fn load_from_missing_file_returns_empty() {
+        let path = PathBuf::from("/tmp/nonexistent_test_permissions_42.yaml");
         let loaded = load_persisted_file_from(&path);
-        assert_eq!(loaded, PersistedPermissions::default());
+        assert!(loaded.is_empty());
     }
 
     #[test]
-    fn partial_json_loads_with_defaults() {
+    fn yaml_round_trip_preserves_rule_order() {
         let path = temp_permissions_path();
-        std::fs::write(&path, r#"{"tool_permissions": ["Bash:ls"]}"#).unwrap();
+        let perms = vec![
+            PersistedPermissionRule {
+                regex: "^cargo build$".into(),
+                network: false,
+                allow: true,
+            },
+            PersistedPermissionRule {
+                regex: "^npm install react$".into(),
+                network: true,
+                allow: false,
+            },
+        ];
+
+        save_persisted_file_to(&path, &perms);
         let loaded = load_persisted_file_from(&path);
-        assert_eq!(loaded.tool_permissions, vec!["Bash:ls"]);
-        assert!(loaded.network_permissions.is_empty());
+
+        assert_eq!(loaded, perms);
+    }
+
+    #[test]
+    fn malformed_yaml_returns_empty() {
+        let path = temp_permissions_path();
+        std::fs::write(&path, "not: [valid").unwrap();
+
+        let loaded = load_persisted_file_from(&path);
+
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn invalid_regex_rule_is_ignored() {
+        let path = temp_permissions_path();
+        let perms = vec![
+            PersistedPermissionRule {
+                regex: "(".into(),
+                network: false,
+                allow: true,
+            },
+            PersistedPermissionRule {
+                regex: "^cargo build$".into(),
+                network: false,
+                allow: false,
+            },
+        ];
+        save_persisted_file_to(&path, &perms);
+
+        let loaded = load_persisted_file_from(&path);
+        let decision = loaded.into_iter().find_map(|rule| {
+            if rule.network {
+                return None;
+            }
+            let regex = Regex::new(&rule.regex).ok()?;
+            regex.is_match("cargo build").then_some(rule.allow)
+        });
+
+        assert_eq!(decision, Some(false));
+    }
+
+    #[test]
+    fn first_matching_rule_wins() {
+        let rules = vec![
+            PersistedPermissionRule {
+                regex: "^cargo .*$".into(),
+                network: false,
+                allow: false,
+            },
+            PersistedPermissionRule {
+                regex: "^cargo build$".into(),
+                network: false,
+                allow: true,
+            },
+        ];
+        let path = temp_permissions_path();
+        save_persisted_file_to(&path, &rules);
+
+        let matched = load_persisted_file_from(&path)
+            .into_iter()
+            .find_map(|rule| {
+                if rule.network {
+                    return None;
+                }
+                let regex = Regex::new(&rule.regex).ok()?;
+                regex.is_match("cargo build").then_some(rule.allow)
+            });
+
+        assert_eq!(matched, Some(false));
+    }
+
+    #[test]
+    fn exact_regex_is_escaped_and_anchored() {
+        assert_eq!(
+            exact_command_line_regex("cargo test -- --exact foo::bar"),
+            r"^cargo test \-\- \-\-exact foo::bar$"
+        );
     }
 }

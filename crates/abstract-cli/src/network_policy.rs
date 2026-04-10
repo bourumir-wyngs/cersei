@@ -6,14 +6,9 @@
 //!
 //!   Network access: Npm  (requests: local network)
 //!   npm install react
-//!   [Y]es  [N]o  [S]ession  [A]lways
-//!
-//! Y / Enter = allow the requested access level, once
-//! N         = block (run sandboxed with --net=none), once
-//! S         = allow for the rest of the session
-//! A         = always allow (persisted across restarts)
+//!   [Y]es  [N]o  n[E]ver  [S]ession  [R]egister
 
-use crate::permissions::{load_persisted_network_permissions, save_persisted_network_permissions};
+use crate::permissions::{match_persisted_permission, register_command_line};
 use crate::theme::Theme;
 use cersei_tools::network_policy::{NetworkAccess, NetworkPolicy};
 use crossterm::execute;
@@ -28,26 +23,14 @@ const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
 pub struct CliNetworkPolicy {
     session_allowed: Mutex<HashSet<String>>,
     session_denied: Mutex<HashSet<String>>,
-    always_allowed: Mutex<HashSet<String>>,
     theme: Theme,
-}
-
-/// Build a composite key for network permission: tool_name + command.
-fn network_key(tool_name: &str, command: &str) -> String {
-    if command.is_empty() {
-        tool_name.to_string()
-    } else {
-        format!("{tool_name}:{command}")
-    }
 }
 
 impl CliNetworkPolicy {
     pub fn new(theme: &Theme) -> Self {
-        let always_allowed = load_persisted_network_permissions();
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             session_denied: Mutex::new(HashSet::new()),
-            always_allowed: Mutex::new(always_allowed),
             theme: theme.clone(),
         }
     }
@@ -61,69 +44,71 @@ impl NetworkPolicy for CliNetworkPolicy {
         command: &str,
         requested: NetworkAccess,
     ) -> NetworkAccess {
-        // Explicit no-network request — honor it without prompting.
         if requested == NetworkAccess::Blocked {
             return NetworkAccess::Blocked;
         }
 
-        let key = network_key(tool_name, command);
-
-        // Check permanent then session cache.
-        if self.always_allowed.lock().contains(&key) {
-            return requested;
+        if let Some(allow) = match_persisted_permission(command, true) {
+            return if allow {
+                requested
+            } else {
+                NetworkAccess::Blocked
+            };
         }
-        if self.session_denied.lock().contains(&key) {
+
+        if self.session_denied.lock().contains(command) {
             return NetworkAccess::Blocked;
         }
-        if self.session_allowed.lock().contains(&key) {
+        if self.session_allowed.lock().contains(command) {
             return requested;
         }
 
-        // Prompt user.
         let preview = truncate_review_text(command);
         let access_label = match requested {
             NetworkAccess::Full => "full network",
             NetworkAccess::Local => "local network",
             NetworkAccess::Blocked => unreachable!(),
         };
-        let _ = execute!(
-            io::stderr(),
-            Print("\n"),
-            SetForegroundColor(self.theme.permission_accent),
-            SetAttribute(Attribute::Bold),
-            Print(format!(
-                "  Network access: {}  ({})",
-                tool_name, access_label
-            )),
-            ResetColor,
-            SetAttribute(Attribute::Reset),
-            Print("\n"),
-            SetForegroundColor(self.theme.review_text),
-            Print(indent_review_text(&preview)),
-            ResetColor,
-            Print("\n"),
-            SetForegroundColor(self.theme.permission_accent),
-            Print("  [Y]es  [N]o  n[E]ver  [S]ession  [A]lways "),
-            ResetColor,
-        );
-        let _ = io::stderr().flush();
 
-        match read_char() {
-            'y' | 'Y' | '\n' => requested,
-            's' | 'S' => {
-                self.session_allowed.lock().insert(key);
-                requested
+        loop {
+            let _ = execute!(
+                io::stderr(),
+                Print("\n"),
+                SetForegroundColor(self.theme.permission_accent),
+                SetAttribute(Attribute::Bold),
+                Print(format!(
+                    "  Network access: {}  ({})",
+                    tool_name, access_label
+                )),
+                ResetColor,
+                SetAttribute(Attribute::Reset),
+                Print("\n"),
+                SetForegroundColor(self.theme.review_text),
+                Print(indent_review_text(&preview)),
+                ResetColor,
+                Print("\n"),
+                SetForegroundColor(self.theme.permission_accent),
+                Print("  [Y]es  [N]o  n[E]ver  [S]ession  [R]egister "),
+                ResetColor,
+            );
+            let _ = io::stderr().flush();
+
+            match read_char() {
+                'y' | 'Y' | '\n' => return requested,
+                's' | 'S' => {
+                    self.session_allowed.lock().insert(command.to_string());
+                    return requested;
+                }
+                'e' | 'E' => {
+                    self.session_denied.lock().insert(command.to_string());
+                    return NetworkAccess::Blocked;
+                }
+                'r' | 'R' => {
+                    register_command_line(command);
+                    continue;
+                }
+                _ => return NetworkAccess::Blocked,
             }
-            'e' | 'E' => {
-                self.session_denied.lock().insert(key);
-                NetworkAccess::Blocked
-            }
-            'a' | 'A' => {
-                self.always_allowed.lock().insert(key);
-                save_persisted_network_permissions(&self.always_allowed.lock());
-                requested
-            }
-            _ => NetworkAccess::Blocked,
         }
     }
 }
