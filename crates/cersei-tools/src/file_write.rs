@@ -63,7 +63,8 @@ impl Tool for FileWriteTool {
                 if let Some(history) = ctx.extensions.get::<FileHistory>() {
                     history.record_change(&path, previous_content.as_deref(), &input.content, "write");
                 }
-                ToolResult::success(format!("File created successfully at: {}", path.display()))
+                let char_count = input.content.chars().count();
+                ToolResult::success(format!("Wrote {char_count} chars to: {}", path.display()))
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }

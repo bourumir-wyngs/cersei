@@ -316,16 +316,8 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(truncate_review_text)
             .unwrap_or_default(),
-        "Read" | "file_read" => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "Write" | "file_write" => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
+        "Read" | "file_read" => read_tool_summary(input),
+        "Write" | "file_write" => write_tool_summary(input),
         "Edit" | "file_edit" | "Sed" | "sed" => input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -410,5 +402,83 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max])
+    }
+}
+
+fn read_tool_summary(input: &serde_json::Value) -> String {
+    let file_path = input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+    let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000);
+    let start_line = offset + 1;
+    let end_line = if limit == 0 {
+        start_line
+    } else {
+        start_line.saturating_add(limit.saturating_sub(1))
+    };
+
+    format!("{file_path} lines {start_line}-{end_line}")
+}
+
+fn write_tool_summary(input: &serde_json::Value) -> String {
+    let file_path = input
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let char_count = input
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(|content| content.chars().count())
+        .unwrap_or(0);
+
+    format!("{file_path} {char_count} chars")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_summary_includes_default_requested_range() {
+        let summary = tool_input_summary("Read", &serde_json::json!({"file_path": "src/main.rs"}));
+        assert_eq!(summary, "src/main.rs lines 1-2000");
+    }
+
+    #[test]
+    fn read_summary_includes_explicit_requested_range() {
+        let summary = tool_input_summary(
+            "Read",
+            &serde_json::json!({"file_path": "src/main.rs", "offset": 10, "limit": 25}),
+        );
+        assert_eq!(summary, "src/main.rs lines 11-35");
+    }
+
+    #[test]
+    fn read_summary_handles_zero_limit() {
+        let summary = tool_input_summary(
+            "Read",
+            &serde_json::json!({"file_path": "src/main.rs", "offset": 4, "limit": 0}),
+        );
+        assert_eq!(summary, "src/main.rs lines 5-5");
+    }
+
+    #[test]
+    fn write_summary_includes_char_count() {
+        let summary = tool_input_summary(
+            "Write",
+            &serde_json::json!({"file_path": "src/main.rs", "content": "hello"}),
+        );
+        assert_eq!(summary, "src/main.rs 5 chars");
+    }
+
+    #[test]
+    fn write_summary_counts_unicode_chars() {
+        let summary = tool_input_summary(
+            "Write",
+            &serde_json::json!({"file_path": "src/main.rs", "content": "aé🙂"}),
+        );
+        assert_eq!(summary, "src/main.rs 3 chars");
     }
 }
