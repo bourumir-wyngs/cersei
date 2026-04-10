@@ -1,6 +1,7 @@
 //! File read tool.
 
 use super::*;
+use crate::file_history::FileHistory;
 use serde::Deserialize;
 
 pub struct FileReadTool;
@@ -24,7 +25,7 @@ impl Tool for FileReadTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
         struct Input {
             file_path: String,
@@ -44,6 +45,11 @@ impl Tool for FileReadTool {
 
         match tokio::fs::read_to_string(path).await {
             Ok(content) => {
+                // Track the read in file history
+                if let Some(history) = ctx.extensions.get::<FileHistory>() {
+                    history.record_read(&path.to_path_buf());
+                }
+
                 let lines: Vec<&str> = content.lines().collect();
                 let offset = input.offset.unwrap_or(0);
                 let limit = input.limit.unwrap_or(2000);

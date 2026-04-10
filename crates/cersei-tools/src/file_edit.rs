@@ -1,6 +1,7 @@
 //! File edit tool: performs exact string replacements or line-range replacements.
 
 use super::*;
+use crate::file_history::FileHistory;
 use serde::Deserialize;
 
 pub struct FileEditTool;
@@ -69,7 +70,7 @@ impl Tool for FileEditTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
         struct Input {
             file_path: String,
@@ -93,6 +94,11 @@ impl Tool for FileEditTool {
             Ok(c) => c,
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
+
+        // Snapshot before mutation
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            history.snapshot_before_write(&path.to_path_buf(), &content, "edit");
+        }
 
         // Dispatch to the appropriate mode
         if let Some(start_line) = input.start_line {

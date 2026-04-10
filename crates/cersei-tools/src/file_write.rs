@@ -1,6 +1,7 @@
 //! File write tool.
 
 use super::*;
+use crate::file_history::FileHistory;
 use serde::Deserialize;
 
 pub struct FileWriteTool;
@@ -23,7 +24,7 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
         struct Input {
             file_path: String,
@@ -36,6 +37,14 @@ impl Tool for FileWriteTool {
         };
 
         let path = std::path::Path::new(&input.file_path);
+
+        // Snapshot existing content before overwriting
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            if let Ok(existing) = tokio::fs::read_to_string(path).await {
+                history.snapshot_before_write(&path.to_path_buf(), &existing, "write");
+            }
+        }
+
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 return ToolResult::error(format!("Failed to create directories: {}", e));

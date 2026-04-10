@@ -10,6 +10,7 @@ pub mod cas;
 pub mod config_tool;
 pub mod cron;
 pub mod file_history;
+pub mod file_history_tool;
 pub mod file_edit;
 pub mod file_read;
 pub mod file_write;
@@ -401,6 +402,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(grep_tool::GrepTool),
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
+        Box::new(file_history_tool::FileHistoryTool),
     ]
 }
 
