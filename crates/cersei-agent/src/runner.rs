@@ -11,6 +11,42 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+const END_TURN_SUMMARY_PROMPT: &str = "Briefly summarize your progress, results, and next steps.";
+
+fn assistant_message_has_progress_summary(message: &Message) -> bool {
+    let text = message.get_all_text();
+    if text.trim().is_empty() {
+        return false;
+    }
+
+    let lower = text.to_lowercase();
+    if lower.contains("summary:") || lower.contains("progress:") || lower.contains("results:") || lower.contains("next steps:") || lower.contains("next:") {
+        return true;
+    }
+
+    let bullets = text
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("- ") || trimmed.starts_with("* ")
+        })
+        .count();
+    if bullets >= 2 {
+        return true;
+    }
+
+    let keywords = [
+        "completed", "done", "implemented", "verified", "next step", "remaining", "progress",
+    ];
+    let mut matches = 0;
+    for kw in &keywords {
+        if lower.contains(kw) {
+            matches += 1;
+        }
+    }
+    matches >= 2
+}
+
 // ─── Thinking block stripping ────────────────────────────────────────────────
 
 /// Remove Thinking and RedactedThinking blocks from loaded session history.
@@ -397,7 +433,17 @@ pub async fn run_agent_streaming(
 
         // Handle stop reason
         match &response.stop_reason {
-            StopReason::EndTurn => break,
+            StopReason::EndTurn => {
+                if !auto_summary_requested && !assistant_message_has_progress_summary(&response.message) {
+                    agent
+                        .messages
+                        .lock()
+                        .push(Message::user(END_TURN_SUMMARY_PROMPT));
+                    auto_summary_requested = true;
+                    continue;
+                }
+                break;
+            }
             StopReason::ToolUse => {
                 // Process tool calls
                 let tool_use_blocks: Vec<(String, String, serde_json::Value)> = response
@@ -786,5 +832,118 @@ mod tests {
         assert_eq!(output.tool_calls.len(), 1);
         assert!(output.tool_calls[0].is_error);
         assert!(output.tool_calls[0].result.contains("preflight blocked"));
+    }
+
+    struct SummaryProvider {
+        responses: Vec<&'static str>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for SummaryProvider {
+        fn name(&self) -> &str {
+            "summary-test"
+        }
+
+        fn context_window(&self, _model: &str) -> u64 {
+            4096
+        }
+
+        fn capabilities(&self, _model: &str) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tool_use: false,
+                ..Default::default()
+            }
+        }
+
+        async fn complete(&self, request: CompletionRequest) -> cersei_types::Result<CompletionStream> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let response_text = self.responses.get(call).copied().unwrap_or("done");
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+
+            if call > 0 {
+                let last_user = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == Role::User)
+                    .map(|m| m.get_all_text())
+                    .unwrap_or_default();
+                assert_eq!(last_user, END_TURN_SUMMARY_PROMPT);
+            }
+
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamEvent::MessageStart {
+                        id: format!("summary-{call}"),
+                        model: "test".into(),
+                    })
+                    .await;
+                let _ = tx
+                    .send(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        block_type: "text".into(),
+                        id: None,
+                        name: None,
+                        thought_signature: None,
+                    })
+                    .await;
+                let _ = tx
+                    .send(StreamEvent::TextDelta {
+                        index: 0,
+                        text: response_text.into(),
+                    })
+                    .await;
+                let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
+                let _ = tx
+                    .send(StreamEvent::MessageDelta {
+                        stop_reason: Some(StopReason::EndTurn),
+                        usage: Some(Usage::default()),
+                    })
+                    .await;
+                let _ = tx.send(StreamEvent::MessageStop).await;
+            });
+
+            Ok(CompletionStream::new(rx))
+        }
+    }
+
+    #[tokio::test]
+    async fn end_turn_without_summary_triggers_follow_up_prompt() {
+        let agent = Agent::builder()
+            .provider(SummaryProvider {
+                responses: vec!["done", "Summary: implemented validator\nNext steps: add more tests"],
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .working_dir(std::env::temp_dir())
+            .model("test-model")
+            .max_turns(4)
+            .build()
+            .unwrap();
+
+        let output = run_agent(&agent, "test").await.unwrap();
+
+        assert_eq!(output.turns, 2);
+        assert!(output.message.get_all_text().contains("Summary:"));
+    }
+
+    #[tokio::test]
+    async fn end_turn_with_summary_does_not_trigger_follow_up_prompt() {
+        let agent = Agent::builder()
+            .provider(SummaryProvider {
+                responses: vec!["Summary: implemented validator\nNext steps: add more tests"],
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .working_dir(std::env::temp_dir())
+            .model("test-model")
+            .max_turns(4)
+            .build()
+            .unwrap();
+
+        let output = run_agent(&agent, "test").await.unwrap();
+
+        assert_eq!(output.turns, 1);
+        assert!(output.message.get_all_text().contains("Summary:"));
     }
 }
