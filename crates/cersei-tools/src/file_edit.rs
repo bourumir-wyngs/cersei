@@ -726,7 +726,7 @@ fn position_to_offset(
     column: usize,
 ) -> std::result::Result<usize, String> {
     if line == 0 || column == 0 {
-        return Err("Lines and columns are 1-based.".into());
+        return Err("String indices are 1 based.".into());
     }
 
     if line == index.lines.len() + 1 {
