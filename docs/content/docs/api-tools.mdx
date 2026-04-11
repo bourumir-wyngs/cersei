@@ -110,6 +110,41 @@ Convenience functions that return pre-configured tool collections:
 | `cersei::tools::orchestration()` | 9 | SendMessage, Tasks (6), Worktree (2) |
 | `cersei::tools::none()` | 0 | Empty (for chat-only agents) |
 
+## Sed Tool
+
+`SedTool` uses the real GNU `sed` binary from the host OS, not a Rust reimplementation. The tool always executes sed as `sed -E --sandbox`, so standard GNU sed addresses, ranges, substitutions, groups, and commands work, while sed's own file-access commands are blocked.
+
+- Pass only the sed program in `script`.
+- Do not include `sed`, `-i`, extra filenames, shell pipelines, or redirection.
+- The tool picks the file from `file_path`, captures sed's stdout, writes that back to the file, and returns a unified diff.
+- `quiet=true` is GNU sed `-n`. Use it only when your script explicitly prints the desired output with commands like `p`.
+- `null_data=true` is GNU sed `-z` for NUL-delimited data.
+- `e`, `r`, and `w` are rejected because `--sandbox` is enforced on every call.
+
+Examples:
+
+```json
+{
+  "file_path": "src/lib.rs",
+  "script": "s/foo/bar/g"
+}
+```
+
+```json
+{
+  "file_path": "src/lib.rs",
+  "script": "1,20s/^/\\/\\/ /"
+}
+```
+
+```json
+{
+  "file_path": "data.bin",
+  "script": "s/old/new/g",
+  "null_data": true
+}
+```
+
 ### Tool Catalog
 
 **Filesystem (6 tools)**

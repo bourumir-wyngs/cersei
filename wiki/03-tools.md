@@ -35,9 +35,31 @@ cersei::tools::none()         // empty (pure chat, no tools)
 | `Read` | ReadOnly | Read files with line numbers, offset/limit support |
 | `Write` | Write | Create or overwrite files, auto-creates parent directories |
 | `Edit` | Write | Exact string replacement, uniqueness check, `replace_all` option |
+| `Sed` | Write | Run a real GNU `sed -E --sandbox` program against one file and write stdout back to that file |
 | `Glob` | ReadOnly | Find files by glob pattern (`**/*.rs`, `src/**/*.ts`) |
 | `Grep` | ReadOnly | Search with regex via `rg` (falls back to `grep`) |
 | `Bash` | Execute | Run shell commands with timeout, persistent cwd/env across calls |
+
+### Sed
+
+`Sed` is the real GNU sed tool from the operating system. It is always invoked as `sed -E --sandbox`, so normal GNU sed syntax works, but sed's own file-access commands are disabled.
+
+- Pass only the sed script in `script`.
+- Do not include `sed`, `-i`, extra filenames, shell redirection, or pipelines.
+- The tool uses `file_path` to choose the target file, captures stdout, writes that back to the file, and returns a diff.
+- `quiet=true` gives `-n` behavior, so your script must print explicitly if you still want output.
+- `null_data=true` gives `-z` behavior for NUL-delimited data.
+- `e`, `r`, and `w` are blocked because `--sandbox` is always enforced.
+
+Examples:
+
+```json
+{ "file_path": "src/main.rs", "script": "s/foo/bar/g" }
+```
+
+```json
+{ "file_path": "src/main.rs", "script": "1,20s/^/\\/\\/ /" }
+```
 
 ### Bash — Shell State Persistence
 

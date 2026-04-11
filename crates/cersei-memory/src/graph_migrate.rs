@@ -40,7 +40,6 @@ mod queries {
             version, now, code_ver
         )
     }
-
 }
 
 // ─── Version check ─────────────────────────────────────────────────────────

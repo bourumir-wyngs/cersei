@@ -1,4 +1,4 @@
-//! Exact-position, sed-backed, and ed-backed file editing with one-step session-local revert.
+//! Exact-position, GNU sed-backed, and ed-backed file editing with one-step session-local revert.
 
 use super::*;
 use crate::file_history::{unified_diff, FileHistory};
@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use tempfile::NamedTempFile;
+use tokio::process::Command;
 
 #[derive(Debug, Clone)]
 struct LastEditSnapshot {
@@ -22,6 +23,8 @@ struct LastEditSnapshot {
 
 static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapshot>> =
     Lazy::new(dashmap::DashMap::new);
+static GNU_SED_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_gnu_sed);
+static FIREJAIL_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_firejail);
 
 pub struct EditTool;
 pub struct SedTool;
@@ -180,11 +183,13 @@ impl Tool for SedTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a sed script to a file using sed-rs (Rust regex / ERE). NOTE: unlike standard GNU \
-         sed, characters like `{`, `}`, `(`, `)`, `+`, and `?` are special by default and must \
-         be escaped (e.g., `\\{`) to match literals. The file is checkpointed before the write, \
-         the result is written back to disk, and the tool returns a unified diff plus the \
-         reminder \"use 'revert' command if wrong\"."
+        "Apply a real GNU sed script to one workspace file. The tool invokes the system `sed` \
+         binary as `sed -E --sandbox`, so standard GNU sed commands, addresses, ranges, and \
+         capture groups work, but file-access commands such as `e`, `r`, and `w` are disabled. \
+         Provide only the sed args in `script`; do not include `sed`, `-i`, or filenames \
+         because the tool supplies the target file and writes the resulting stdout back to it. \
+         Use `quiet=true` for `-n` semantics when the script prints explicitly, and `null_data=true` \
+         for `-z` / NUL-delimited processing. The tool returns a unified diff plus the reminder \"use 'revert' command if wrong\"."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -205,16 +210,16 @@ impl Tool for SedTool {
                 },
                 "script": {
                     "type": "string",
-                    "description": "Sed script using Extended Regular Expressions (ERE), e.g. `s/foo/bar/g`. Escape {, }, (, ), +, ? to match as literals!"
+                    "description": "Sed program only, executed as real GNU `sed -E --sandbox`. Use normal GNU sed syntax such as `s/foo/bar/g`, `1,20s/^/\\/\\/ /`, `/BEGIN/,/END/d`, or `s/(foo)/[\\\\1]/g`. Do not include the `sed` command itself, `-i`, extra filenames, or shell redirection. `e`, `r`, and `w` commands are rejected by `--sandbox`."
                 },
                 "quiet": {
                     "type": "boolean",
-                    "description": "Suppress automatic printing of the pattern space (`-n` behavior)",
+                    "description": "Equivalent to GNU sed `-n`. When true, only explicit print commands such as `p` contribute to the rewritten file contents.",
                     "default": false
                 },
                 "null_data": {
                     "type": "boolean",
-                    "description": "Use NUL as the record delimiter (`-z` behavior)",
+                    "description": "Equivalent to GNU sed `-z`; process NUL-delimited records instead of newline-delimited lines.",
                     "default": false
                 }
             },
@@ -247,25 +252,28 @@ impl Tool for SedTool {
             Ok(bytes) => bytes,
             Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
         };
-        let original_text = String::from_utf8_lossy(&original_bytes).into_owned();
-
-        let mut sed = match sed_rs::Sed::new(&input.script) {
-            Ok(sed) => sed,
-            Err(e) => return ToolResult::error(format!("Invalid sed script: {}\n\nNOTE: Unlike standard GNU sed, this tool uses Rust regex (Extended Regular Expressions). Characters like `{{`, `}}`, `(`, `)`, `+`, and `?` are special by default and must be escaped (e.g., `\\{{`) to match literals in code. To use capture groups, do NOT escape the parentheses: use `(...)` instead of `\\(...\\)`.", e)),
-        };
-        sed.quiet(input.quiet).null_data(input.null_data);
-
-        let updated_text = match sed.eval_bytes(&original_bytes) {
+        let updated_bytes = match run_sed_script(
+            ctx,
+            &path,
+            &input.script,
+            input.quiet,
+            input.null_data,
+            &original_bytes,
+        )
+        .await
+        {
             Ok(output) => output,
-            Err(e) => return ToolResult::error(format!("Failed to run sed script: {}", e)),
+            Err(e) => return ToolResult::error(e),
         };
+        let original_text = String::from_utf8_lossy(&original_bytes).into_owned();
+        let updated_text = String::from_utf8_lossy(&updated_bytes).into_owned();
 
-        if updated_text.as_bytes() == original_bytes.as_slice() {
+        if updated_bytes == original_bytes {
             return ToolResult::success(format!(
                 "sed script produced no changes in {}.",
                 path.display()
             ));
-        }
+        };
 
         let snapshot = LastEditSnapshot {
             file_path: path.clone(),
@@ -274,7 +282,7 @@ impl Tool for SedTool {
         let previous_snapshot =
             LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
 
-        if let Err(e) = write_bytes(&path, updated_text.as_bytes()).await {
+        if let Err(e) = write_bytes(&path, &updated_bytes).await {
             restore_previous_snapshot(&ctx.session_id, previous_snapshot);
             return ToolResult::error(format!("Failed to write file: {}", e));
         }
@@ -308,7 +316,7 @@ impl Tool for EdTool {
         "Apply an ed-like script to a file using the add-ed crate. The tool automatically loads \
          the target file into the editor, applies the script, writes the final buffer back to \
          disk, returns a unified diff, and supports the shared `revert` command. NOTE: this is \
-         not GNU/POSIX ed. add-ed tracks the last selected span rather than a single current \
+         not GNU ed or POSIX ed. add-ed tracks the last selected span rather than a single current \
          line, so commands that rely on `.` or omitted addresses can behave differently from \
          classic ed; prefer explicit addresses and ranges whenever possible. Other known \
          differences: `g`/`v`/`G`/`V` take command lists in input mode terminated by the regex \
@@ -450,14 +458,13 @@ impl Tool for RevertTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let snapshot = match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
-            Some(entry) => entry.clone(),
-            None => {
-                return ToolResult::error(
+        let snapshot =
+            match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
+                Some(entry) => entry.clone(),
+                None => return ToolResult::error(
                     "No edit snapshot is available to revert. Run `Edit`, `Sed`, or `Ed` first.",
-                )
-            }
-        };
+                ),
+            };
 
         if let Some(requested) = input.file_path.as_ref() {
             let requested_path = match resolve_workspace_path(ctx, requested, false) {
@@ -669,6 +676,159 @@ fn run_ed_script(
     }
 
     current_ed_buffer_to_text(&ed)
+}
+
+async fn run_sed_script(
+    ctx: &ToolContext,
+    path: &Path,
+    script: &str,
+    quiet: bool,
+    null_data: bool,
+    original_bytes: &[u8],
+) -> std::result::Result<Vec<u8>, String> {
+    let staged_dir = tempfile::Builder::new()
+        .prefix("cersei-sed-")
+        .tempdir()
+        .map_err(|e| format!("Failed to create sed staging directory: {}", e))?;
+    let file_name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| std::ffi::OsStr::new("input"));
+    let staged_path = staged_dir.path().join(file_name);
+
+    tokio::fs::write(&staged_path, original_bytes)
+        .await
+        .map_err(|e| format!("Failed to stage file for sed: {}", e))?;
+
+    let mut cmd = sandboxed_sed_command(ctx, &staged_path, script, quiet, null_data)?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to launch sandboxed sed: {}", e))?;
+
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            match output.status.code() {
+                Some(code) => format!("exit status {}", code),
+                None => "terminated by signal".to_string(),
+            }
+        } else {
+            stderr
+        };
+        Err(format!("Failed to run sed script: {}", detail))
+    }
+}
+
+fn sandboxed_sed_command(
+    ctx: &ToolContext,
+    staged_path: &Path,
+    script: &str,
+    quiet: bool,
+    null_data: bool,
+) -> std::result::Result<Command, String> {
+    let sed = gnu_sed_binary()?;
+    let firejail = firejail_binary()?;
+    let mut cmd = Command::new(firejail);
+
+    cmd.arg("--quiet");
+    cmd.arg("--noprofile");
+    cmd.arg("--net=none");
+    cmd.arg("--private");
+    cmd.arg("--private-cache");
+    cmd.arg("--private-bin=sed");
+    cmd.arg("--private-dev");
+    cmd.arg("--private-cwd=/");
+
+    if let Ok(working_dir) = ctx.working_dir.canonicalize() {
+        cmd.arg(format!("--blacklist={}", working_dir.display()));
+    }
+
+    cmd.arg("--caps.drop=all");
+    cmd.arg("--nonewprivs");
+    cmd.arg("--nodbus");
+    cmd.arg("--x11=none");
+    cmd.arg("--noinput");
+    cmd.arg("--nosound");
+    cmd.arg("--nou2f");
+    cmd.arg("--shell=none");
+    cmd.arg("--");
+    cmd.arg(sed);
+    cmd.arg("-E");
+    cmd.arg("--sandbox");
+    if quiet {
+        cmd.arg("--quiet");
+    }
+    if null_data {
+        cmd.arg("--null-data");
+    }
+    cmd.arg("--expression");
+    cmd.arg(script);
+    cmd.arg("--");
+    cmd.arg(staged_path);
+    Ok(cmd)
+}
+
+fn gnu_sed_binary() -> std::result::Result<PathBuf, String> {
+    match &*GNU_SED_BINARY {
+        Ok(path) => Ok(path.clone()),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn firejail_binary() -> std::result::Result<PathBuf, String> {
+    match &*FIREJAIL_BINARY {
+        Ok(path) => Ok(path.clone()),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn probe_gnu_sed() -> std::result::Result<PathBuf, String> {
+    let sed = which::which("sed")
+        .map_err(|_| "GNU sed not found in PATH; install `sed` on the host OS.".to_string())?;
+    let output = std::process::Command::new(&sed)
+        .arg("--help")
+        .output()
+        .map_err(|e| format!("Failed to probe sed at {}: {}", sed.display(), e))?;
+
+    let help = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() || !help.contains("--sandbox") {
+        return Err(format!(
+            "System sed at {} does not support `--sandbox`; GNU sed on Ubuntu is required.",
+            sed.display()
+        ));
+    }
+
+    Ok(sed)
+}
+
+fn probe_firejail() -> std::result::Result<PathBuf, String> {
+    let firejail = which::which("firejail").map_err(|_| {
+        "firejail not found in PATH; install `firejail` because SedTool requires sandboxed execution."
+            .to_string()
+    })?;
+    let status = std::process::Command::new(&firejail)
+        .args([
+            "--quiet",
+            "--noprofile",
+            "--net=none",
+            "--shell=none",
+            "--",
+            "true",
+        ])
+        .status()
+        .map_err(|e| format!("Failed to probe firejail at {}: {}", firejail.display(), e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "firejail at {} is installed but not functional; SedTool requires a working firejail sandbox.",
+            firejail.display()
+        ));
+    }
+
+    Ok(firejail)
 }
 
 fn build_ed_script_input(path: &Path, script: &str) -> VecDeque<String> {
@@ -1271,6 +1431,36 @@ mod tests {
         .await
     }
 
+    async fn run_sed_request(
+        ctx: &ToolContext,
+        file_path: &str,
+        script: &str,
+        quiet: bool,
+        null_data: bool,
+    ) -> ToolResult {
+        let tool = SedTool;
+        tool.execute(
+            json!({
+                "file_path": file_path,
+                "script": script,
+                "quiet": quiet,
+                "null_data": null_data,
+            }),
+            ctx,
+        )
+        .await
+    }
+
+    fn ensure_sed_runtime() -> bool {
+        match (gnu_sed_binary(), firejail_binary()) {
+            (Ok(_), Ok(_)) => true,
+            (Err(err), _) | (_, Err(err)) => {
+                eprintln!("skipping sed test: {err}");
+                false
+            }
+        }
+    }
+
     #[tokio::test]
     async fn exact_replace() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1588,6 +1778,81 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(payload["applied_edits"], json!(1));
         assert_eq!(read_text(&tmp, "sample.txt"), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn sed_successful_edit() {
+        if !ensure_sed_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+
+        let result = run_sed_request(&ctx, "sample.txt", "s/world/there/\n", false, false).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
+        assert!(result.content.contains("Applied sed script"));
+    }
+
+    #[tokio::test]
+    async fn sed_blocks_file_access_commands() {
+        if !ensure_sed_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+
+        let result = run_sed_request(&ctx, "sample.txt", "1r /etc/passwd\n", false, false).await;
+
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .contains("e/r/w commands disabled in sandbox mode"));
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn sed_revert_compatibility() {
+        if !ensure_sed_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+
+        let result = run_sed_request(&ctx, "sample.txt", "s/world/there/\n", false, false).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
+
+        let revert_tool = RevertTool;
+        let revert = revert_tool
+            .execute(json!({ "file_path": "sample.txt" }), &ctx)
+            .await;
+
+        assert!(!revert.is_error, "{}", revert.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn sed_supports_null_data() {
+        if !ensure_sed_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_bytes_fixture(&tmp, "sample.txt", b"alpha\0beta\0");
+        let ctx = test_ctx(tmp.path());
+
+        let result = run_sed_request(&ctx, "sample.txt", "s/beta/gamma/\n", false, true).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(read_bytes_fixture(&tmp, "sample.txt"), b"alpha\0gamma\0");
     }
 
     #[tokio::test]

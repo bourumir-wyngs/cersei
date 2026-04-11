@@ -145,9 +145,11 @@ impl SystemPromptPrefix {
     /// The opening attribution string.
     pub fn attribution_text(self) -> &'static str {
         match self {
-            Self::Interactive => "You are a coding agent built with the Cersei SDK.",
+            Self::Interactive => {
+                "You are a coding agent built with the heavily modified Cersei SDK."
+            }
             Self::SdkPreset => {
-                "You are a coding agent built with the Cersei SDK, \
+                "You are a coding agent built with the heavily modified Cersei SDK, \
                 running with custom instructions."
             }
             Self::Sdk => "You are an agent built on the Cersei SDK.",
@@ -292,7 +294,7 @@ const CORE_CAPABILITIES: &str = r#"
 ## Capabilities
 
 You have access to powerful tools for software engineering tasks:
-- **Read/Write files**: Read any file, write new files, make exact position-based edits with `Edit`, use `sed` for regex-driven transforms, inspect diffs, and undo the last `Edit` or `sed` change with `revert`
+- **Read/Write files**: Read any file, write new files, make exact position-based edits with `Edit`, use the real GNU `Sed` tool for regex-driven transforms, inspect diffs, and undo the last `Edit` or `Sed` change with `revert`
 - **Filesystem navigation**: Use `ListDirectory`, `Glob`, and `Grep` to inspect directories and search files
 - **Package managers**: Use `Cargo`, `Npm`, and `Npx` for package-manager workflows instead of shelling out through bash
 - **Git**: Use the `Git` tool for all git operations (log, show, diff, status, etc.) instead of bash
@@ -323,6 +325,7 @@ const TOOL_USE_GUIDELINES: &str = r#"
 - For searches, prefer Grep over `grep`; prefer Glob over `find`
 - Parallelize independent tool calls in a single response
 - For file edits: always read the file first, then make targeted edits
+- `Sed` uses real GNU `sed` syntax and always runs as `sed -E --sandbox`; pass only `file_path` plus the sed program in `script`, not `sed`, `-i`, or extra filenames. Use `quiet=true` for `-n` behavior and `null_data=true` for `-z`.
 - Bash commands timeout after 2 minutes; use Process tool for long operations.
 "#;
 
