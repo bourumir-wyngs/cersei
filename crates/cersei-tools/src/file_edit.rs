@@ -1325,6 +1325,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_indices_return_one_based_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+
+        let (result, payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            compute_version("hello world\n".as_bytes()),
+            vec![json!({
+                "start_line": 0,
+                "start_column": 1,
+                "end_line": 1,
+                "end_column": 1,
+                "expected_text": "",
+                "new_text": "X"
+            })],
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert_eq!(payload["code"], json!("INVALID_POSITION"));
+        assert_eq!(
+            payload["message"],
+            json!("Invalid start position for edit 0: String indices are 1 based.")
+        );
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
     async fn version_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         write_text(&tmp, "sample.txt", "hello world\n");
