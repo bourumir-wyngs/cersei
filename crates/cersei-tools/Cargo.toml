@@ -40,7 +40,6 @@ chromiumoxide = { workspace = true }
 giacrs = { workspace = true, optional = true }
 gix = { workspace = true }
 vicut = "0.4.2"
-add-ed = "0.14.0"
 
 [features]
 cas = ["giacrs"]

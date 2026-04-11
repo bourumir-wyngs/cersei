@@ -1,15 +1,10 @@
-//! Exact-position, GNU sed-backed, and ed-backed file editing with one-step session-local revert.
+//! Exact-position and GNU sed-backed file editing with one-step session-local revert.
 
 use super::*;
 use crate::file_history::{unified_diff, FileHistory};
-use add_ed::error::IOError;
-use add_ed::io::IO as AddEdIo;
-use add_ed::ui::{ScriptedUI, UILock as AddEdUILock};
-use add_ed::{Ed, EdError};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
-use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -26,9 +21,9 @@ static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapsh
 static GNU_SED_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_gnu_sed);
 static FIREJAIL_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_firejail);
 
+const INLINE_SED_SCRIPT_MAX_BYTES: usize = 1024;
 pub struct EditTool;
 pub struct SedTool;
-pub struct EdTool;
 pub struct RevertTool;
 
 /// Public alias preserved for downstream imports.
@@ -307,123 +302,13 @@ impl Tool for SedTool {
 }
 
 #[async_trait]
-impl Tool for EdTool {
-    fn name(&self) -> &str {
-        "Ed"
-    }
-
-    fn description(&self) -> &str {
-        "Apply an ed-like script to a file using the add-ed crate. The tool automatically loads \
-         the target file into the editor, applies the script, writes the final buffer back to \
-         disk, returns a unified diff, and supports the shared `revert` command. NOTE: this is \
-         not GNU ed or POSIX ed. add-ed tracks the last selected span rather than a single current \
-         line, so commands that rely on `.` or omitted addresses can behave differently from \
-         classic ed; prefer explicit addresses and ranges whenever possible. Other known \
-         differences: `g`/`v`/`G`/`V` take command lists in input mode terminated by the regex \
-         separator instead of `.`, and the `I` case-insensitive regex suffix is not \
-         implemented. File and shell commands inside the script are disabled because the tool \
-         manages loading/saving the requested file itself."
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Write
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::FileSystem
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Path to the file relative to the current workspace root. Absolute paths and `..` segments are not allowed."
-                },
-                "script": {
-                    "type": "string",
-                    "description": "ed script to apply. Do not include load/save/quit/shell commands; the tool manages file IO automatically."
-                }
-            },
-            "required": ["file_path", "script"]
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        #[derive(Deserialize)]
-        struct Input {
-            file_path: String,
-            script: String,
-        }
-
-        let input: Input = match serde_json::from_value(input) {
-            Ok(i) => i,
-            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
-        };
-
-        let path = match resolve_existing_workspace_path(ctx, &input.file_path) {
-            Ok(path) => path,
-            Err(err) => return err,
-        };
-
-        let original_bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
-        };
-        let original_text = String::from_utf8_lossy(&original_bytes).into_owned();
-
-        let updated_text = match run_ed_script(ctx, &path, &input.script, &original_text) {
-            Ok(text) => text,
-            Err(e) => return ToolResult::error(e),
-        };
-
-        if updated_text.as_bytes() == original_bytes.as_slice() {
-            return ToolResult::success(format!(
-                "ed script produced no changes in {}.",
-                path.display()
-            ));
-        }
-
-        let snapshot = LastEditSnapshot {
-            file_path: path.clone(),
-            content: original_bytes.clone(),
-        };
-        let previous_snapshot =
-            LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
-
-        if let Err(e) = write_bytes(&path, updated_text.as_bytes()).await {
-            restore_previous_snapshot(&ctx.session_id, previous_snapshot);
-            return ToolResult::error(format!("Failed to write file: {}", e));
-        }
-
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.record_change(&path, Some(&original_text), &updated_text, "edit");
-        }
-
-        let diff = unified_diff(
-            &original_text,
-            &updated_text,
-            &format!("{} (before)", path.display()),
-            &format!("{} (after)", path.display()),
-        );
-
-        ToolResult::success(format!(
-            "Applied ed script to {}.\n{}\n\nuse 'revert' command if wrong",
-            path.display(),
-            diff.trim_end()
-        ))
-    }
-}
-
-#[async_trait]
 impl Tool for RevertTool {
     fn name(&self) -> &str {
         "Revert"
     }
 
     fn description(&self) -> &str {
-        "Restore the previous checkpoint from the most recent successful `Edit`, `Sed`, or `Ed` \
+        "Restore the previous checkpoint from the most recent successful `Edit` or `Sed` \
          edit in this session. Only one checkpoint is retained."
     }
 
@@ -458,13 +343,14 @@ impl Tool for RevertTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let snapshot =
-            match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
-                Some(entry) => entry.clone(),
-                None => return ToolResult::error(
-                    "No edit snapshot is available to revert. Run `Edit`, `Sed`, or `Ed` first.",
-                ),
-            };
+        let snapshot = match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
+            Some(entry) => entry.clone(),
+            None => {
+                return ToolResult::error(
+                    "No edit snapshot is available to revert. Run `Edit` or `Sed` first.",
+                )
+            }
+        };
 
         if let Some(requested) = input.file_path.as_ref() {
             let requested_path = match resolve_workspace_path(ctx, requested, false) {
@@ -516,168 +402,6 @@ impl Tool for RevertTool {
     }
 }
 
-#[derive(Debug, Clone)]
-struct RestrictedEdIoError {
-    message: String,
-}
-
-impl RestrictedEdIoError {
-    fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl std::fmt::Display for RestrictedEdIoError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for RestrictedEdIoError {}
-
-impl add_ed::error::IOErrorTrait for RestrictedEdIoError {}
-
-struct RestrictedEdIo {
-    working_dir: PathBuf,
-    allowed_path: PathBuf,
-    original_text: String,
-    bootstrap_reads_remaining: usize,
-}
-
-impl RestrictedEdIo {
-    fn new(working_dir: &Path, allowed_path: &Path, original_text: &str) -> Self {
-        Self {
-            working_dir: working_dir.to_path_buf(),
-            allowed_path: allowed_path.to_path_buf(),
-            original_text: original_text.to_string(),
-            bootstrap_reads_remaining: 1,
-        }
-    }
-
-    fn resolve_candidate(&self, input: &str) -> PathBuf {
-        let candidate = Path::new(input);
-        let resolved = if candidate.is_absolute() {
-            candidate.to_path_buf()
-        } else {
-            self.working_dir.join(candidate)
-        };
-
-        resolved.canonicalize().unwrap_or(resolved)
-    }
-}
-
-impl AddEdIo for RestrictedEdIo {
-    fn run_command(
-        &mut self,
-        _ui: &mut AddEdUILock,
-        _command: String,
-    ) -> core::result::Result<(), IOError> {
-        Err(Into::<IOError>::into(RestrictedEdIoError::new(
-            "Shell commands are disabled in EdTool.",
-        )))
-    }
-
-    fn run_read_command(
-        &mut self,
-        _ui: &mut AddEdUILock,
-        _command: String,
-    ) -> core::result::Result<String, IOError> {
-        Err(Into::<IOError>::into(RestrictedEdIoError::new(
-            "Shell read commands are disabled in EdTool.",
-        )))
-    }
-
-    fn run_write_command(
-        &mut self,
-        _ui: &mut AddEdUILock,
-        _command: String,
-        _input: add_ed::LinesIter,
-    ) -> core::result::Result<usize, IOError> {
-        Err(Into::<IOError>::into(RestrictedEdIoError::new(
-            "Shell write commands are disabled in EdTool.",
-        )))
-    }
-
-    fn run_transform_command(
-        &mut self,
-        _ui: &mut AddEdUILock,
-        _command: String,
-        _input: add_ed::LinesIter,
-    ) -> core::result::Result<String, IOError> {
-        Err(Into::<IOError>::into(RestrictedEdIoError::new(
-            "Shell transform commands are disabled in EdTool.",
-        )))
-    }
-
-    fn write_file(
-        &mut self,
-        _path: &str,
-        _append: bool,
-        _data: add_ed::LinesIter,
-    ) -> core::result::Result<usize, IOError> {
-        Err(Into::<IOError>::into(RestrictedEdIoError::new(
-            "Write commands are disabled in EdTool; the tool saves the target file automatically.",
-        )))
-    }
-
-    fn read_file(
-        &mut self,
-        path: &str,
-        _must_exist: bool,
-    ) -> core::result::Result<String, IOError> {
-        if self.bootstrap_reads_remaining == 0 {
-            return Err(Into::<IOError>::into(RestrictedEdIoError::new(
-                "File read commands are disabled in EdTool; the tool loads the target file automatically.",
-            )));
-        }
-
-        let candidate = self.resolve_candidate(path);
-        if candidate != self.allowed_path {
-            return Err(Into::<IOError>::into(RestrictedEdIoError::new(
-                "EdTool may only access the requested file.",
-            )));
-        }
-
-        self.bootstrap_reads_remaining -= 1;
-        Ok(self.original_text.clone())
-    }
-}
-
-fn run_ed_script(
-    ctx: &ToolContext,
-    path: &Path,
-    script: &str,
-    original_text: &str,
-) -> std::result::Result<String, String> {
-    let mut io = RestrictedEdIo::new(&ctx.working_dir, path, original_text);
-    let macro_store = std::collections::HashMap::new();
-    let mut ed = Ed::new(&mut io, &macro_store);
-    let mut scripted = ScriptedUI {
-        input: build_ed_script_input(path, script),
-        print_ui: None,
-    };
-
-    loop {
-        match ed.get_and_run_command(&mut scripted) {
-            Ok(true) => {
-                if !scripted.input.is_empty() {
-                    return Err(
-                        "Ed script exited early via `q` or `Q`; omit quit commands because the tool manages script lifetime automatically."
-                            .to_string(),
-                    );
-                }
-                break;
-            }
-            Ok(false) => {}
-            Err(e) => return Err(format_ed_error(e)),
-        }
-    }
-
-    current_ed_buffer_to_text(&ed)
-}
-
 async fn run_sed_script(
     ctx: &ToolContext,
     path: &Path,
@@ -700,7 +424,24 @@ async fn run_sed_script(
         .await
         .map_err(|e| format!("Failed to stage file for sed: {}", e))?;
 
-    let mut cmd = sandboxed_sed_command(ctx, &staged_path, script, quiet, null_data)?;
+    let staged_script_path = if script.as_bytes().len() > INLINE_SED_SCRIPT_MAX_BYTES {
+        let path = staged_dir.path().join("program.sed");
+        tokio::fs::write(&path, script)
+            .await
+            .map_err(|e| format!("Failed to stage sed script: {}", e))?;
+        Some(path)
+    } else {
+        None
+    };
+
+    let mut cmd = sandboxed_sed_command(
+        ctx,
+        &staged_path,
+        script,
+        staged_script_path.as_deref(),
+        quiet,
+        null_data,
+    )?;
     let output = cmd
         .output()
         .await
@@ -726,6 +467,7 @@ fn sandboxed_sed_command(
     ctx: &ToolContext,
     staged_path: &Path,
     script: &str,
+    staged_script_path: Option<&Path>,
     quiet: bool,
     null_data: bool,
 ) -> std::result::Result<Command, String> {
@@ -764,8 +506,13 @@ fn sandboxed_sed_command(
     if null_data {
         cmd.arg("--null-data");
     }
-    cmd.arg("--expression");
-    cmd.arg(script);
+    if let Some(staged_script_path) = staged_script_path {
+        cmd.arg("-f");
+        cmd.arg(staged_script_path);
+    } else {
+        cmd.arg("--expression");
+        cmd.arg(script);
+    }
     cmd.arg("--");
     cmd.arg(staged_path);
     Ok(cmd)
@@ -829,39 +576,6 @@ fn probe_firejail() -> std::result::Result<PathBuf, String> {
     }
 
     Ok(firejail)
-}
-
-fn build_ed_script_input(path: &Path, script: &str) -> VecDeque<String> {
-    let mut input = VecDeque::new();
-    input.push_back(format!("e {}\n", path.display()));
-    for line in script.lines() {
-        input.push_back(format!("{}\n", line));
-    }
-    input.push_back("Q\n".to_string());
-    input
-}
-
-fn format_ed_error(error: EdError) -> String {
-    format!("Failed to run ed script: {}", error)
-}
-
-fn current_ed_buffer_to_text(ed: &Ed<'_>) -> std::result::Result<String, String> {
-    let buffer = ed.history.current();
-    if buffer.is_empty() {
-        return Ok(String::new());
-    }
-
-    let selection = (1, buffer.len());
-    buffer
-        .get_lines(selection)
-        .map(|lines| {
-            let mut out = String::new();
-            for line in lines {
-                out.push_str(line);
-            }
-            out
-        })
-        .map_err(|e| format!("Failed to extract edited buffer: {}", e))
 }
 
 pub async fn execute_edit(req: EditRequest) -> std::result::Result<String, String> {
@@ -1419,18 +1133,6 @@ mod tests {
         (result, payload)
     }
 
-    async fn run_ed_request(ctx: &ToolContext, file_path: &str, script: &str) -> ToolResult {
-        let tool = EdTool;
-        tool.execute(
-            json!({
-                "file_path": file_path,
-                "script": script,
-            }),
-            ctx,
-        )
-        .await
-    }
-
     async fn run_sed_request(
         ctx: &ToolContext,
         file_path: &str,
@@ -1840,6 +1542,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sed_large_script_transparently_uses_staged_file() {
+        if !ensure_sed_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+        let filler = "#".repeat(1100);
+        let script = format!("s/world/there/\n#{}\n", filler);
+
+        let result = run_sed_request(&ctx, "sample.txt", &script, false, false).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
+    }
+
+    #[tokio::test]
     async fn sed_supports_null_data() {
         if !ensure_sed_runtime() {
             return;
@@ -1853,99 +1573,5 @@ mod tests {
 
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(read_bytes_fixture(&tmp, "sample.txt"), b"alpha\0gamma\0");
-    }
-
-    #[tokio::test]
-    async fn ed_successful_edit() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_ed_request(&ctx, "sample.txt", "1s/world/there/\n").await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
-        assert!(result.content.contains("Applied ed script"));
-    }
-
-    #[tokio::test]
-    async fn ed_rejects_absolute_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-        let abs_path = tmp.path().join("sample.txt");
-
-        let result = run_ed_request(&ctx, abs_path.to_str().unwrap(), "1s/world/there/\n").await;
-
-        assert!(result.is_error);
-        assert!(result.content.contains("Absolute paths are not allowed"));
-    }
-
-    #[tokio::test]
-    async fn ed_rejects_parent_traversal() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_ed_request(&ctx, "../sample.txt", "1s/world/there/\n").await;
-
-        assert!(result.is_error);
-        assert!(result
-            .content
-            .contains("Path traversal with `..` is not allowed"));
-    }
-
-    #[tokio::test]
-    async fn ed_revert_compatibility() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_ed_request(&ctx, "sample.txt", "1s/world/there/\n").await;
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
-
-        let revert_tool = RevertTool;
-        let revert = revert_tool
-            .execute(json!({ "file_path": "sample.txt" }), &ctx)
-            .await;
-
-        assert!(!revert.is_error, "{}", revert.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
-    }
-
-    #[tokio::test]
-    async fn ed_returns_diff_output() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_ed_request(&ctx, "sample.txt", "1s/world/there/\n").await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("--- "));
-        assert!(result.content.contains("+++ "));
-        assert!(result.content.contains("@@"));
-        assert!(result.content.contains("-hello world"));
-        assert!(result.content.contains("+hello there"));
-    }
-
-    #[tokio::test]
-    async fn ed_invalid_script_reports_error_and_docs_note_deviations() {
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_ed_request(&ctx, "sample.txt", "~\n").await;
-
-        assert!(result.is_error);
-        assert!(result.content.contains("Failed to run ed script"));
-        assert!(result.content.contains("Unknown command"));
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
-
-        let description = EdTool.description();
-        assert!(description.contains("not GNU ed"));
-        assert!(description.contains("g`/`v`/`G`/`V`"));
-        assert!(description.contains("File and shell commands inside the script are disabled"));
     }
 }
