@@ -13,6 +13,13 @@ use tokio::sync::mpsc;
 
 const END_TURN_SUMMARY_PROMPT: &str = "Briefly summarize your progress, results, and next steps.";
 
+fn log_turn_handoff_to_human(reason: &str, summary_missing: bool, summary_prompt_sent: bool) {
+    let timestamp = chrono::Local::now().to_rfc3339();
+    println!(
+        "[agent handoff] time={timestamp} reason={reason} summary_missing={summary_missing} summary_prompt_sent={summary_prompt_sent}"
+    );
+}
+
 fn assistant_message_has_progress_summary(message: &Message) -> bool {
     let text = message.get_all_text();
     if text.trim().is_empty() {
@@ -453,8 +460,10 @@ pub async fn run_agent_streaming(
                         .lock()
                         .push(Message::user(END_TURN_SUMMARY_PROMPT));
                     auto_summary_requested = true;
+                    log_turn_handoff_to_human("missing_summary_on_end_turn", true, true);
                     continue;
                 }
+                log_turn_handoff_to_human("end_turn", false, false);
                 break;
             }
             StopReason::ToolUse => {
@@ -618,7 +627,12 @@ pub async fn run_agent_streaming(
                     .lock()
                     .push(Message::user("Continue from where you left off."));
             }
-            _ => break,
+            _ => {
+                let reason = format!("{:?}", response.stop_reason);
+                let summary_prompt_sent = auto_summary_requested;
+                log_turn_handoff_to_human(&reason, false, summary_prompt_sent);
+                break;
+            }
         }
     }
 

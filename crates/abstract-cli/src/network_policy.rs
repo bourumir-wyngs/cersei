@@ -3,7 +3,7 @@
 //! Missing `network` is treated as a normal network request so the model cannot
 //! silently start commands with networking disabled. Only an explicit legacy
 //! `network: "none"` bypasses the prompt and stays sandboxed. Denied network
-//! requests abort the command instead of downgrading it to no-network mode.
+//! requests downgrade the command to no-network mode instead of aborting a previously approved execution.
 //!
 //!   Network access: Npm  (requests: local network)
 //!   npm install react
@@ -53,7 +53,7 @@ impl NetworkPolicy for CliNetworkPolicy {
         }
 
         if self.session_denied.lock().contains(command) {
-            return NetworkDecision::Deny("User denied (session)".into());
+            return NetworkDecision::Allow(NetworkAccess::Blocked);
         }
         if self.session_allowed.lock().contains(command) {
             return NetworkDecision::Allow(requested);
@@ -97,13 +97,13 @@ impl NetworkPolicy for CliNetworkPolicy {
                 }
                 'e' | 'E' => {
                     self.session_denied.lock().insert(command.to_string());
-                    return NetworkDecision::Deny("User denied (session)".into());
+                    return NetworkDecision::Allow(NetworkAccess::Blocked);
                 }
                 'r' | 'R' => {
                     register_command_line(command);
                     continue;
                 }
-                _ => return NetworkDecision::Deny("User denied".into()),
+                _ => return NetworkDecision::Allow(NetworkAccess::Blocked),
             }
         }
     }
@@ -116,7 +116,7 @@ fn matched_network_decision(command: &str, requested: NetworkAccess) -> Option<N
 
     match_persisted_rule_for_request(command, true).map(|rule| {
         if !rule.allow {
-            return NetworkDecision::Deny("User denied (registered rule)".into());
+            return NetworkDecision::Allow(NetworkAccess::Blocked);
         }
 
         if rule.network {
@@ -139,7 +139,7 @@ fn matched_network_decision_in(
 
     match_persisted_rule_for_request_in(persisted, command, true).map(|rule| {
         if !rule.allow {
-            return NetworkDecision::Deny("User denied (registered rule)".into());
+            return NetworkDecision::Allow(NetworkAccess::Blocked);
         }
 
         if rule.network {
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_deny_rule_blocks_command() {
+    fn persisted_deny_rule_downgrades_to_blocked_network() {
         let rules = vec![PersistedPermissionRule {
             regex: "^cargo build$".into(),
             network: true,
@@ -241,9 +241,7 @@ mod tests {
 
         assert_eq!(
             matched_network_decision_in(&rules, "cargo build", NetworkAccess::Local),
-            Some(NetworkDecision::Deny(
-                "User denied (registered rule)".into()
-            ))
+            Some(NetworkDecision::Allow(NetworkAccess::Blocked))
         );
     }
 
