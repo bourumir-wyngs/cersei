@@ -8,7 +8,7 @@ use similar::TextDiff;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tempfile::NamedTempFile;
+use tempfile::{NamedTempFile, TempDir};
 use tokio::process::Command;
 
 #[derive(Debug, Clone)]
@@ -20,6 +20,7 @@ struct LastEditSnapshot {
 static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapshot>> =
     Lazy::new(dashmap::DashMap::new);
 static GNU_SED_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_gnu_sed);
+static PATCH_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_patch);
 static FIREJAIL_BINARY: Lazy<Option<PathBuf>> = Lazy::new(probe_firejail);
 static FIREJAIL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
@@ -28,6 +29,7 @@ const SED_STAGING_ROOT: &str = "/tmp";
 const EXPECTED_TEXT_SEARCH_WINDOW_BYTES: usize = 256;
 pub struct EditTool;
 pub struct SedTool;
+pub struct PatchTool;
 pub struct RevertTool;
 
 /// Public alias preserved for downstream imports.
@@ -36,6 +38,7 @@ pub type FileEditTool = EditTool;
 #[derive(Debug, Clone, Deserialize)]
 pub struct EditRequest {
     pub file_path: String,
+    #[serde(default)]
     pub base_version: String,
     pub edits: Vec<TextEdit>,
 }
@@ -101,7 +104,7 @@ impl Tool for EditTool {
     fn description(&self) -> &str {
         "Apply exact, byte-precise edits to an existing UTF-8 file using 1-based line/column \
          positions. Every request must provide a strict base_version hash plus the exact \
-         expected_text for each edit. Returns structured JSON."
+         expected_text for each edit. Read returns version metadata to bootstrap the first exact edit. A missing base_version is allowed only on the first Edit call for a file in a session; later calls must provide version metadata. Returns structured JSON."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -122,7 +125,7 @@ impl Tool for EditTool {
                 },
                 "base_version": {
                     "type": "string",
-                    "description": "Exact file version hash in the form `blake3:<hex>`. Requests fail if the file has changed."
+                    "description": "Exact file version hash in the form `blake3:<hex>`. Read returns this in metadata for Edit. You may omit it only on the first Edit call for a file in a session; after that, provide version metadata. Requests fail if the file has changed."
                 },
                 "edits": {
                     "type": "array",
@@ -148,7 +151,7 @@ impl Tool for EditTool {
                     }
                 }
             },
-            "required": ["file_path", "base_version", "edits"]
+            "required": ["file_path", "edits"]
         })
     }
 
@@ -171,6 +174,55 @@ impl Tool for EditTool {
         match execute_edit_inner(req, &path, Some(ctx)).await {
             Ok(payload) => ToolResult::success(payload),
             Err(failure) => ToolResult::error(serialize_failure(&failure)),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchInput {
+    patch: String,
+}
+
+#[async_trait]
+impl Tool for PatchTool {
+    fn name(&self) -> &str {
+        "Patch"
+    }
+
+    fn description(&self) -> &str {
+        "Apply a standard diff patch supplied directly in the `patch` input string. Use normal unified/context diff text with standard headers such as `diff --git`, `---`, and `+++`; do not create a temp file or invoke shell patch commands yourself. The tool validates syntax and workspace-relative target paths, dry-runs before writing, returns an explanatory error when malformed or not applicable, and prints the complete patch when it succeeds."
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "Patch text to apply directly. Provide the complete unified/context diff in this field; do not create a temp file or wrap it in shell commands. Prefer standard headers like diff --git with a/... and b/... paths, or plain ---/+++ headers. The tool validates that target paths stay within the workspace, dry-runs the patch before writing, rejects malformed or non-applicable patches with an explanatory error, and echoes the complete applied patch on success."
+                }
+            },
+            "required": ["patch"]
+        })
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let input: PatchInput = match serde_json::from_value(input) {
+            Ok(i) => i,
+            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
+        };
+
+        match apply_patch(ctx, &input.patch).await {
+            Ok(message) => ToolResult::success(message),
+            Err(message) => ToolResult::error(message),
         }
     }
 }
@@ -464,6 +516,352 @@ fn create_sed_staging_dir() -> std::result::Result<tempfile::TempDir, String> {
         .map_err(|e| format!("Failed to create sed staging directory: {}", e))
 }
 
+async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result<String, String> {
+    if patch_text.trim().is_empty() {
+        return Err("Patch input is empty.".to_string());
+    }
+
+    let parsed = parse_patch_manifest(patch_text)?;
+    if parsed.targets.is_empty() {
+        return Err(
+            "Patch does not contain any file targets. Expected standard diff headers like ---/+++ or diff --git."
+                .to_string(),
+        );
+    }
+
+    let patch_bin = patch_binary()?;
+    let staging_dir = create_patch_staging_dir()?;
+    stage_patch_targets(ctx, &staging_dir, &parsed.targets).await?;
+
+    let patch_file = staging_dir.path().join("input.patch");
+    tokio::fs::write(&patch_file, patch_text)
+        .await
+        .map_err(|e| format!("Failed to write staged patch file: {}", e))?;
+
+    let dry_run = run_patch_command(ctx, &patch_bin, staging_dir.path(), &patch_file, true).await?;
+    if !dry_run.status.success() {
+        return Err(explain_patch_failure(
+            "Patch could not be applied",
+            patch_text,
+            &dry_run,
+        ));
+    }
+
+    let apply = run_patch_command(ctx, &patch_bin, staging_dir.path(), &patch_file, false).await?;
+    if !apply.status.success() {
+        return Err(explain_patch_failure(
+            "Patch failed while being applied after passing dry-run",
+            patch_text,
+            &apply,
+        ));
+    }
+
+    let mut changed_files = Vec::new();
+    let mut previous_snapshot: Option<LastEditSnapshot> = None;
+    for target in &parsed.targets {
+        let workspace_path = ctx.working_dir.join(&target.workspace_rel);
+        let staged_path = staging_dir.path().join(&target.workspace_rel);
+        let old_bytes = tokio::fs::read(&workspace_path)
+            .await
+            .map_err(|e| format!("Failed to read {}: {}", target.workspace_rel, e))?;
+        let new_bytes = tokio::fs::read(&staged_path)
+            .await
+            .map_err(|e| format!("Failed to read staged {}: {}", target.workspace_rel, e))?;
+        if old_bytes == new_bytes {
+            continue;
+        }
+
+        let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
+        let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
+        let snapshot = LastEditSnapshot {
+            file_path: workspace_path.clone(),
+            content: old_bytes.clone(),
+        };
+        let prior = LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
+        if previous_snapshot.is_none() {
+            previous_snapshot = prior;
+        }
+
+        if let Err(err) = write_bytes(&workspace_path, &new_bytes).await {
+            restore_previous_snapshot(&ctx.session_id, previous_snapshot);
+            return Err(format!("Failed to write {}: {}", target.workspace_rel, err));
+        }
+
+        if let Some(history) = ctx.extensions.get::<FileHistory>() {
+            history.record_change(&workspace_path, Some(&old_text), &new_text, "patch");
+        }
+        changed_files.push(target.workspace_rel.clone());
+    }
+
+    let changed_summary = if changed_files.is_empty() {
+        "Patch applied successfully but produced no file changes.".to_string()
+    } else {
+        format!("Applied patch to: {}", changed_files.join(", "))
+    };
+
+    Ok(format!(
+        "{}\n\nComplete patch applied:\n{}",
+        changed_summary, patch_text
+    ))
+}
+
+fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, String> {
+    let mut git_old: Option<String> = None;
+    let mut git_new: Option<String> = None;
+    let mut old_header: Option<String> = None;
+    let mut saw_file_header = false;
+    let mut saw_hunk = false;
+    let mut targets = Vec::new();
+
+    for line in patch_text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() < 2 {
+                return Err(format!("Malformed diff --git header: {}", line));
+            }
+            git_old = Some(parts[0].to_string());
+            git_new = Some(parts[1].to_string());
+            saw_file_header = true;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("--- ") {
+            old_header = Some(extract_patch_path(path));
+            saw_file_header = true;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let new_header = extract_patch_path(path);
+            let target_path = choose_patch_target(
+                git_old.as_deref(),
+                git_new.as_deref(),
+                old_header.as_deref(),
+                Some(new_header.as_str()),
+            )?;
+            let workspace_rel = normalize_patch_workspace_path(&target_path)?;
+            if !targets.iter().any(|t: &PatchTarget| t.workspace_rel == workspace_rel) {
+                targets.push(PatchTarget { workspace_rel });
+            }
+            git_old = None;
+            git_new = None;
+            old_header = None;
+            continue;
+        }
+        if line.starts_with("@@ ") || line.starts_with("***************") {
+            saw_hunk = true;
+        }
+    }
+
+    if !saw_file_header {
+        return Err(
+            "Patch is missing file headers. Expected standard diff headers like ---/+++ or diff --git."
+                .to_string(),
+        );
+    }
+    if !saw_hunk {
+        return Err(
+            "Patch is missing hunk content. Expected unified/context diff hunks such as @@ ... @@."
+                .to_string(),
+        );
+    }
+
+    Ok(ParsedPatch { targets })
+}
+
+fn extract_patch_path(header_value: &str) -> String {
+    header_value
+        .split(|c: char| c == '\t' || c == ' ')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn choose_patch_target(
+    git_old: Option<&str>,
+    git_new: Option<&str>,
+    old_header: Option<&str>,
+    new_header: Option<&str>,
+) -> std::result::Result<String, String> {
+    for candidate in [git_new, new_header, git_old, old_header]
+        .into_iter()
+        .flatten()
+    {
+        if candidate != "/dev/null" {
+            return Ok(strip_patch_prefix(candidate).to_string());
+        }
+    }
+    Err("Patch file header does not identify a workspace file target.".to_string())
+}
+
+fn strip_patch_prefix(path: &str) -> &str {
+    path.strip_prefix("a/")
+        .or_else(|| path.strip_prefix("b/"))
+        .unwrap_or(path)
+}
+
+fn normalize_patch_workspace_path(path: &str) -> std::result::Result<String, String> {
+    if path.is_empty() {
+        return Err("Patch contains an empty file path header.".to_string());
+    }
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(format!(
+            "Patch path '{}' is absolute; only workspace-relative paths are allowed.",
+            path
+        ));
+    }
+    if candidate
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "Patch path '{}' attempts path traversal with '..', which is not allowed.",
+            path
+        ));
+    }
+
+    let normalized = candidate
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_os_string()),
+            Component::CurDir => None,
+            Component::ParentDir => None,
+            Component::RootDir => None,
+            _ => None,
+        })
+        .collect::<PathBuf>();
+    if normalized.as_os_str().is_empty() {
+        return Err("Patch path resolves to an empty workspace-relative path.".to_string());
+    }
+
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
+async fn stage_patch_targets(
+    ctx: &ToolContext,
+    staging_dir: &TempDir,
+    targets: &[PatchTarget],
+) -> std::result::Result<(), String> {
+    for target in targets {
+        let workspace_path = resolve_existing_workspace_path(ctx, &target.workspace_rel)
+            .map_err(|err| err.content)?;
+        let staged_path = staging_dir.path().join(&target.workspace_rel);
+        if let Some(parent) = staged_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to prepare patch staging directory: {}", e))?;
+        }
+        tokio::fs::copy(&workspace_path, &staged_path)
+            .await
+            .map_err(|e| format!("Failed to stage {}: {}", target.workspace_rel, e))?;
+    }
+    Ok(())
+}
+
+fn create_patch_staging_dir() -> std::result::Result<TempDir, String> {
+    tempfile::Builder::new()
+        .prefix("cersei-patch-")
+        .tempdir_in(SED_STAGING_ROOT)
+        .or_else(|_| tempfile::Builder::new().prefix("cersei-patch-").tempdir())
+        .map_err(|e| format!("Failed to create patch staging directory: {}", e))
+}
+
+async fn run_patch_command(
+    ctx: &ToolContext,
+    patch_bin: &Path,
+    staging_root: &Path,
+    patch_file: &Path,
+    dry_run: bool,
+) -> std::result::Result<std::process::Output, String> {
+    let output = if let Some(firejail) = firejail_binary() {
+        let mut cmd = Command::new(firejail);
+        append_firejail_prefix(&mut cmd, Some(&ctx.working_dir));
+        cmd.arg("--");
+        cmd.arg(patch_bin);
+        append_patch_arguments(&mut cmd, staging_root, patch_file, dry_run);
+        cmd.output()
+            .await
+            .map_err(|e| format!("Failed to run patch in firejail: {}", e))?
+    } else {
+        let mut cmd = Command::new(patch_bin);
+        append_patch_arguments(&mut cmd, staging_root, patch_file, dry_run);
+        cmd.output()
+            .await
+            .map_err(|e| format!("Failed to run patch: {}", e))?
+    };
+
+    Ok(output)
+}
+
+fn append_patch_arguments(
+    cmd: &mut Command,
+    staging_root: &Path,
+    patch_file: &Path,
+    dry_run: bool,
+) {
+    cmd.arg("--batch");
+    cmd.arg("--forward");
+    cmd.arg("--strip=1");
+    cmd.arg("--directory");
+    cmd.arg(staging_root);
+    cmd.arg("--input");
+    cmd.arg(patch_file);
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+}
+
+fn patch_binary() -> std::result::Result<PathBuf, String> {
+    match &*PATCH_BINARY {
+        Ok(path) => Ok(path.clone()),
+        Err(err) => Err(err.clone()),
+    }
+}
+
+fn probe_patch() -> std::result::Result<PathBuf, String> {
+    let patch = which::which("patch")
+        .map_err(|_| "System `patch` binary not found in PATH; install patch on the host OS.".to_string())?;
+    let output = std::process::Command::new(&patch)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("Failed to probe patch at {}: {}", patch.display(), e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to invoke patch at {}: {}",
+            patch.display(),
+            process_failure_detail(&output.status, &output.stderr)
+        ));
+    }
+    Ok(patch)
+}
+
+fn explain_patch_failure(
+    prefix: &str,
+    patch_text: &str,
+    output: &std::process::Output,
+) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        process_failure_detail(&output.status, &output.stderr)
+    };
+    format!("{}: {}\n\nPatch was:\n{}", prefix, detail, patch_text)
+}
+
+#[derive(Debug)]
+struct ParsedPatch {
+    targets: Vec<PatchTarget>,
+}
+
+#[derive(Debug)]
+struct PatchTarget {
+    workspace_rel: String,
+}
+
 fn sed_command(
     ctx: &ToolContext,
     staged_path: &Path,
@@ -487,6 +885,28 @@ fn sed_command(
     direct_sed_command(staged_path, script, staged_script_path, quiet, null_data)
 }
 
+fn append_firejail_prefix(cmd: &mut Command, blacklisted_dir: Option<&Path>) {
+    cmd.arg("--quiet");
+    cmd.arg("--noprofile");
+    cmd.arg("--net=none");
+    cmd.arg("--private");
+    cmd.arg("--private-cache");
+    cmd.arg("--private-dev");
+    cmd.arg("--private-cwd=/");
+
+    if let Some(working_dir) = blacklisted_dir.and_then(|path| path.canonicalize().ok()) {
+        cmd.arg(format!("--blacklist={}", working_dir.display()));
+    }
+
+    cmd.arg("--caps.drop=all");
+    cmd.arg("--nonewprivs");
+    cmd.arg("--nodbus");
+    cmd.arg("--x11=none");
+    cmd.arg("--noinput");
+    cmd.arg("--nosound");
+    cmd.arg("--nou2f");
+}
+
 fn firejail_sed_command(
     ctx: &ToolContext,
     firejail: &Path,
@@ -499,25 +919,7 @@ fn firejail_sed_command(
     let sed = gnu_sed_binary()?;
     let mut cmd = Command::new(firejail);
 
-    cmd.arg("--quiet");
-    cmd.arg("--noprofile");
-    cmd.arg("--net=none");
-    cmd.arg("--private");
-    cmd.arg("--private-cache");
-    cmd.arg("--private-dev");
-    cmd.arg("--private-cwd=/");
-
-    if let Ok(working_dir) = ctx.working_dir.canonicalize() {
-        cmd.arg(format!("--blacklist={}", working_dir.display()));
-    }
-
-    cmd.arg("--caps.drop=all");
-    cmd.arg("--nonewprivs");
-    cmd.arg("--nodbus");
-    cmd.arg("--x11=none");
-    cmd.arg("--noinput");
-    cmd.arg("--nosound");
-    cmd.arg("--nou2f");
+    append_firejail_prefix(&mut cmd, Some(&ctx.working_dir));
     cmd.arg("--");
     cmd.arg(sed);
     append_sed_arguments(
@@ -716,7 +1118,22 @@ async fn execute_edit_inner(
 ) -> std::result::Result<String, EditFailure> {
     let (bytes, text, version) = read_file(path, &req.file_path).await?;
 
-    if version != req.base_version {
+    let missing_base_version = req.base_version.trim().is_empty();
+    if missing_base_version && !is_first_edit_for_session_file(ctx, path) {
+        return Err(failure(
+            &req.file_path,
+            "VERSION_REQUIRED",
+            format!(
+                "Provide version metadata from Read before editing {} again.",
+                req.file_path
+            ),
+            None,
+            Some(version.clone()),
+            None,
+        ));
+    }
+
+    if !missing_base_version && version != req.base_version {
         return Err(failure(
             &req.file_path,
             "VERSION_MISMATCH",
@@ -762,6 +1179,17 @@ async fn execute_edit_inner(
         applied_edits: resolved.len(),
         diff,
     }))
+}
+
+fn is_first_edit_for_session_file(ctx: Option<&ToolContext>, path: &Path) -> bool {
+    let Some(ctx) = ctx else {
+        return false;
+    };
+
+    match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
+        Some(snapshot) => snapshot.file_path != path,
+        None => true,
+    }
 }
 
 /// Compute a version hash from the exact file bytes.
@@ -1338,6 +1766,26 @@ mod tests {
         (result, payload)
     }
 
+    async fn run_edit_request_without_version(
+        ctx: &ToolContext,
+        file_path: &str,
+        edits: Vec<Value>,
+    ) -> (ToolResult, Value) {
+        let tool = EditTool;
+        let result = tool
+            .execute(
+                json!({
+                    "file_path": file_path,
+                    "edits": edits,
+                }),
+                ctx,
+            )
+            .await;
+
+        let payload: Value = serde_json::from_str(&result.content).unwrap();
+        (result, payload)
+    }
+
     async fn run_sed_request(
         ctx: &ToolContext,
         file_path: &str,
@@ -1358,11 +1806,26 @@ mod tests {
         .await
     }
 
+    async fn run_patch_request(ctx: &ToolContext, patch: &str) -> ToolResult {
+        let tool = PatchTool;
+        tool.execute(json!({ "patch": patch }), ctx).await
+    }
+
     fn ensure_sed_runtime() -> bool {
         match gnu_sed_binary() {
             Ok(_) => true,
             Err(err) => {
                 eprintln!("skipping sed test: {err}");
+                false
+            }
+        }
+    }
+
+    fn ensure_patch_runtime() -> bool {
+        match patch_binary() {
+            Ok(_) => true,
+            Err(err) => {
+                eprintln!("skipping patch test: {err}");
                 false
             }
         }
@@ -2023,6 +2486,101 @@ fn sed_command() {}\n";
 
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
+    }
+
+    #[tokio::test]
+    async fn patch_applies_standard_git_diff_and_prints_complete_patch() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-hello world\n+hello there\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
+        assert!(result.content.contains("Applied patch to: sample.txt"));
+        assert!(result.content.contains("Complete patch applied:"));
+        assert!(result.content.contains(patch));
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_invalid_syntax_with_explanatory_error() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+        let result = run_patch_request(&ctx, "diff --git a/sample.txt\n@@ -1 +1 @@\n").await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Malformed diff --git header"));
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_paths_outside_workspace() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/../../etc/passwd b/../../etc/passwd\n--- a/../../etc/passwd\n+++ b/../../etc/passwd\n@@ -1 +1 @@\n-root\n+user\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("attempts path traversal"));
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn patch_reports_when_patch_cannot_apply() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-goodbye world\n+hello there\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Patch could not be applied"));
+        assert!(result.content.contains("Patch was:"));
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn patch_edits_created_test_file_in_multiple_hunks() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "alpha\nbeta\ngamma\n");
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1,3 +1,4 @@\n alpha\n-beta\n+beta patched\n gamma\n+delta\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            read_text(&tmp, "sample.txt"),
+            "alpha\nbeta patched\ngamma\ndelta\n"
+        );
+        assert!(result.content.contains("Applied patch to: sample.txt"));
+        assert!(result.content.contains(patch));
     }
 
     #[tokio::test]

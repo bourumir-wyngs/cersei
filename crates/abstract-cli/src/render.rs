@@ -120,6 +120,10 @@ impl StreamRenderer {
             );
         }
 
+        if name.eq_ignore_ascii_case("patch") {
+            self.print_patch_result(result);
+        }
+
         let _ = execute!(io::stderr(), Print("\n"));
     }
 
@@ -219,6 +223,28 @@ impl StreamRenderer {
         let rendered = skin.term_text(text);
         print!("{rendered}");
         let _ = io::stdout().flush();
+    }
+    fn print_patch_result(&self, result: &str) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
+            if let Some(patch) = value.get("patch").and_then(|v| v.as_str()) {
+                let _ = execute!(io::stderr(), Print("\n"));
+                for line in patch.lines() {
+                    let color = match line.chars().next() {
+                        Some('+') => self.theme.success,
+                        Some('-') => self.theme.error,
+                        _ => self.theme.dim,
+                    };
+                    let _ = execute!(
+                        io::stderr(),
+                        SetForegroundColor(color),
+                        Print("    "),
+                        Print(line),
+                        ResetColor,
+                        Print("\n"),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -323,6 +349,11 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        "Patch" | "patch" => input
+            .get("patch")
+            .and_then(|v| v.as_str())
+            .map(truncate_review_text)
+            .unwrap_or_default(),
         "Revert" | "revert" => input
             .get("file_path")
             .and_then(|v| v.as_str())

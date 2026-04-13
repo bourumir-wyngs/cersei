@@ -76,7 +76,13 @@ impl Tool for FileReadTool {
                     .map(|(i, line)| format!("{:>6}\t{}", start_line + i, line))
                     .collect();
 
-                ToolResult::success(selected.join("\n"))
+                let version = compute_version(content.as_bytes());
+                let note = "Version metadata: use this `current_version` as Edit.base_version. Edit may omit it only on the first call for a file in a session; later calls must provide version metadata from Read.";
+                ToolResult::success(selected.join("\n")).with_metadata(serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "current_version": version,
+                    "edit_hint": note,
+                }))
             }
             Err(e) => ToolResult::error(format!("Failed to read file: {}", e)),
         }
@@ -92,6 +98,10 @@ fn resolve_path(ctx: &ToolContext, input: &str) -> PathBuf {
     };
 
     resolved.canonicalize().unwrap_or(resolved)
+}
+
+fn compute_version(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 #[cfg(test)]

@@ -406,6 +406,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_write::FileWriteTool),
         Box::new(file_edit::EditTool),
         Box::new(file_edit::SedTool),
+        Box::new(file_edit::PatchTool),
         Box::new(file_edit::RevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(grep_tool::GrepTool),

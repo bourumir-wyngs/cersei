@@ -12,6 +12,6 @@ pub fn run(
     }
 
     crate::sessions::save_named(config, name, messages)?;
-    eprintln!("\x1b[90m  Session saved as '{}'\x1b[0m", name);
+    eprintln!("\x1b[33m  Session saved as '{}'\x1b[0m", name);
     Ok(CommandAction::None)
 }

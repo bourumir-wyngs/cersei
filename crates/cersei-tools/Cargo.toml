@@ -39,7 +39,6 @@ url = { workspace = true }
 chromiumoxide = { workspace = true }
 giacrs = { workspace = true, optional = true }
 gix = { workspace = true }
-vicut = "0.4.2"
 
 [features]
 cas = ["giacrs"]

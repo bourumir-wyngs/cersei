@@ -140,6 +140,8 @@ pub async fn run_repl(
     let mut cmd_registry = commands::CommandRegistry::new();
     let mut is_first_turn = true;
     let mut current_model = repl_config.model.clone();
+    let mut exit_session_name: Option<String> = None;
+
 
     loop {
         // Prefer API-reported input tokens (exact); fall back to rough estimate before first turn
@@ -184,7 +186,10 @@ pub async fn run_repl(
                         Ok(commands::CommandAction::SaveSession { name }) => {
                             let msgs = agent.messages();
                             match crate::sessions::save_named(&repl_config, &name, &msgs) {
-                                Ok(_) => eprintln!("\x1b[90m  Session saved as '{}'\x1b[0m", name),
+                                Ok(_) => {
+                                    exit_session_name = Some(name.clone());
+                                    eprintln!("\x1b[33m  Session saved as '{}'\x1b[0m", name);
+                                }
                                 Err(e) => eprintln!("\x1b[31m  Save failed: {e}\x1b[0m"),
                             }
                         }
@@ -277,7 +282,30 @@ pub async fn run_repl(
                     renderer.error(&err_msg);
                     signal_handle.reset();
 
-                    if is_provider_error(&err_msg) {
+                    if err_msg.trim() == "Cancelled" {
+                        let msgs = agent.messages();
+                        match app::build_agent(
+                            &current_model,
+                            &repl_config,
+                            memory_manager,
+                            session_id,
+                            signal_handle.token(),
+                            Some(msgs),
+                            tool_extensions.clone(),
+                        ) {
+                            Ok((new_agent, resolved)) => {
+                                agent = new_agent;
+                                current_model = if let Some((provider, _)) = current_model.split_once('/') {
+                                    format!("{provider}/{resolved}")
+                                } else {
+                                    resolved.clone()
+                                };
+                                repl_config.model = current_model.clone();
+                                status.set_model(&current_model);
+                            }
+                            Err(e) => renderer.error(&format!("Reset after cancel failed: {e}")),
+                        }
+                    } else if is_provider_error(&err_msg) {
                         match prompt_recovery(&current_model, &repl_config) {
                             Recovery::Retry => {
                                 should_retry = true;
@@ -334,7 +362,10 @@ pub async fn run_repl(
         }
     }
 
-    eprintln!("\x1b[90mSession saved.\x1b[0m");
+    let exit_name = exit_session_name.as_deref().unwrap_or(session_id);
+    let msgs = agent.messages();
+    crate::sessions::save_named(&repl_config, exit_name, &msgs)?;
+    eprintln!("\x1b[33mSession saved as '{}'\x1b[0m", exit_name);
     Ok(())
 }
 
