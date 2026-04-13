@@ -4,8 +4,11 @@ use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
-use rustyline::{Config, Editor, Helper};
+use rustyline::validate::{ValidationContext, ValidationResult, Validator};
+use rustyline::{
+    Cmd, ConditionalEventHandler, Config, Editor, Event, EventContext, EventHandler, Helper,
+    KeyCode, KeyEvent, Modifiers, RepeatCount,
+};
 use std::borrow::Cow;
 
 use crate::config;
@@ -74,8 +77,48 @@ impl Highlighter for AbstractHelper {
     }
 }
 
-impl Validator for AbstractHelper {}
+fn has_unescaped_trailing_backslash(input: &str) -> bool {
+    let line = input.strip_suffix('\n').unwrap_or(input);
+    let trailing_backslashes = line.chars().rev().take_while(|&c| c == '\\').count();
+    trailing_backslashes % 2 == 1
+}
+
+impl Validator for AbstractHelper {
+    fn validate(&self, ctx: &mut ValidationContext<'_>) -> rustyline::Result<ValidationResult> {
+        let input = ctx.input();
+        if (!input.is_empty() && input.ends_with('\n')) || has_unescaped_trailing_backslash(input) {
+            Ok(ValidationResult::Incomplete)
+        } else {
+            Ok(ValidationResult::Valid(None))
+        }
+    }
+}
 impl Helper for AbstractHelper {}
+
+struct ShiftEnterHandler;
+
+impl ConditionalEventHandler for ShiftEnterHandler {
+    fn handle(
+        &self,
+        evt: &Event,
+        _: RepeatCount,
+        _: bool,
+        ctx: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        if matches!(evt, Event::KeySeq(seq) if seq.len() == 1 && seq[0] == KeyEvent(KeyCode::Enter, Modifiers::SHIFT)) {
+            return Some(Cmd::Insert(1, "\n".to_string()));
+        }
+
+        if matches!(evt, Event::KeySeq(seq) if seq.len() == 1 && seq[0] == KeyEvent(KeyCode::Enter, Modifiers::NONE)) {
+            let input = ctx.line();
+            if !input.is_empty() && input.ends_with('\n') {
+                return Some(Cmd::AcceptLine);
+            }
+        }
+
+        None
+    }
+}
 
 // ─── Input reader ──────────────────────────────────────────────────────────
 
@@ -92,6 +135,14 @@ impl InputReader {
 
         let mut editor = Editor::with_config(config)?;
         editor.set_helper(Some(AbstractHelper::new()));
+        editor.bind_sequence(
+            Event::from(KeyEvent(KeyCode::Enter, Modifiers::SHIFT)),
+            EventHandler::Conditional(Box::new(ShiftEnterHandler)),
+        );
+        editor.bind_sequence(
+            Event::from(KeyEvent(KeyCode::Enter, Modifiers::NONE)),
+            EventHandler::Conditional(Box::new(ShiftEnterHandler)),
+        );
 
         // Load history
         let history_path = config::history_path();
@@ -106,11 +157,18 @@ impl InputReader {
     pub fn readline(&mut self, prompt: &str) -> Option<String> {
         match self.editor.readline(prompt) {
             Ok(line) => {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
+                let normalized = line
+                    .lines()
+                    .map(|line| line.strip_suffix('\\').unwrap_or(line))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string();
+
+                if normalized.is_empty() {
                     return Some(String::new());
                 }
-                Some(trimmed)
+                Some(normalized)
             }
             Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => None,
             Err(_) => None,
