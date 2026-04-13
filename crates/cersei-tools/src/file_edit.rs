@@ -1852,6 +1852,103 @@ impl Tool for SedTool {\n\
     }
 
     #[tokio::test]
+    async fn sequential_boundary_edits_keep_versions_and_apply_nearby_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let initial = "\
+alpha\n\
+\n\
+#[async_trait]\n\
+impl Tool for SedTool {\n\
+    fn name(&self) -> &str {\n\
+        \"Sed\"\n\
+    }\n\
+}\n";
+        write_text(&tmp, "sample.txt", initial);
+        let ctx = test_ctx(tmp.path());
+
+        let (first_result, first_payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            compute_version(initial.as_bytes()),
+            vec![json!({
+                "start_line": 2,
+                "start_column": 1,
+                "end_line": 2,
+                "end_column": 1,
+                "expected_text": "",
+                "new_text": "pub struct PatchTool;\n"
+            })],
+        )
+        .await;
+
+        assert!(!first_result.is_error, "{}", first_result.content);
+        let after_first = read_text(&tmp, "sample.txt");
+        let first_version = first_payload["new_version"].as_str().unwrap().to_string();
+        assert_eq!(first_version, compute_version(after_first.as_bytes()));
+
+        let (second_result, second_payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            first_version.clone(),
+            vec![json!({
+                "start_line": 4,
+                "start_column": 1,
+                "end_line": 4,
+                "end_column": 1,
+                "expected_text": "#[async_trait]\nimpl Tool for SedTool {",
+                "new_text": "#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"
+            })],
+        )
+        .await;
+
+        assert!(!second_result.is_error, "{}", second_result.content);
+        assert_eq!(second_payload["applied_edits"], json!(1));
+        let final_text = read_text(&tmp, "sample.txt");
+        assert!(final_text.contains("pub struct PatchTool;"));
+        assert!(final_text.contains("#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"));
+        assert_eq!(
+            second_payload["new_version"],
+            json!(compute_version(final_text.as_bytes()))
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatch_reports_context_for_newline_boundary_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let initial = "\
+fn create_sed_staging_dir() -> std::result::Result<(), String> {\n\
+    Ok(())\n\
+}\n\
+\n\
+fn sed_command() {}\n";
+        write_text(&tmp, "sample.txt", initial);
+        let ctx = test_ctx(tmp.path());
+
+        let (result, payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            compute_version(initial.as_bytes()),
+            vec![json!({
+                "start_line": 4,
+                "start_column": 1,
+                "end_line": 5,
+                "end_column": 1,
+                "expected_text": "fn missing_command(",
+                "new_text": "ignored"
+            })],
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert_eq!(payload["code"], json!("EXPECTED_TEXT_MISMATCH"));
+        assert_eq!(payload["actual_text"], json!("\n"));
+        let message = payload["message"].as_str().unwrap();
+        assert!(message.contains("Nearby context:"));
+        assert!(message.contains("fn sed_command() {}"));
+        assert_eq!(read_text(&tmp, "sample.txt"), initial);
+    }
+
+    #[tokio::test]
     async fn sed_successful_edit() {
         if !ensure_sed_runtime() {
             return;
