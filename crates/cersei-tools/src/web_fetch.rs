@@ -84,12 +84,12 @@ impl Tool for WebFetchTool {
         };
 
         // Truncate if needed
-        let text = if text.len() > max_chars {
+        let char_count = text.chars().count();
+        let text = if char_count > max_chars {
+            let truncated: String = text.chars().take(max_chars).collect();
             format!(
                 "{}\n\n[Truncated: {} chars total, showing first {}]",
-                &text[..max_chars],
-                text.len(),
-                max_chars
+                truncated, char_count, max_chars
             )
         } else {
             text
