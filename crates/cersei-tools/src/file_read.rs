@@ -118,12 +118,17 @@ mod tests {
     async fn read_offset_is_one_based() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sample.txt");
-        tokio::fs::write(&path, "line1\nline2\nline3\n").await.unwrap();
+        tokio::fs::write(&path, "line1\nline2\nline3\n")
+            .await
+            .unwrap();
         let ctx = test_ctx(tmp.path());
         let tool = FileReadTool;
 
         let result = tool
-            .execute(json!({ "file_path": "sample.txt", "offset": 1, "limit": 2 }), &ctx)
+            .execute(
+                json!({ "file_path": "sample.txt", "offset": 1, "limit": 2 }),
+                &ctx,
+            )
             .await;
 
         assert!(!result.is_error, "{}", result.content);
@@ -134,12 +139,17 @@ mod tests {
     async fn read_offset_two_starts_at_line_two() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sample.txt");
-        tokio::fs::write(&path, "line1\nline2\nline3\n").await.unwrap();
+        tokio::fs::write(&path, "line1\nline2\nline3\n")
+            .await
+            .unwrap();
         let ctx = test_ctx(tmp.path());
         let tool = FileReadTool;
 
         let result = tool
-            .execute(json!({ "file_path": "sample.txt", "offset": 2, "limit": 2 }), &ctx)
+            .execute(
+                json!({ "file_path": "sample.txt", "offset": 2, "limit": 2 }),
+                &ctx,
+            )
             .await;
 
         assert!(!result.is_error, "{}", result.content);
@@ -150,12 +160,17 @@ mod tests {
     async fn read_offset_zero_returns_one_based_error() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sample.txt");
-        tokio::fs::write(&path, "line1\nline2\nline3\n").await.unwrap();
+        tokio::fs::write(&path, "line1\nline2\nline3\n")
+            .await
+            .unwrap();
         let ctx = test_ctx(tmp.path());
         let tool = FileReadTool;
 
         let result = tool
-            .execute(json!({ "file_path": "sample.txt", "offset": 0, "limit": 2 }), &ctx)
+            .execute(
+                json!({ "file_path": "sample.txt", "offset": 0, "limit": 2 }),
+                &ctx,
+            )
             .await;
 
         assert!(result.is_error);

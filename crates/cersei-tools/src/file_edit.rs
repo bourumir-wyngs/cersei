@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 use tokio::process::Command;
 
@@ -19,9 +20,11 @@ struct LastEditSnapshot {
 static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapshot>> =
     Lazy::new(dashmap::DashMap::new);
 static GNU_SED_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_gnu_sed);
-static FIREJAIL_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_firejail);
+static FIREJAIL_BINARY: Lazy<Option<PathBuf>> = Lazy::new(probe_firejail);
+static FIREJAIL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 const INLINE_SED_SCRIPT_MAX_BYTES: usize = 1024;
+const SED_STAGING_ROOT: &str = "/tmp";
 pub struct EditTool;
 pub struct SedTool;
 pub struct RevertTool;
@@ -410,10 +413,7 @@ async fn run_sed_script(
     null_data: bool,
     original_bytes: &[u8],
 ) -> std::result::Result<Vec<u8>, String> {
-    let staged_dir = tempfile::Builder::new()
-        .prefix("cersei-sed-")
-        .tempdir()
-        .map_err(|e| format!("Failed to create sed staging directory: {}", e))?;
+    let staged_dir = create_sed_staging_dir()?;
     let file_name = path
         .file_name()
         .filter(|name| !name.is_empty())
@@ -434,7 +434,7 @@ async fn run_sed_script(
         None
     };
 
-    let mut cmd = sandboxed_sed_command(
+    let mut cmd = sed_command(
         ctx,
         &staged_path,
         script,
@@ -450,20 +450,20 @@ async fn run_sed_script(
     if output.status.success() {
         Ok(output.stdout)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let detail = if stderr.is_empty() {
-            match output.status.code() {
-                Some(code) => format!("exit status {}", code),
-                None => "terminated by signal".to_string(),
-            }
-        } else {
-            stderr
-        };
+        let detail = process_failure_detail(&output.status, &output.stderr);
         Err(format!("Failed to run sed script: {}", detail))
     }
 }
 
-fn sandboxed_sed_command(
+fn create_sed_staging_dir() -> std::result::Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix("cersei-sed-")
+        .tempdir_in(SED_STAGING_ROOT)
+        .or_else(|_| tempfile::Builder::new().prefix("cersei-sed-").tempdir())
+        .map_err(|e| format!("Failed to create sed staging directory: {}", e))
+}
+
+fn sed_command(
     ctx: &ToolContext,
     staged_path: &Path,
     script: &str,
@@ -471,8 +471,31 @@ fn sandboxed_sed_command(
     quiet: bool,
     null_data: bool,
 ) -> std::result::Result<Command, String> {
+    if let Some(firejail) = firejail_binary() {
+        return firejail_sed_command(
+            ctx,
+            &firejail,
+            staged_path,
+            script,
+            staged_script_path,
+            quiet,
+            null_data,
+        );
+    }
+
+    direct_sed_command(staged_path, script, staged_script_path, quiet, null_data)
+}
+
+fn firejail_sed_command(
+    ctx: &ToolContext,
+    firejail: &Path,
+    staged_path: &Path,
+    script: &str,
+    staged_script_path: Option<&Path>,
+    quiet: bool,
+    null_data: bool,
+) -> std::result::Result<Command, String> {
     let sed = gnu_sed_binary()?;
-    let firejail = firejail_binary()?;
     let mut cmd = Command::new(firejail);
 
     cmd.arg("--quiet");
@@ -480,7 +503,6 @@ fn sandboxed_sed_command(
     cmd.arg("--net=none");
     cmd.arg("--private");
     cmd.arg("--private-cache");
-    cmd.arg("--private-bin=sed");
     cmd.arg("--private-dev");
     cmd.arg("--private-cwd=/");
 
@@ -495,9 +517,47 @@ fn sandboxed_sed_command(
     cmd.arg("--noinput");
     cmd.arg("--nosound");
     cmd.arg("--nou2f");
-    cmd.arg("--shell=none");
     cmd.arg("--");
     cmd.arg(sed);
+    append_sed_arguments(
+        &mut cmd,
+        staged_path,
+        script,
+        staged_script_path,
+        quiet,
+        null_data,
+    );
+    Ok(cmd)
+}
+
+fn direct_sed_command(
+    staged_path: &Path,
+    script: &str,
+    staged_script_path: Option<&Path>,
+    quiet: bool,
+    null_data: bool,
+) -> std::result::Result<Command, String> {
+    let sed = gnu_sed_binary()?;
+    let mut cmd = Command::new(sed);
+    append_sed_arguments(
+        &mut cmd,
+        staged_path,
+        script,
+        staged_script_path,
+        quiet,
+        null_data,
+    );
+    Ok(cmd)
+}
+
+fn append_sed_arguments(
+    cmd: &mut Command,
+    staged_path: &Path,
+    script: &str,
+    staged_script_path: Option<&Path>,
+    quiet: bool,
+    null_data: bool,
+) {
     cmd.arg("-E");
     cmd.arg("--sandbox");
     if quiet {
@@ -515,7 +575,6 @@ fn sandboxed_sed_command(
     }
     cmd.arg("--");
     cmd.arg(staged_path);
-    Ok(cmd)
 }
 
 fn gnu_sed_binary() -> std::result::Result<PathBuf, String> {
@@ -525,11 +584,8 @@ fn gnu_sed_binary() -> std::result::Result<PathBuf, String> {
     }
 }
 
-fn firejail_binary() -> std::result::Result<PathBuf, String> {
-    match &*FIREJAIL_BINARY {
-        Ok(path) => Ok(path.clone()),
-        Err(err) => Err(err.clone()),
-    }
+fn firejail_binary() -> Option<PathBuf> {
+    FIREJAIL_BINARY.clone()
 }
 
 fn probe_gnu_sed() -> std::result::Result<PathBuf, String> {
@@ -543,7 +599,7 @@ fn probe_gnu_sed() -> std::result::Result<PathBuf, String> {
     let help = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() || !help.contains("--sandbox") {
         return Err(format!(
-            "System sed at {} does not support `--sandbox`; GNU sed on Ubuntu is required.",
+            "System sed at {} does not support `--sandbox`; GNU sed with sandbox support is required.",
             sed.display()
         ));
     }
@@ -551,31 +607,98 @@ fn probe_gnu_sed() -> std::result::Result<PathBuf, String> {
     Ok(sed)
 }
 
-fn probe_firejail() -> std::result::Result<PathBuf, String> {
-    let firejail = which::which("firejail").map_err(|_| {
-        "firejail not found in PATH; install `firejail` because SedTool requires sandboxed execution."
-            .to_string()
-    })?;
-    let status = std::process::Command::new(&firejail)
+fn probe_firejail() -> Option<PathBuf> {
+    let firejail = match which::which("firejail") {
+        Ok(path) => path,
+        Err(_) => return None,
+    };
+    let sed = match gnu_sed_binary() {
+        Ok(path) => path,
+        Err(_) => return None,
+    };
+    let staged_file =
+        match NamedTempFile::new_in(SED_STAGING_ROOT).or_else(|_| NamedTempFile::new()) {
+            Ok(file) => file,
+            Err(err) => {
+                warn_firejail_fallback(format!("probe file setup failed: {}", err));
+                return None;
+            }
+        };
+    if let Err(err) = std::fs::write(staged_file.path(), b"probe\n") {
+        warn_firejail_fallback(format!("probe file setup failed: {}", err));
+        return None;
+    }
+
+    let output = match std::process::Command::new(&firejail)
         .args([
             "--quiet",
             "--noprofile",
             "--net=none",
-            "--shell=none",
+            "--private",
+            "--private-cache",
+            "--private-dev",
+            "--private-cwd=/",
+            "--caps.drop=all",
+            "--nonewprivs",
+            "--nodbus",
+            "--x11=none",
+            "--noinput",
+            "--nosound",
+            "--nou2f",
             "--",
-            "true",
         ])
-        .status()
-        .map_err(|e| format!("Failed to probe firejail at {}: {}", firejail.display(), e))?;
+        .arg(&sed)
+        .arg("-E")
+        .arg("--sandbox")
+        .arg("--expression")
+        .arg("s/probe/probe/")
+        .arg("--")
+        .arg(staged_file.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => {
+            warn_firejail_fallback(format!(
+                "failed to probe firejail at {}: {}",
+                firejail.display(),
+                err
+            ));
+            return None;
+        }
+    };
 
-    if !status.success() {
-        return Err(format!(
-            "firejail at {} is installed but not functional; SedTool requires a working firejail sandbox.",
-            firejail.display()
+    if output.status.success() && output.stdout == b"probe\n" {
+        Some(firejail)
+    } else {
+        warn_firejail_fallback(format!(
+            "firejail at {} cannot launch sandboxed sed ({})",
+            firejail.display(),
+            process_failure_detail(&output.status, &output.stderr)
         ));
+        None
     }
+}
 
-    Ok(firejail)
+fn process_failure_detail(status: &std::process::ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
+    if stderr.is_empty() {
+        match status.code() {
+            Some(code) => format!("exit status {}", code),
+            None => "terminated by signal".to_string(),
+        }
+    } else {
+        stderr
+    }
+}
+
+fn warn_firejail_fallback(detail: String) {
+    if FIREJAIL_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!(
+        "warning: SedTool firejail sandbox unavailable ({}); falling back to direct `sed --sandbox` on staged temp files.",
+        detail
+    );
 }
 
 pub async fn execute_edit(req: EditRequest) -> std::result::Result<String, String> {
@@ -1154,9 +1277,9 @@ mod tests {
     }
 
     fn ensure_sed_runtime() -> bool {
-        match (gnu_sed_binary(), firejail_binary()) {
-            (Ok(_), Ok(_)) => true,
-            (Err(err), _) | (_, Err(err)) => {
+        match gnu_sed_binary() {
+            Ok(_) => true,
+            Err(err) => {
                 eprintln!("skipping sed test: {err}");
                 false
             }
