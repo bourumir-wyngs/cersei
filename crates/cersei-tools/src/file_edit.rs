@@ -25,6 +25,7 @@ static FIREJAIL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
 
 const INLINE_SED_SCRIPT_MAX_BYTES: usize = 1024;
 const SED_STAGING_ROOT: &str = "/tmp";
+const EXPECTED_TEXT_SEARCH_WINDOW_BYTES: usize = 256;
 pub struct EditTool;
 pub struct SedTool;
 pub struct RevertTool;
@@ -902,6 +903,59 @@ fn position_to_offset(
     Ok(info.start + byte_offset)
 }
 
+fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+fn ceil_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset < text.len() && !text.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
+}
+
+fn unique_nearby_expected_match(
+    text: &str,
+    start: usize,
+    end: usize,
+    expected_text: &str,
+) -> Option<(usize, usize)> {
+    if expected_text.is_empty() {
+        return None;
+    }
+
+    let search_start = floor_char_boundary(
+        text,
+        start.saturating_sub(EXPECTED_TEXT_SEARCH_WINDOW_BYTES),
+    );
+    let search_end = ceil_char_boundary(
+        text,
+        end.saturating_add(expected_text.len())
+            .saturating_add(EXPECTED_TEXT_SEARCH_WINDOW_BYTES),
+    );
+    let search = &text[search_start..search_end];
+
+    let mut matches = search.match_indices(expected_text);
+    let (first_match, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    let matched_start = search_start + first_match;
+    Some((matched_start, matched_start + expected_text.len()))
+}
+
+fn mismatch_context(text: &str, start: usize, end: usize) -> String {
+    let context_start = floor_char_boundary(text, start.saturating_sub(40));
+    let context_end = ceil_char_boundary(text, end.saturating_add(40));
+    text[context_start..context_end].escape_debug().to_string()
+}
+
 fn resolve_edits(
     text: &str,
     index: &DocumentIndex,
@@ -955,17 +1009,45 @@ fn resolve_edits(
         }
 
         let actual = &text[start..end];
-        if actual != edit.expected_text {
+        let (start, end) = if actual != edit.expected_text {
+            if let Some((matched_start, matched_end)) =
+                unique_nearby_expected_match(text, start, end, &edit.expected_text)
+            {
+                (matched_start, matched_end)
+            } else {
+                return Err(failure(
+                    file_path,
+                    "EXPECTED_TEXT_MISMATCH",
+                    format!(
+                        "Edit {} expected text does not match the current file content at byte range {}..{}. Nearby context: \"{}\".",
+                        edit_index,
+                        start,
+                        end,
+                        mismatch_context(text, start, end)
+                    ),
+                    Some(edit_index),
+                    Some(current_version.to_string()),
+                    Some(actual.to_string()),
+                ));
+            }
+        } else {
+            (start, end)
+        };
+
+        if &text[start..end] != edit.expected_text {
             return Err(failure(
                 file_path,
                 "EXPECTED_TEXT_MISMATCH",
                 format!(
-                    "Edit {} expected text does not match the current file content.",
-                    edit_index
+                    "Edit {} expected text does not match the current file content at byte range {}..{}. Nearby context: \"{}\".",
+                    edit_index,
+                    start,
+                    end,
+                    mismatch_context(text, start, end)
                 ),
                 Some(edit_index),
                 Some(current_version.to_string()),
-                Some(actual.to_string()),
+                Some(text[start..end].to_string()),
             ));
         }
 
@@ -1633,6 +1715,140 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(payload["applied_edits"], json!(1));
         assert_eq!(read_text(&tmp, "sample.txt"), "hello\n");
+    }
+
+    #[tokio::test]
+    async fn nearby_attribute_boundary_match_recovers_after_prior_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let initial = "\
+pub struct EditTool;\n\
+pub struct SedTool;\n\
+\n\
+#[async_trait]\n\
+impl Tool for SedTool {\n\
+    fn name(&self) -> &str {\n\
+        \"Sed\"\n\
+    }\n\
+}\n";
+        write_text(&tmp, "sample.txt", initial);
+        let ctx = test_ctx(tmp.path());
+
+        let (first_result, first_payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            compute_version(initial.as_bytes()),
+            vec![json!({
+                "start_line": 3,
+                "start_column": 1,
+                "end_line": 3,
+                "end_column": 1,
+                "expected_text": "",
+                "new_text": "pub struct PatchTool;\n"
+            })],
+        )
+        .await;
+
+        assert!(!first_result.is_error, "{}", first_result.content);
+
+        let after_first = read_text(&tmp, "sample.txt");
+        let (second_result, second_payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            first_payload["new_version"].as_str().unwrap().to_string(),
+            vec![json!({
+                "start_line": 4,
+                "start_column": 1,
+                "end_line": 4,
+                "end_column": 1,
+                "expected_text": "#[async_trait]\nimpl Tool for SedTool {",
+                "new_text": "#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"
+            })],
+        )
+        .await;
+
+        assert!(!second_result.is_error, "{}", second_result.content);
+        let updated = read_text(&tmp, "sample.txt");
+        assert!(after_first.contains("#[async_trait]\nimpl Tool for SedTool {"));
+        assert!(updated.contains("pub struct PatchTool;"));
+        assert!(updated.contains("#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"));
+        assert_eq!(second_payload["applied_edits"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn nearby_function_boundary_match_recovers_from_newline_only_slice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let initial = "\
+fn create_sed_staging_dir() -> std::result::Result<(), String> {\n\
+    Ok(())\n\
+}\n\
+\n\
+fn sed_command() {}\n";
+        write_text(&tmp, "sample.txt", initial);
+        let ctx = test_ctx(tmp.path());
+
+        let (result, payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            compute_version(initial.as_bytes()),
+            vec![json!({
+                "start_line": 4,
+                "start_column": 1,
+                "end_line": 5,
+                "end_column": 1,
+                "expected_text": "fn sed_command(",
+                "new_text": "fn patch_helper() {}\n\nfn sed_command("
+            })],
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(payload["applied_edits"], json!(1));
+        assert_eq!(
+            read_text(&tmp, "sample.txt"),
+            "\
+fn create_sed_staging_dir() -> std::result::Result<(), String> {\n\
+    Ok(())\n\
+}\n\
+\n\
+fn patch_helper() {}\n\
+\n\
+fn sed_command() {}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn nearby_match_remains_rejected_when_ambiguous() {
+        let tmp = tempfile::tempdir().unwrap();
+        let initial = "\
+#[async_trait]\n\
+impl Tool for SedTool {\n\
+}\n\
+\n\
+#[async_trait]\n\
+impl Tool for SedTool {\n\
+}\n";
+        write_text(&tmp, "sample.txt", initial);
+        let ctx = test_ctx(tmp.path());
+
+        let (result, payload) = run_edit_request(
+            &ctx,
+            "sample.txt",
+            compute_version(initial.as_bytes()),
+            vec![json!({
+                "start_line": 4,
+                "start_column": 1,
+                "end_line": 4,
+                "end_column": 1,
+                "expected_text": "#[async_trait]\nimpl Tool for SedTool {",
+                "new_text": "ignored"
+            })],
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert_eq!(payload["code"], json!("EXPECTED_TEXT_MISMATCH"));
+        assert_eq!(payload["actual_text"], json!(""));
+        assert_eq!(read_text(&tmp, "sample.txt"), initial);
     }
 
     #[tokio::test]
