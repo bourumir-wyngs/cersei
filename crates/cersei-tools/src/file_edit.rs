@@ -1,7 +1,7 @@
 //! Exact-position and GNU sed-backed file editing with one-step session-local revert.
 
 use super::*;
-use crate::file_history::{unified_diff, FileHistory};
+use crate::file_history::{FileHistory, unified_diff};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
@@ -14,7 +14,7 @@ use tokio::process::Command;
 #[derive(Debug, Clone)]
 struct LastEditSnapshot {
     file_path: PathBuf,
-    content: Vec<u8>,
+    content: Option<Vec<u8>>,
 }
 
 static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapshot>> =
@@ -328,7 +328,7 @@ impl Tool for SedTool {
 
         let snapshot = LastEditSnapshot {
             file_path: path.clone(),
-            content: original_bytes.clone(),
+            content: Some(original_bytes.clone()),
         };
         let previous_snapshot =
             LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
@@ -364,7 +364,7 @@ impl Tool for RevertTool {
     }
 
     fn description(&self) -> &str {
-        "Restore the previous checkpoint from the most recent successful `Edit` or `Sed` \
+        "Restore the previous checkpoint from the most recent successful `Edit`, `Sed`, or `Patch` \
          edit in this session. Only one checkpoint is retained."
     }
 
@@ -403,8 +403,8 @@ impl Tool for RevertTool {
             Some(entry) => entry.clone(),
             None => {
                 return ToolResult::error(
-                    "No edit snapshot is available to revert. Run `Edit` or `Sed` first.",
-                )
+                    "No edit snapshot is available to revert. Run `Edit`, `Sed`, or `Patch` first.",
+                );
             }
         };
 
@@ -422,14 +422,31 @@ impl Tool for RevertTool {
             }
         }
 
-        let current_bytes = tokio::fs::read(&snapshot.file_path)
-            .await
+        let current_bytes = match read_optional_bytes(&snapshot.file_path).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return ToolResult::error(format!(
+                    "Failed to read current file state for revert: {}",
+                    e
+                ));
+            }
+        };
+        let current_text = current_bytes
+            .as_ref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
             .unwrap_or_default();
-        let current_text = String::from_utf8_lossy(&current_bytes).into_owned();
-        let restored_text = String::from_utf8_lossy(&snapshot.content).into_owned();
+        let restored_text = snapshot
+            .content
+            .as_ref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
 
-        if let Err(e) = write_bytes(&snapshot.file_path, &snapshot.content).await {
-            return ToolResult::error(format!("Failed to write file: {}", e));
+        let restore_result = match snapshot.content.as_deref() {
+            Some(bytes) => write_bytes(&snapshot.file_path, bytes).await,
+            None => remove_file_if_exists(&snapshot.file_path).await,
+        };
+        if let Err(e) = restore_result {
+            return ToolResult::error(format!("Failed to restore file: {}", e));
         }
 
         if let Some(history) = ctx.extensions.get::<FileHistory>() {
@@ -561,18 +578,24 @@ async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result
     for target in &parsed.targets {
         let workspace_path = ctx.working_dir.join(&target.workspace_rel);
         let staged_path = staging_dir.path().join(&target.workspace_rel);
-        let old_bytes = tokio::fs::read(&workspace_path)
+        let old_bytes = read_optional_bytes(&workspace_path)
             .await
             .map_err(|e| format!("Failed to read {}: {}", target.workspace_rel, e))?;
-        let new_bytes = tokio::fs::read(&staged_path)
+        let new_bytes = read_optional_bytes(&staged_path)
             .await
             .map_err(|e| format!("Failed to read staged {}: {}", target.workspace_rel, e))?;
         if old_bytes == new_bytes {
             continue;
         }
 
-        let old_text = String::from_utf8_lossy(&old_bytes).into_owned();
-        let new_text = String::from_utf8_lossy(&new_bytes).into_owned();
+        let old_text = old_bytes
+            .as_ref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
+        let new_text = new_bytes
+            .as_ref()
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_default();
         let snapshot = LastEditSnapshot {
             file_path: workspace_path.clone(),
             content: old_bytes.clone(),
@@ -582,13 +605,22 @@ async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result
             previous_snapshot = prior;
         }
 
-        if let Err(err) = write_bytes(&workspace_path, &new_bytes).await {
+        let apply_result = match new_bytes.as_deref() {
+            Some(bytes) => write_bytes(&workspace_path, bytes).await,
+            None => remove_file_if_exists(&workspace_path).await,
+        };
+        if let Err(err) = apply_result {
             restore_previous_snapshot(&ctx.session_id, previous_snapshot);
             return Err(format!("Failed to write {}: {}", target.workspace_rel, err));
         }
 
         if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.record_change(&workspace_path, Some(&old_text), &new_text, "patch");
+            history.record_change(
+                &workspace_path,
+                old_bytes.as_ref().map(|_| old_text.as_str()),
+                &new_text,
+                "patch",
+            );
         }
         changed_files.push(target.workspace_rel.clone());
     }
@@ -638,7 +670,10 @@ fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, St
                 Some(new_header.as_str()),
             )?;
             let workspace_rel = normalize_patch_workspace_path(&target_path)?;
-            if !targets.iter().any(|t: &PatchTarget| t.workspace_rel == workspace_rel) {
+            if !targets
+                .iter()
+                .any(|t: &PatchTarget| t.workspace_rel == workspace_rel)
+            {
                 targets.push(PatchTarget { workspace_rel });
             }
             git_old = None;
@@ -743,17 +778,19 @@ async fn stage_patch_targets(
     targets: &[PatchTarget],
 ) -> std::result::Result<(), String> {
     for target in targets {
-        let workspace_path = resolve_existing_workspace_path(ctx, &target.workspace_rel)
-            .map_err(|err| err.content)?;
+        let workspace_path =
+            resolve_workspace_path(ctx, &target.workspace_rel, false).map_err(|err| err.content)?;
         let staged_path = staging_dir.path().join(&target.workspace_rel);
         if let Some(parent) = staged_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to prepare patch staging directory: {}", e))?;
         }
-        tokio::fs::copy(&workspace_path, &staged_path)
-            .await
-            .map_err(|e| format!("Failed to stage {}: {}", target.workspace_rel, e))?;
+        match tokio::fs::copy(&workspace_path, &staged_path).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Failed to stage {}: {}", target.workspace_rel, e)),
+        }
     }
     Ok(())
 }
@@ -819,8 +856,9 @@ fn patch_binary() -> std::result::Result<PathBuf, String> {
 }
 
 fn probe_patch() -> std::result::Result<PathBuf, String> {
-    let patch = which::which("patch")
-        .map_err(|_| "System `patch` binary not found in PATH; install patch on the host OS.".to_string())?;
+    let patch = which::which("patch").map_err(|_| {
+        "System `patch` binary not found in PATH; install patch on the host OS.".to_string()
+    })?;
     let output = std::process::Command::new(&patch)
         .arg("--version")
         .output()
@@ -835,11 +873,7 @@ fn probe_patch() -> std::result::Result<PathBuf, String> {
     Ok(patch)
 }
 
-fn explain_patch_failure(
-    prefix: &str,
-    patch_text: &str,
-    output: &std::process::Output,
-) -> String {
+fn explain_patch_failure(prefix: &str, patch_text: &str, output: &std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let detail = if !stderr.is_empty() {
@@ -1162,7 +1196,7 @@ async fn execute_edit_inner(
                 ctx.session_id.clone(),
                 LastEditSnapshot {
                     file_path: path.to_path_buf(),
-                    content: bytes,
+                    content: Some(bytes),
                 },
             );
         }
@@ -1657,6 +1691,22 @@ async fn write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     tokio::fs::write(path, bytes).await
 }
 
+async fn read_optional_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+async fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 fn resolve_existing_workspace_path(
     ctx: &ToolContext,
     input: &str,
@@ -1711,7 +1761,7 @@ fn restore_previous_snapshot(
 mod tests {
     use super::*;
     use crate::permissions::AllowAll;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::Arc;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -2441,9 +2491,11 @@ fn sed_command() {}\n";
         let result = run_sed_request(&ctx, "sample.txt", "1r /etc/passwd\n", false, false).await;
 
         assert!(result.is_error);
-        assert!(result
-            .content
-            .contains("e/r/w commands disabled in sandbox mode"));
+        assert!(
+            result
+                .content
+                .contains("e/r/w commands disabled in sandbox mode")
+        );
         assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
     }
 
@@ -2506,6 +2558,55 @@ fn sed_command() {}\n";
         assert!(result.content.contains("Applied patch to: sample.txt"));
         assert!(result.content.contains("Complete patch applied:"));
         assert!(result.content.contains(patch));
+    }
+
+    #[tokio::test]
+    async fn patch_creates_new_file_and_revert_removes_it() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/nested/new.txt b/nested/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/nested/new.txt\n@@ -0,0 +1 @@\n+hello there\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(read_text(&tmp, "nested/new.txt"), "hello there\n");
+
+        let revert_tool = RevertTool;
+        let revert = revert_tool
+            .execute(json!({ "file_path": "nested/new.txt" }), &ctx)
+            .await;
+
+        assert!(!revert.is_error, "{}", revert.content);
+        assert!(!tmp.path().join("nested/new.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn patch_deletes_file_and_revert_restores_it() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "hello world\n");
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/sample.txt b/sample.txt\ndeleted file mode 100644\n--- a/sample.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello world\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(!tmp.path().join("sample.txt").exists());
+
+        let revert_tool = RevertTool;
+        let revert = revert_tool
+            .execute(json!({ "file_path": "sample.txt" }), &ctx)
+            .await;
+
+        assert!(!revert.is_error, "{}", revert.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
     }
 
     #[tokio::test]
