@@ -73,6 +73,11 @@ pub fn transcript_path(project_root: &Path, session_id: &str) -> PathBuf {
         .join(format!("{}.jsonl", session_id))
 }
 
+/// Compute the sidecar file path used for persisted XFileStorage state.
+pub fn xfile_storage_path(project_root: &Path, session_id: &str) -> PathBuf {
+    transcript_path(project_root, session_id).with_extension("xfiles.json")
+}
+
 // ─── Write ───────────────────────────────────────────────────────────────────
 
 /// Append a single transcript entry to the session file.

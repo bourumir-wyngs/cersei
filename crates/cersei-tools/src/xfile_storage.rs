@@ -7,11 +7,12 @@ use base64::Engine;
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_REVISIONS: usize = 16;
 
@@ -19,28 +20,28 @@ static XFILE_STORAGE_REGISTRY: Lazy<dashmap::DashMap<String, Arc<Mutex<XFileStor
     Lazy::new(dashmap::DashMap::new);
 static XFILE_TAG_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XLine {
     pub content: String,
     pub line_number: usize,
     pub tag: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XFile {
     pub path: PathBuf,
     pub content: Vec<XLine>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XFileRevision {
     pub number: usize,
     pub file: XFile,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct XDiskState {
-    modified: Option<SystemTime>,
+    modified_ns: Option<u64>,
     len: u64,
 }
 
@@ -53,7 +54,7 @@ pub struct XTrackedFileSummary {
     pub current_version: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct XTrackedFile {
     revisions: VecDeque<XFileRevision>,
     next_revision_number: usize,
@@ -62,6 +63,12 @@ struct XTrackedFile {
 
 #[derive(Debug, Default)]
 pub struct XFileStorage {
+    files: HashMap<PathBuf, XTrackedFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedXFileStorage {
+    version: u32,
     files: HashMap<PathBuf, XTrackedFile>,
 }
 
@@ -130,6 +137,64 @@ pub fn session_xfile_storage(session_id: &str) -> Arc<Mutex<XFileStorage>> {
 
 pub fn clear_session_xfile_storage(session_id: &str) {
     XFILE_STORAGE_REGISTRY.remove(session_id);
+}
+
+pub fn save_session_xfile_storage_to_path(session_id: &str, path: &Path) -> Result<bool, String> {
+    let storage = session_xfile_storage(session_id);
+    let guard = storage.lock();
+
+    if guard.files.is_empty() {
+        if path.exists() {
+            std::fs::remove_file(path)
+                .map_err(|e| format!("Failed to remove XFileStorage sidecar: {}", e))?;
+        }
+        return Ok(false);
+    }
+
+    let payload = PersistedXFileStorage {
+        version: 1,
+        files: guard.files.clone(),
+    };
+    drop(guard);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create XFileStorage sidecar directory: {}", e))?;
+    }
+
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize XFileStorage: {}", e))?;
+    std::fs::write(path, bytes)
+        .map_err(|e| format!("Failed to write XFileStorage sidecar: {}", e))?;
+    Ok(true)
+}
+
+pub fn load_session_xfile_storage_from_path(session_id: &str, path: &Path) -> Result<bool, String> {
+    if !path.exists() {
+        clear_session_xfile_storage(session_id);
+        return Ok(false);
+    }
+
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read XFileStorage sidecar: {}", e))?;
+    let payload: PersistedXFileStorage = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Failed to parse XFileStorage sidecar: {}", e))?;
+    if payload.version != 1 {
+        return Err(format!(
+            "Unsupported XFileStorage sidecar version {}.",
+            payload.version
+        ));
+    }
+
+    observe_restored_tags(payload.files.values());
+
+    XFILE_STORAGE_REGISTRY.insert(
+        session_id.to_string(),
+        Arc::new(Mutex::new(XFileStorage {
+            files: payload.files,
+        })),
+    );
+    Ok(true)
 }
 
 pub fn resolve_xfile_path(ctx: &ToolContext, input: &str) -> PathBuf {
@@ -384,9 +449,46 @@ fn read_disk_state(path: &Path) -> Result<XDiskState, String> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?;
     Ok(XDiskState {
-        modified: metadata.modified().ok(),
+        modified_ns: metadata.modified().ok().and_then(system_time_to_nanos),
         len: metadata.len(),
     })
+}
+
+fn system_time_to_nanos(time: SystemTime) -> Option<u64> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    Some(duration.as_nanos().try_into().ok()?)
+}
+
+fn observe_restored_tags<'a>(tracked_files: impl IntoIterator<Item = &'a XTrackedFile>) {
+    let mut max_seen = 0usize;
+    for tracked in tracked_files {
+        for revision in &tracked.revisions {
+            for line in &revision.file.content {
+                if let Some(value) = parse_tag_counter(&line.tag) {
+                    max_seen = max_seen.max(value);
+                }
+            }
+        }
+    }
+
+    let mut current = XFILE_TAG_COUNTER.load(Ordering::Relaxed);
+    while max_seen >= current {
+        match XFILE_TAG_COUNTER.compare_exchange(
+            current,
+            max_seen + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn parse_tag_counter(tag: &str) -> Option<usize> {
+    let decoded = STANDARD.decode(tag).ok()?;
+    let as_str = std::str::from_utf8(&decoded).ok()?;
+    as_str.parse::<usize>().ok()
 }
 
 fn split_text_into_lines(text: &str) -> Vec<String> {
@@ -971,5 +1073,96 @@ mod tests {
         assert_eq!(revisions.len(), 16);
         assert_eq!(revisions.first().unwrap().number, 5);
         assert_eq!(revisions.last().unwrap().number, 20);
+    }
+
+    #[test]
+    fn save_and_restore_session_storage_preserves_tags_and_revisions() {
+        let session_id = "xstorage-persist";
+        clear_session_xfile_storage(session_id);
+        let path = PathBuf::from("/tmp/persist.txt");
+        let first = store_written_text(session_id, &path, "one\ntwo\n");
+        let second = apply_mutations(
+            session_id,
+            &path,
+            Some(&first.current_version),
+            &[XLineMutation::InsertAfter {
+                tag: first.file.content[0].tag.clone(),
+                new_lines: vec!["middle".to_string()],
+            }],
+        )
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshot = tmp.path().join("session.xfiles.json");
+        save_session_xfile_storage_to_path(session_id, &snapshot).unwrap();
+
+        clear_session_xfile_storage(session_id);
+        assert!(try_get_head(session_id, &path).is_none());
+
+        assert!(load_session_xfile_storage_from_path(session_id, &snapshot).unwrap());
+        let restored = try_get_head(session_id, &path).unwrap();
+
+        assert_eq!(restored.revision_count, 2);
+        assert_eq!(restored.rendered_content, second.rendered_content);
+        assert_eq!(restored.file.content[0].tag, first.file.content[0].tag);
+        assert_eq!(restored.file.content[2].tag, first.file.content[1].tag);
+
+        let revisions = list_revisions(session_id, &path).unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].number, 1);
+        assert_eq!(revisions[1].number, 2);
+    }
+
+    #[test]
+    fn restoring_storage_advances_tag_counter() {
+        let source_session = "xstorage-source-tags";
+        clear_session_xfile_storage(source_session);
+        let path = PathBuf::from("/tmp/tag-counter.txt");
+        let initial = store_written_text(source_session, &path, "alpha\nbeta\n");
+        let highest_existing_tag = initial
+            .file
+            .content
+            .iter()
+            .filter_map(|line| parse_tag_counter(&line.tag))
+            .max()
+            .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshot = tmp.path().join("session.xfiles.json");
+        save_session_xfile_storage_to_path(source_session, &snapshot).unwrap();
+
+        let restored_session = "xstorage-restored-tags";
+        clear_session_xfile_storage(restored_session);
+        load_session_xfile_storage_from_path(restored_session, &snapshot).unwrap();
+
+        let restored = apply_mutations(
+            restored_session,
+            &path,
+            Some(&initial.current_version),
+            &[XLineMutation::InsertAfter {
+                tag: initial.file.content[1].tag.clone(),
+                new_lines: vec!["gamma".to_string()],
+            }],
+        )
+        .unwrap();
+
+        let new_tag_value = parse_tag_counter(&restored.file.content[2].tag).unwrap();
+        assert!(new_tag_value > highest_existing_tag);
+    }
+
+    #[test]
+    fn restoring_from_missing_sidecar_clears_in_memory_session_state() {
+        let session_id = "xstorage-missing-sidecar";
+        clear_session_xfile_storage(session_id);
+        let path = PathBuf::from("/tmp/missing-sidecar.txt");
+        store_written_text(session_id, &path, "alpha\n");
+        assert!(try_get_head(session_id, &path).is_some());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing.xfiles.json");
+        assert!(!missing.exists());
+
+        assert!(!load_session_xfile_storage_from_path(session_id, &missing).unwrap());
+        assert!(try_get_head(session_id, &path).is_none());
     }
 }

@@ -1,6 +1,8 @@
 //! Session management: list, show, delete, memory operations.
 
 use crate::config::AppConfig;
+use cersei_memory::session_storage;
+use cersei_tools::xfile_storage::save_session_xfile_storage_to_path;
 use std::path::PathBuf;
 
 /// Get the sessions directory for the current project.
@@ -137,12 +139,16 @@ pub fn show(config: &AppConfig, id: &str) -> anyhow::Result<()> {
 pub fn delete(config: &AppConfig, id: &str) -> anyhow::Result<()> {
     let dir = sessions_dir(config);
     let path = dir.join(format!("{id}.jsonl"));
+    let xfile_path = session_storage::xfile_storage_path(&config.working_dir, id);
 
     if !path.exists() {
         anyhow::bail!("Session '{}' not found", id);
     }
 
     std::fs::remove_file(&path)?;
+    if xfile_path.exists() {
+        std::fs::remove_file(&xfile_path)?;
+    }
     println!("Deleted session: {id}");
     Ok(())
 }
@@ -198,9 +204,8 @@ pub fn save_named(
     config: &AppConfig,
     name: &str,
     messages: &[cersei_types::Message],
+    source_session_id: &str,
 ) -> anyhow::Result<()> {
-    use cersei_memory::session_storage;
-
     // Reject names that would escape the sessions dir or cause fs issues
     if name.contains('/') || name.contains('\\') || name.contains('\0') || name.is_empty() {
         anyhow::bail!("Invalid session name: '{name}'");
@@ -236,6 +241,10 @@ pub fn save_named(
             _ => {}
         }
     }
+
+    let xfile_path = session_storage::xfile_storage_path(&config.working_dir, name);
+    save_session_xfile_storage_to_path(source_session_id, &xfile_path)
+        .map_err(|e| anyhow::anyhow!("Failed to save XFileStorage state: {e}"))?;
     Ok(())
 }
 

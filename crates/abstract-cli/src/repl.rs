@@ -14,6 +14,8 @@ use crate::theme::Theme;
 use cersei::events::AgentEvent;
 use cersei::Agent;
 use cersei_memory::manager::MemoryManager;
+use cersei_memory::session_storage;
+use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_tools::Extensions;
 use cersei_types::Role;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,9 +136,10 @@ pub async fn run_repl(
     signal_handle: SignalHandle,
 ) -> anyhow::Result<()> {
     let mut repl_config = config.clone();
+    let mut current_session_id = session_id.to_string();
     let mut input_reader = InputReader::new()?;
     let mut renderer = StreamRenderer::new(theme, json_mode);
-    let mut status = StatusLine::new(theme, &repl_config.model, session_id, !json_mode);
+    let mut status = StatusLine::new(theme, &repl_config.model, &current_session_id, !json_mode);
     let mut cmd_registry = commands::CommandRegistry::new();
     let mut is_first_turn = true;
     let mut current_model = repl_config.model.clone();
@@ -174,7 +177,7 @@ pub async fn run_repl(
                 }
                 _ => {
                     match cmd_registry
-                        .execute(cmd, args, &repl_config, session_id)
+                        .execute(cmd, args, &repl_config, &current_session_id)
                         .await
                     {
                         Ok(commands::CommandAction::None) => {}
@@ -184,7 +187,12 @@ pub async fn run_repl(
                         }
                         Ok(commands::CommandAction::SaveSession { name }) => {
                             let msgs = agent.messages();
-                            match crate::sessions::save_named(&repl_config, &name, &msgs) {
+                            match crate::sessions::save_named(
+                                &repl_config,
+                                &name,
+                                &msgs,
+                                &current_session_id,
+                            ) {
                                 Ok(_) => {
                                     exit_session_name = Some(name.clone());
                                     eprintln!("\x1b[33m  Session saved as '{}'\x1b[0m", name);
@@ -196,11 +204,51 @@ pub async fn run_repl(
                             messages,
                             session_id: loaded_id,
                         }) => {
-                            agent.clear_messages();
-                            agent.set_messages(messages);
-                            is_first_turn = true;
-                            status =
-                                StatusLine::new(theme, &repl_config.model, &loaded_id, !json_mode);
+                            match app::build_agent(
+                                &current_model,
+                                &repl_config,
+                                memory_manager,
+                                &loaded_id,
+                                signal_handle.token(),
+                                Some(messages),
+                                tool_extensions.clone(),
+                            ) {
+                                Ok((new_agent, resolved)) => {
+                                    let xfile_path = session_storage::xfile_storage_path(
+                                        &repl_config.working_dir,
+                                        &loaded_id,
+                                    );
+                                    if let Err(err) = load_session_xfile_storage_from_path(
+                                        &loaded_id,
+                                        &xfile_path,
+                                    ) {
+                                        eprintln!(
+                                            "\x1b[31m  XFileStorage restore failed: {err}\x1b[0m"
+                                        );
+                                    }
+                                    agent = new_agent;
+                                    current_model = if let Some((provider, _)) =
+                                        current_model.split_once('/')
+                                    {
+                                        format!("{provider}/{resolved}")
+                                    } else {
+                                        resolved.clone()
+                                    };
+                                    repl_config.model = current_model.clone();
+                                    if let Some((provider, _)) = current_model.split_once('/') {
+                                        repl_config.provider = provider.to_string();
+                                    }
+                                    current_session_id = loaded_id.clone();
+                                    is_first_turn = true;
+                                    status = StatusLine::new(
+                                        theme,
+                                        &repl_config.model,
+                                        &current_session_id,
+                                        !json_mode,
+                                    );
+                                }
+                                Err(e) => eprintln!("\x1b[31m  Resume failed: {e}\x1b[0m"),
+                            }
                         }
                         Ok(commands::CommandAction::Compact) => {
                             let before = agent.messages().len();
@@ -225,7 +273,7 @@ pub async fn run_repl(
                                 &model,
                                 &repl_config,
                                 memory_manager,
-                                session_id,
+                                &current_session_id,
                                 signal_handle.token(),
                                 Some(msgs),
                                 tool_extensions.clone(),
@@ -287,7 +335,7 @@ pub async fn run_repl(
                             &current_model,
                             &repl_config,
                             memory_manager,
-                            session_id,
+                            &current_session_id,
                             signal_handle.token(),
                             Some(msgs),
                             tool_extensions.clone(),
@@ -321,7 +369,7 @@ pub async fn run_repl(
                                     &new_model,
                                     &repl_config,
                                     memory_manager,
-                                    session_id,
+                                    &current_session_id,
                                     signal_handle.token(),
                                     Some(msgs),
                                     tool_extensions.clone(),
@@ -362,9 +410,11 @@ pub async fn run_repl(
         }
     }
 
-    let exit_name = exit_session_name.as_deref().unwrap_or(session_id);
+    let exit_name = exit_session_name
+        .as_deref()
+        .unwrap_or(current_session_id.as_str());
     let msgs = agent.messages();
-    crate::sessions::save_named(&repl_config, exit_name, &msgs)?;
+    crate::sessions::save_named(&repl_config, exit_name, &msgs, &current_session_id)?;
     eprintln!("\x1b[33mSession saved as '{}'\x1b[0m", exit_name);
     Ok(())
 }

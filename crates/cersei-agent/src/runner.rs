@@ -3,8 +3,12 @@
 use crate::events::{AgentControl, AgentEvent};
 use crate::{Agent, AgentOutput, ToolCallRecord};
 use cersei_hooks::{HookAction, HookContext, HookEvent};
+use cersei_memory::session_storage;
 use cersei_provider::{CompletionRequest, ProviderOptions, StreamAccumulator};
 use cersei_tools::permissions::{PermissionDecision, PermissionRequest};
+use cersei_tools::xfile_storage::{
+    load_session_xfile_storage_from_path, save_session_xfile_storage_to_path,
+};
 use cersei_tools::{ToolContext, ToolResult};
 use cersei_types::*;
 use std::sync::Arc;
@@ -91,6 +95,24 @@ pub fn strip_thinking_blocks(messages: Vec<Message>) -> Vec<Message> {
             msg
         })
         .collect()
+}
+
+fn xfile_storage_sidecar_path(agent: &Agent, session_id: &str) -> std::path::PathBuf {
+    session_storage::xfile_storage_path(&agent.working_dir, session_id)
+}
+
+fn restore_local_session_state(agent: &Agent, session_id: &str) -> Result<()> {
+    let path = xfile_storage_sidecar_path(agent, session_id);
+    load_session_xfile_storage_from_path(session_id, &path)
+        .map(|_| ())
+        .map_err(CerseiError::Config)
+}
+
+fn persist_local_session_state(agent: &Agent, session_id: &str) -> Result<()> {
+    let path = xfile_storage_sidecar_path(agent, session_id);
+    save_session_xfile_storage_to_path(session_id, &path)
+        .map(|_| ())
+        .map_err(CerseiError::Config)
 }
 
 // ─── Tool result budget ──────────────────────────────────────────────────────
@@ -197,6 +219,7 @@ pub async fn run_agent_streaming(
     if agent.messages.lock().is_empty() {
         if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
             let history = strip_thinking_blocks(memory.load(session_id).await?);
+            restore_local_session_state(agent, session_id)?;
             if !history.is_empty() {
                 let count = history.len();
                 agent.messages.lock().extend(history);
@@ -640,6 +663,7 @@ pub async fn run_agent_streaming(
     if let (Some(memory), Some(session_id)) = (&agent.memory, &agent.session_id) {
         let messages = agent.messages.lock().clone();
         memory.store(session_id, &messages).await?;
+        persist_local_session_state(agent, session_id)?;
         let _ = event_tx
             .send(AgentEvent::SessionSaved {
                 session_id: session_id.clone(),
