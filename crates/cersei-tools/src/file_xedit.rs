@@ -2,8 +2,10 @@
 
 use super::*;
 use crate::xfile_storage::{
-    apply_mutations, ensure_loaded, resolve_xfile_path, XFile, XLineMutation,
+    apply_mutations, ensure_loaded, record_disk_state, resolve_xfile_path, sync_if_disk_changed,
+    XFile, XFileSyncUpdate, XLineMutation,
 };
+use crate::xfile_sync::SyncChange;
 use serde::{Deserialize, Serialize};
 
 pub struct XEditTool;
@@ -14,8 +16,6 @@ pub type FileXEditTool = XEditTool;
 #[derive(Debug, Clone, Deserialize)]
 pub struct XEditRequest {
     pub file_path: String,
-    #[serde(default)]
-    pub base_version: Option<String>,
     #[serde(default)]
     pub operations: Vec<XEditOperation>,
 }
@@ -62,7 +62,7 @@ impl Tool for XEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit the latest session-scoped XFileStorage revision of a file using unique line tags instead of line numbers. Use tags returned by Read or Grep. Supported operations are `replace_line`, `insert_before`, `insert_after`, `delete_line`, `delete_range`, `move_range`, `overwrite_range`, and `regex_replace`. `replace_line` keeps the same tag. `move_range` preserves tags on moved lines. `overwrite_range` keeps tags for the overlapping leading lines in the replaced range, deletes tags for removed lines, and gives fresh tags to extra new lines. `regex_replace` applies a Rust `regex` pattern to each selected line individually, preserves every selected line tag, and must not create extra lines or delete lines. Pass `base_version` from `current_version` metadata returned by Read, Write, or Edit to avoid editing a stale revision. After success, Edit flushes the updated file to disk and returns `current_version`, `revision_count`, `applied_operations`, and a tag-based `diff`."
+        "Edit the latest session-scoped XFileStorage revision of a file using unique line tags instead of line numbers. Use tags returned by Read or Grep. Supported operations are `replace_line`, `insert_before`, `insert_after`, `delete_line`, `delete_range`, `move_range`, `overwrite_range`, and `regex_replace`. `replace_line` keeps the same tag. `move_range` preserves tags on moved lines. `overwrite_range` keeps tags for the overlapping leading lines in the replaced range, deletes tags for removed lines, and gives fresh tags to extra new lines. `regex_replace` applies a Rust `regex` pattern to each selected line individually, preserves every selected line tag, and must not create extra lines or delete lines. If the file contents changed outside XFileStorage, Edit refreshes the tracked file from disk, preserves tags for unchanged lines, and tells you to read the current file before trying again. After success, Edit flushes the updated file to disk and returns `current_version`, `revision_count`, `applied_operations`, and a tag-based `diff`."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -80,10 +80,6 @@ impl Tool for XEditTool {
                 "file_path": {
                     "type": "string",
                     "description": "Path to the target file. Absolute paths and workspace-relative paths are accepted."
-                },
-                "base_version": {
-                    "type": "string",
-                    "description": "Optional optimistic-concurrency version marker. Use `current_version` metadata from Read, Write, or a previous Edit call. If provided and stale, Edit fails."
                 },
                 "operations": {
                     "type": "array",
@@ -157,6 +153,12 @@ impl Tool for XEditTool {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
+        if let Some(sync) = match sync_if_disk_changed(&ctx.session_id, &path).await {
+            Ok(sync) => sync,
+            Err(err) => return ToolResult::error(err),
+        } {
+            return ToolResult::error(external_change_message(&path, &sync));
+        }
 
         let operations = match req
             .operations
@@ -168,18 +170,16 @@ impl Tool for XEditTool {
             Err(err) => return ToolResult::error(err),
         };
 
-        let head = match apply_mutations(
-            &ctx.session_id,
-            &path,
-            req.base_version.as_deref(),
-            &operations,
-        ) {
+        let head = match apply_mutations(&ctx.session_id, &path, None, &operations) {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
 
         if let Err(err) = tokio::fs::write(&path, &head.rendered_content).await {
             return ToolResult::error(format!("Failed to flush edited file: {}", err));
+        }
+        if let Err(err) = record_disk_state(&ctx.session_id, &path) {
+            return ToolResult::error(err);
         }
 
         let payload = XEditSuccess {
@@ -200,6 +200,68 @@ impl Tool for XEditTool {
                 "diff": payload.diff,
             }))
     }
+}
+
+fn external_change_message(path: &std::path::Path, sync: &XFileSyncUpdate) -> String {
+    let mut lines = vec![
+        format!(
+            "Edit was not applied because the file contents changed outside XFileStorage for {}.",
+            path.display()
+        ),
+        String::new(),
+        "XFileStorage refreshed the file from disk and preserved tags for unchanged lines. Some tags from your earlier read may still be valid, but changed regions may now use different tags.".to_string(),
+        String::new(),
+        "Read the current file contents before editing this file again, then prepare a new Edit request.".to_string(),
+        String::new(),
+        "Sync summary:".to_string(),
+        format!("- kept: {}", sync.stats.kept),
+        format!("- inserted: {}", sync.stats.inserted),
+        format!("- deleted: {}", sync.stats.deleted),
+        format!("- replaced: {}", sync.stats.replaced),
+    ];
+
+    let preview = change_preview(&sync.changes, 12);
+    if !preview.is_empty() {
+        lines.push(String::new());
+        lines.push("Detected changes:".to_string());
+        lines.extend(preview);
+    }
+
+    lines.join("\n")
+}
+
+fn change_preview(changes: &[SyncChange], max_lines: usize) -> Vec<String> {
+    let mut preview = Vec::new();
+    for change in changes {
+        match change {
+            SyncChange::Kept { .. } => {}
+            SyncChange::Inserted { content, .. } => preview.push(format!("+ {}", content)),
+            SyncChange::Deleted { content, .. } => preview.push(format!("- {}", content)),
+            SyncChange::Replaced {
+                old_content,
+                new_content,
+                ..
+            } => {
+                preview.push(format!("- {}", old_content));
+                preview.push(format!("+ {}", new_content));
+            }
+        }
+        if preview.len() >= max_lines {
+            break;
+        }
+    }
+
+    if changes
+        .iter()
+        .filter(|change| !matches!(change, SyncChange::Kept { .. }))
+        .count()
+        > preview.len()
+    {
+        preview.truncate(max_lines);
+        preview.push("...".to_string());
+    }
+
+    preview
 }
 
 fn make_tagged_diff(old: &XFile, new: &XFile) -> String {
@@ -343,7 +405,9 @@ fn required_field(
 mod tests {
     use super::*;
     use crate::permissions::AllowAll;
-    use crate::xfile_storage::{clear_session_xfile_storage, store_written_text, try_get_head};
+    use crate::xfile_storage::{
+        clear_session_xfile_storage, ensure_loaded, store_written_text, try_get_head,
+    };
     use std::path::Path;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -386,6 +450,7 @@ mod tests {
             schema["properties"]["operations"]["items"]["properties"]["replacement"]["type"],
             "string"
         );
+        assert!(schema["properties"]["base_version"].is_null());
     }
 
     #[test]
@@ -695,5 +760,56 @@ mod tests {
             tokio::fs::read_to_string(&path).await.unwrap(),
             "one\ntwo\nthree\n"
         );
+    }
+
+    #[tokio::test]
+    async fn xedit_syncs_external_change_and_requires_reread() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xedit-test-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+        let path = tmp.path().join("external-change.txt");
+        tokio::fs::write(&path, "alpha\nbeta\ngamma\n")
+            .await
+            .unwrap();
+
+        let initial = ensure_loaded(&session_id, &path).await.unwrap();
+        tokio::fs::write(&path, "alpha\nbeta changed\ngamma\n")
+            .await
+            .unwrap();
+
+        let tool = XEditTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "operations": [
+                        {
+                            "op": "replace_line",
+                            "tag": initial.file.content[2].tag,
+                            "new_text": "GAMMA"
+                        }
+                    ]
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Edit was not applied"));
+        assert!(result
+            .content
+            .contains("Read the current file contents before editing this file again"));
+        assert!(result.content.contains("beta changed"));
+
+        let disk = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(disk, "alpha\nbeta changed\ngamma\n");
+
+        let head = try_get_head(&session_id, &path).unwrap();
+        assert_eq!(head.revision_count, 2);
+        assert_eq!(head.file.content[0].tag, initial.file.content[0].tag);
+        assert_eq!(head.file.content[2].tag, initial.file.content[2].tag);
+        assert_eq!(head.file.content[1].content, "beta changed");
+        assert_ne!(head.file.content[1].tag, initial.file.content[1].tag);
+        assert_eq!(head.rendered_content, "alpha\nbeta changed\ngamma\n");
     }
 }

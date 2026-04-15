@@ -1,7 +1,7 @@
 //! Write tool: session-scoped tagged writes backed by XFileStorage.
 
 use super::*;
-use crate::xfile_storage::{resolve_xfile_path, store_written_text};
+use crate::xfile_storage::{record_disk_state, resolve_xfile_path, store_written_text};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -80,6 +80,9 @@ impl Tool for XWriteTool {
         let head = store_written_text(&ctx.session_id, &path, &req.content);
         if let Err(err) = tokio::fs::write(&path, &head.rendered_content).await {
             return ToolResult::error(format!("Failed to write file: {}", err));
+        }
+        if let Err(err) = record_disk_state(&ctx.session_id, &path) {
+            return ToolResult::error(err);
         }
 
         let payload = XWriteSuccess {

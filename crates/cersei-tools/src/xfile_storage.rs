@@ -1,5 +1,6 @@
 //! Session-scoped in-memory file storage for X* tools.
 
+use crate::xfile_sync::{sync_disk_snapshot, SyncChange, SyncStats};
 use crate::ToolContext;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -10,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 const MAX_REVISIONS: usize = 16;
 
@@ -37,6 +39,12 @@ pub struct XFileRevision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct XDiskState {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XTrackedFileSummary {
     pub path: PathBuf,
     pub revision_count: usize,
@@ -49,6 +57,7 @@ pub struct XTrackedFileSummary {
 struct XTrackedFile {
     revisions: VecDeque<XFileRevision>,
     next_revision_number: usize,
+    last_disk_state: Option<XDiskState>,
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +71,15 @@ pub struct XFileHead {
     pub rendered_content: String,
     pub current_version: String,
     pub revision_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct XFileSyncUpdate {
+    pub file_path: PathBuf,
+    pub current_version: String,
+    pub revision_count: usize,
+    pub stats: SyncStats,
+    pub changes: Vec<SyncChange>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +171,7 @@ pub async fn ensure_loaded(session_id: &str, path: &Path) -> Result<XFileHead, S
     let text = tokio::fs::read_to_string(&key)
         .await
         .map_err(|e| format!("Failed to read file: {}", e))?;
+    let disk_state = read_disk_state(&key).ok();
 
     let storage = session_xfile_storage(session_id);
     let mut guard = storage.lock();
@@ -160,18 +179,19 @@ pub async fn ensure_loaded(session_id: &str, path: &Path) -> Result<XFileHead, S
         return Ok(head);
     }
 
-    Ok(guard.insert_loaded_file(key, &text))
+    Ok(guard.insert_loaded_file(key, &text, disk_state))
 }
 
 pub fn store_loaded_if_missing(session_id: &str, path: &Path, text: &str) -> XFileHead {
     let key = normalize_storage_path(path);
+    let disk_state = read_disk_state(&key).ok();
     let storage = session_xfile_storage(session_id);
     let mut guard = storage.lock();
     if let Some(head) = guard.current_head(&key) {
         return head;
     }
 
-    guard.insert_loaded_file(key, text)
+    guard.insert_loaded_file(key, text, disk_state)
 }
 
 pub fn store_written_text(session_id: &str, path: &Path, text: &str) -> XFileHead {
@@ -191,6 +211,69 @@ pub fn apply_mutations(
     let storage = session_xfile_storage(session_id);
     let mut guard = storage.lock();
     guard.apply_mutations(&key, base_version, operations)
+}
+
+pub fn record_disk_state(session_id: &str, path: &Path) -> Result<(), String> {
+    let key = normalize_storage_path(path);
+    let disk_state = read_disk_state(&key)?;
+    let storage = session_xfile_storage(session_id);
+    let mut guard = storage.lock();
+    guard.update_disk_state(&key, Some(disk_state))
+}
+
+pub async fn sync_if_disk_changed(
+    session_id: &str,
+    path: &Path,
+) -> Result<Option<XFileSyncUpdate>, String> {
+    let key = normalize_storage_path(path);
+    let current_disk_state = read_disk_state(&key)?;
+
+    {
+        let storage = session_xfile_storage(session_id);
+        let guard = storage.lock();
+        let Some(tracked) = guard.files.get(&key) else {
+            return Ok(None);
+        };
+        if tracked.last_disk_state.as_ref() == Some(&current_disk_state) {
+            return Ok(None);
+        }
+    }
+
+    let disk_text = tokio::fs::read_to_string(&key)
+        .await
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let storage = session_xfile_storage(session_id);
+    let mut guard = storage.lock();
+    let tracked = match guard.files.get_mut(&key) {
+        Some(tracked) => tracked,
+        None => return Ok(None),
+    };
+    if tracked.last_disk_state.as_ref() == Some(&current_disk_state) {
+        return Ok(None);
+    }
+
+    let latest = tracked
+        .revisions
+        .back()
+        .cloned()
+        .ok_or_else(|| format!("No revision found for {}", key.display()))?;
+    if tracked.last_disk_state.is_none() && render_file(&latest.file) == disk_text {
+        tracked.last_disk_state = Some(current_disk_state);
+        return Ok(None);
+    }
+
+    let synced = sync_disk_snapshot(&latest.file, &disk_text);
+    let head = push_revision(tracked, synced.file);
+    tracked.last_disk_state = Some(current_disk_state);
+
+    Ok(Some(XFileSyncUpdate {
+        file_path: key,
+        current_version: head.current_version,
+        revision_count: head.revision_count,
+        stats: synced.stats,
+        changes: synced.changes,
+    }))
 }
 
 pub fn list_tracked_files(session_id: &str) -> Vec<XTrackedFileSummary> {
@@ -276,7 +359,7 @@ pub fn compute_version(rendered: &str) -> String {
     format!("blake3:{}", blake3::hash(rendered.as_bytes()).to_hex())
 }
 
-fn next_tag() -> String {
+pub(crate) fn next_tag() -> String {
     let next = XFILE_TAG_COUNTER.fetch_add(1, Ordering::Relaxed);
     STANDARD.encode(next.to_string())
 }
@@ -295,6 +378,15 @@ fn normalize_storage_path(path: &Path) -> PathBuf {
     }
 
     path.to_path_buf()
+}
+
+fn read_disk_state(path: &Path) -> Result<XDiskState, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to read metadata for {}: {}", path.display(), e))?;
+    Ok(XDiskState {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
 }
 
 fn split_text_into_lines(text: &str) -> Vec<String> {
@@ -367,7 +459,12 @@ impl XFileStorage {
         self.files.get(path).map(|tracked| tracked.current_head())
     }
 
-    fn insert_loaded_file(&mut self, path: PathBuf, text: &str) -> XFileHead {
+    fn insert_loaded_file(
+        &mut self,
+        path: PathBuf,
+        text: &str,
+        disk_state: Option<XDiskState>,
+    ) -> XFileHead {
         if let Some(tracked) = self.files.get(&path) {
             return tracked.current_head();
         }
@@ -376,6 +473,7 @@ impl XFileStorage {
         let mut tracked = XTrackedFile {
             revisions: VecDeque::new(),
             next_revision_number: 1,
+            last_disk_state: disk_state,
         };
         let head = push_revision(&mut tracked, file);
         self.files.insert(path, tracked);
@@ -387,8 +485,22 @@ impl XFileStorage {
         let tracked = self.files.entry(path).or_insert_with(|| XTrackedFile {
             revisions: VecDeque::new(),
             next_revision_number: 1,
+            last_disk_state: None,
         });
         push_revision(tracked, file)
+    }
+
+    fn update_disk_state(
+        &mut self,
+        path: &Path,
+        disk_state: Option<XDiskState>,
+    ) -> Result<(), String> {
+        let tracked = self
+            .files
+            .get_mut(path)
+            .ok_or_else(|| format!("File is not loaded in XFileStorage: {}", path.display()))?;
+        tracked.last_disk_state = disk_state;
+        Ok(())
     }
 
     fn restore_revision(&mut self, path: &Path, revision: usize) -> Result<XFileHead, String> {

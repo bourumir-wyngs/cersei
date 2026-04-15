@@ -46,6 +46,7 @@ pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
 pub mod xfile_storage;
+pub mod xfile_sync;
 
 use async_trait::async_trait;
 use cersei_mcp::McpManager;

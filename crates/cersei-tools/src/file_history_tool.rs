@@ -5,8 +5,8 @@
 use super::*;
 use crate::file_history::unified_diff;
 use crate::xfile_storage::{
-    get_revision, list_revisions, list_tracked_files, render_file, resolve_xfile_path,
-    restore_revision,
+    get_revision, list_revisions, list_tracked_files, record_disk_state, render_file,
+    resolve_xfile_path, restore_revision,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -330,6 +330,9 @@ async fn action_revert(session_id: &str, path: &Path, revision: usize) -> ToolRe
     let target_text = render_file(&target.file);
     if let Err(err) = tokio::fs::write(path, target_text.as_bytes()).await {
         return ToolResult::error(format!("Failed to write file: {}", err));
+    }
+    if let Err(err) = record_disk_state(session_id, path) {
+        return ToolResult::error(err);
     }
 
     let head = match restore_revision(session_id, path, revision) {

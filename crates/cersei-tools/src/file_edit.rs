@@ -3,7 +3,7 @@
 use super::*;
 use crate::file_history::{unified_diff, FileHistory};
 use crate::xfile_storage::{
-    discard_head_revision, list_revisions, render_file, resolve_xfile_path,
+    discard_head_revision, list_revisions, record_disk_state, render_file, resolve_xfile_path,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -243,6 +243,9 @@ impl Tool for RevertTool {
         let restored_text = render_file(&previous.file);
         if let Err(e) = tokio::fs::write(&requested_path, restored_text.as_bytes()).await {
             return ToolResult::error(format!("Failed to restore file: {}", e));
+        }
+        if let Err(err) = record_disk_state(&ctx.session_id, &requested_path) {
+            return ToolResult::error(err);
         }
         if let Err(err) = discard_head_revision(&ctx.session_id, &requested_path) {
             return ToolResult::error(err);
