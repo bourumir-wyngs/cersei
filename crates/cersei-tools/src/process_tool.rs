@@ -531,10 +531,11 @@ mod tests {
         result.content[start..end].parse().expect("numeric pid")
     }
 
+    // These tests use unique session ids, so clearing the shared registry would
+    // race with other concurrently running process_tool tests.
+
     #[tokio::test]
     async fn start_requires_permission_but_follow_up_actions_do_not() {
-        PROCESS_REGISTRY.clear();
-
         let policy = Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow));
         let ctx = test_ctx(
             format!("process-test-{}", uuid::Uuid::new_v4()),
@@ -581,8 +582,6 @@ mod tests {
 
     #[tokio::test]
     async fn start_is_blocked_when_permission_is_denied() {
-        PROCESS_REGISTRY.clear();
-
         let ctx = test_ctx(
             format!("process-test-{}", uuid::Uuid::new_v4()),
             Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Deny(
@@ -609,8 +608,6 @@ mod tests {
 
     #[tokio::test]
     async fn other_sessions_cannot_query_or_kill_started_processes() {
-        PROCESS_REGISTRY.clear();
-
         let owner_ctx = test_ctx(
             format!("process-owner-{}", uuid::Uuid::new_v4()),
             Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow)),
@@ -666,8 +663,6 @@ mod tests {
 
     #[tokio::test]
     async fn start_is_blocked_when_network_is_denied() {
-        PROCESS_REGISTRY.clear();
-
         let ctx = test_ctx(
             format!("process-test-{}", uuid::Uuid::new_v4()),
             Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow)),

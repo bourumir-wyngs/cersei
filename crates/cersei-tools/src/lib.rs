@@ -14,6 +14,10 @@ pub mod file_history;
 pub mod file_history_tool;
 pub mod file_read;
 pub mod file_write;
+pub mod file_xedit;
+pub mod file_xgrep;
+pub mod file_xread;
+pub mod file_xwrite;
 pub mod git_tool;
 pub mod git_utils;
 pub mod glob_tool;
@@ -41,6 +45,7 @@ pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
+pub mod xfile_storage;
 
 use async_trait::async_trait;
 use cersei_mcp::McpManager;
@@ -361,7 +366,7 @@ pub fn clear_session_shell_state(session_id: &str) {
 /// All built-in tools.
 pub fn all() -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    tools.extend(filesystem());
+    tools.extend(default_filesystem());
     tools.extend(shell());
     tools.extend(package_managers());
     tools.extend(web());
@@ -382,7 +387,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
 /// All coding-oriented tools (filesystem + shell + web).
 pub fn coding() -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    tools.extend(filesystem());
+    tools.extend(default_filesystem());
     tools.extend(shell());
     tools.extend(package_managers());
     tools.extend(web());
@@ -399,17 +404,32 @@ pub fn data() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// File system tools: Read, Write, Edit, Sed, Revert, Glob, Grep, NotebookEdit.
+/// File system tools: XFileStorage-backed file tools plus notebook/history helpers.
 pub fn filesystem() -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(file_read::FileReadTool),
-        Box::new(file_write::FileWriteTool),
-        Box::new(file_edit::EditTool),
-        Box::new(file_edit::SedTool),
-        Box::new(file_edit::PatchTool),
+        Box::new(file_xread::XReadTool),
+        Box::new(file_xwrite::XWriteTool),
+        Box::new(file_xedit::XEditTool),
         Box::new(file_edit::RevertTool),
         Box::new(glob_tool::GlobTool),
-        Box::new(grep_tool::GrepTool),
+        Box::new(file_xgrep::XGrepTool),
+        Box::new(list_directory::ListDirectoryTool),
+        Box::new(notebook_edit::NotebookEditTool),
+        Box::new(file_history_tool::FileHistoryTool),
+    ]
+}
+
+/// Default filesystem tools used by `coding()` and `all()`.
+///
+/// This exposes only the XFileStorage-backed file tools and related helpers.
+fn default_filesystem() -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(file_xread::XReadTool),
+        Box::new(file_xwrite::XWriteTool),
+        Box::new(file_xedit::XEditTool),
+        Box::new(file_edit::RevertTool),
+        Box::new(glob_tool::GlobTool),
+        Box::new(file_xgrep::XGrepTool),
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),

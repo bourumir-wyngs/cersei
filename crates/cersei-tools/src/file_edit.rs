@@ -1,40 +1,28 @@
-//! Exact-position and GNU sed-backed file editing with one-step session-local revert.
+//! Exact-position file editing plus XFileStorage-backed revert.
 
 use super::*;
 use crate::file_history::{unified_diff, FileHistory};
+use crate::xfile_storage::{
+    discard_head_revision, list_revisions, render_file, resolve_xfile_path,
+};
 use once_cell::sync::Lazy;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use tempfile::{NamedTempFile, TempDir};
-use tokio::process::Command;
+use tempfile::NamedTempFile;
+
+const EXPECTED_TEXT_SEARCH_WINDOW_BYTES: usize = 256;
 
 #[derive(Debug, Clone)]
 struct LastEditSnapshot {
     file_path: PathBuf,
-    content: Option<Vec<u8>>,
 }
 
 static LAST_EDIT_SNAPSHOT_REGISTRY: Lazy<dashmap::DashMap<String, LastEditSnapshot>> =
     Lazy::new(dashmap::DashMap::new);
-static GNU_SED_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_gnu_sed);
-static PATCH_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_patch);
-static FIREJAIL_BINARY: Lazy<Option<PathBuf>> = Lazy::new(probe_firejail);
-static FIREJAIL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
-static UNIFIED_HUNK_HEADER_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@(?: ?.*)?$")
-        .expect("valid unified hunk header regex")
-});
 
-const INLINE_SED_SCRIPT_MAX_BYTES: usize = 1024;
-const SED_STAGING_ROOT: &str = "/tmp";
-const EXPECTED_TEXT_SEARCH_WINDOW_BYTES: usize = 256;
 pub struct EditTool;
-pub struct SedTool;
-pub struct PatchTool;
 pub struct RevertTool;
 
 /// Public alias preserved for downstream imports.
@@ -183,185 +171,6 @@ impl Tool for EditTool {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct PatchInput {
-    patch: String,
-}
-
-#[async_trait]
-impl Tool for PatchTool {
-    fn name(&self) -> &str {
-        "Patch"
-    }
-
-    fn description(&self) -> &str {
-        "Apply a standard diff patch supplied directly in the `patch` input string. Use normal unified/context diff text with standard headers such as `diff --git`, `---`, and `+++`; do not create a temp file or invoke shell patch commands yourself. The tool validates syntax and workspace-relative target paths, dry-runs before writing, returns an explanatory error when malformed or not applicable, and prints the complete patch when it succeeds."
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Write
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::FileSystem
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "patch": {
-                    "type": "string",
-                    "description": "Patch text to apply directly. Provide the complete unified/context diff in this field; do not create a temp file or wrap it in shell commands. Prefer standard headers like diff --git with a/... and b/... paths, or plain ---/+++ headers. The tool validates that target paths stay within the workspace, dry-runs the patch before writing, rejects malformed or non-applicable patches with an explanatory error, and echoes the complete applied patch on success."
-                }
-            },
-            "required": ["patch"]
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        let input: PatchInput = match serde_json::from_value(input) {
-            Ok(i) => i,
-            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
-        };
-
-        match apply_patch(ctx, &input.patch).await {
-            Ok(message) => ToolResult::success(message),
-            Err(message) => ToolResult::error(message),
-        }
-    }
-}
-
-#[async_trait]
-impl Tool for SedTool {
-    fn name(&self) -> &str {
-        "Sed"
-    }
-
-    fn description(&self) -> &str {
-        "Apply a real GNU sed script to one workspace file. The tool invokes the system `sed` \
-         binary as `sed -E --sandbox`, so standard GNU sed commands, addresses, ranges, and \
-         capture groups work, but file-access commands such as `e`, `r`, and `w` are disabled. \
-         Provide only the sed args in `script`; do not include `sed`, `-i`, or filenames \
-         because the tool supplies the target file and writes the resulting stdout back to it. \
-         Use `quiet=true` for `-n` semantics when the script prints explicitly, and `null_data=true` \
-         for `-z` / NUL-delimited processing. The tool returns a unified diff plus the reminder \"use 'revert' command if wrong\"."
-    }
-
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Write
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::FileSystem
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Path to the file relative to the current workspace root. Absolute paths and `..` segments are not allowed."
-                },
-                "script": {
-                    "type": "string",
-                    "description": "Sed program only, executed as real GNU `sed -E --sandbox`. Use normal GNU sed syntax such as `s/foo/bar/g`, `1,20s/^/\\/\\/ /`, `/BEGIN/,/END/d`, or `s/(foo)/[\\\\1]/g`. Do not include the `sed` command itself, `-i`, extra filenames, or shell redirection. `e`, `r`, and `w` commands are rejected by `--sandbox`."
-                },
-                "quiet": {
-                    "type": "boolean",
-                    "description": "Equivalent to GNU sed `-n`. When true, only explicit print commands such as `p` contribute to the rewritten file contents.",
-                    "default": false
-                },
-                "null_data": {
-                    "type": "boolean",
-                    "description": "Equivalent to GNU sed `-z`; process NUL-delimited records instead of newline-delimited lines.",
-                    "default": false
-                }
-            },
-            "required": ["file_path", "script"]
-        })
-    }
-
-    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        #[derive(Deserialize)]
-        struct Input {
-            file_path: String,
-            script: String,
-            #[serde(default)]
-            quiet: bool,
-            #[serde(default)]
-            null_data: bool,
-        }
-
-        let input: Input = match serde_json::from_value(input) {
-            Ok(i) => i,
-            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
-        };
-
-        let path = match resolve_existing_workspace_path(ctx, &input.file_path) {
-            Ok(path) => path,
-            Err(err) => return err,
-        };
-
-        let original_bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
-        };
-        let updated_bytes = match run_sed_script(
-            ctx,
-            &path,
-            &input.script,
-            input.quiet,
-            input.null_data,
-            &original_bytes,
-        )
-        .await
-        {
-            Ok(output) => output,
-            Err(e) => return ToolResult::error(e),
-        };
-        let original_text = String::from_utf8_lossy(&original_bytes).into_owned();
-        let updated_text = String::from_utf8_lossy(&updated_bytes).into_owned();
-
-        if updated_bytes == original_bytes {
-            return ToolResult::success(format!(
-                "sed script produced no changes in {}.",
-                path.display()
-            ));
-        };
-
-        let snapshot = LastEditSnapshot {
-            file_path: path.clone(),
-            content: Some(original_bytes.clone()),
-        };
-        let previous_snapshot =
-            LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
-
-        if let Err(e) = write_bytes(&path, &updated_bytes).await {
-            restore_previous_snapshot(&ctx.session_id, previous_snapshot);
-            return ToolResult::error(format!("Failed to write file: {}", e));
-        }
-
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.record_change(&path, Some(&original_text), &updated_text, "edit");
-        }
-
-        let diff = unified_diff(
-            &original_text,
-            &updated_text,
-            &format!("{} (before)", path.display()),
-            &format!("{} (after)", path.display()),
-        );
-
-        ToolResult::success(format!(
-            "Applied sed script to {}.\n{}\n\nuse 'revert' command if wrong",
-            path.display(),
-            diff.trim_end()
-        ))
-    }
-}
-
 #[async_trait]
 impl Tool for RevertTool {
     fn name(&self) -> &str {
@@ -369,8 +178,7 @@ impl Tool for RevertTool {
     }
 
     fn description(&self) -> &str {
-        "Restore the previous checkpoint from the most recent successful `Edit`, `Sed`, or `Patch` \
-         edit in this session. Only one checkpoint is retained."
+        "Restore the immediately previous XFileStorage revision for a tracked file in this session. `file_path` is required. Revert works only for files already loaded into XFileStorage by Read, Write, Edit, or matching Grep results. On success, Revert flushes the restored content to disk, removes the current head revision from XFileStorage, and returns a unified diff from the old head to the restored revision."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -387,9 +195,10 @@ impl Tool for RevertTool {
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Optional safety check. If provided, it must be a workspace-relative path matching the file from the most recent edit."
+                    "description": "Required path to the tracked file to revert. Absolute paths and workspace-relative paths are accepted."
                 }
-            }
+            },
+            "required": ["file_path"]
         })
     }
 
@@ -404,1227 +213,53 @@ impl Tool for RevertTool {
             Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
         };
 
-        let snapshot = match LAST_EDIT_SNAPSHOT_REGISTRY.get(&ctx.session_id) {
-            Some(entry) => entry.clone(),
+        let requested = match input.file_path.as_ref() {
+            Some(requested) => requested,
             None => {
-                return ToolResult::error(
-                    "No edit snapshot is available to revert. Run `Edit`, `Sed`, or `Patch` first.",
-                );
+                return ToolResult::error("file_path is required for XFileStorage-backed revert.");
             }
         };
-
-        if let Some(requested) = input.file_path.as_ref() {
-            let requested_path = match resolve_workspace_path(ctx, requested, false) {
-                Ok(path) => path,
-                Err(err) => return err,
-            };
-            if requested_path != snapshot.file_path {
+        let requested_path = resolve_xfile_path(ctx, requested);
+        let revisions = match list_revisions(&ctx.session_id, &requested_path) {
+            Some(revisions) if revisions.len() >= 2 => revisions,
+            Some(_) => {
                 return ToolResult::error(format!(
-                    "The last edit snapshot is for {}, not {}.",
-                    snapshot.file_path.display(),
-                    requested
+                    "No previous XFileStorage revision is available to revert for {}.",
+                    requested_path.display()
                 ));
             }
-        }
-
-        let current_bytes = match read_optional_bytes(&snapshot.file_path).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
+            None => {
                 return ToolResult::error(format!(
-                    "Failed to read current file state for revert: {}",
-                    e
+                    "File is not loaded in XFileStorage: {}",
+                    requested_path.display()
                 ));
             }
         };
-        let current_text = current_bytes
-            .as_ref()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .unwrap_or_default();
-        let restored_text = snapshot
-            .content
-            .as_ref()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .unwrap_or_default();
-
-        let restore_result = match snapshot.content.as_deref() {
-            Some(bytes) => write_bytes(&snapshot.file_path, bytes).await,
-            None => remove_file_if_exists(&snapshot.file_path).await,
-        };
-        if let Err(e) = restore_result {
+        let current = revisions
+            .last()
+            .expect("checked revision list is non-empty");
+        let previous = &revisions[revisions.len() - 2];
+        let current_text = render_file(&current.file);
+        let restored_text = render_file(&previous.file);
+        if let Err(e) = tokio::fs::write(&requested_path, restored_text.as_bytes()).await {
             return ToolResult::error(format!("Failed to restore file: {}", e));
         }
-
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.record_change(
-                &snapshot.file_path,
-                Some(&current_text),
-                &restored_text,
-                "revert",
-            );
+        if let Err(err) = discard_head_revision(&ctx.session_id, &requested_path) {
+            return ToolResult::error(err);
         }
-
-        LAST_EDIT_SNAPSHOT_REGISTRY.remove(&ctx.session_id);
-
         let diff = unified_diff(
             &current_text,
             &restored_text,
-            &format!("{} (current)", snapshot.file_path.display()),
-            &format!("{} (reverted)", snapshot.file_path.display()),
+            &format!("{} (current)", requested_path.display()),
+            &format!("{} (reverted)", requested_path.display()),
         );
 
         ToolResult::success(format!(
-            "Reverted {} to the previous edit snapshot.\n{}",
-            snapshot.file_path.display(),
+            "Reverted {} to the previous XFileStorage revision.\n{}",
+            requested_path.display(),
             diff.trim_end()
         ))
     }
-}
-
-async fn run_sed_script(
-    ctx: &ToolContext,
-    path: &Path,
-    script: &str,
-    quiet: bool,
-    null_data: bool,
-    original_bytes: &[u8],
-) -> std::result::Result<Vec<u8>, String> {
-    let staged_dir = create_sed_staging_dir()?;
-    let file_name = path
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| std::ffi::OsStr::new("input"));
-    let staged_path = staged_dir.path().join(file_name);
-
-    tokio::fs::write(&staged_path, original_bytes)
-        .await
-        .map_err(|e| format!("Failed to stage file for sed: {}", e))?;
-
-    let staged_script_path = if script.as_bytes().len() > INLINE_SED_SCRIPT_MAX_BYTES {
-        let path = staged_dir.path().join("program.sed");
-        tokio::fs::write(&path, script)
-            .await
-            .map_err(|e| format!("Failed to stage sed script: {}", e))?;
-        Some(path)
-    } else {
-        None
-    };
-
-    let mut cmd = sed_command(
-        ctx,
-        &staged_path,
-        script,
-        staged_script_path.as_deref(),
-        quiet,
-        null_data,
-    )?;
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| format!("Failed to launch sandboxed sed: {}", e))?;
-
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        let detail = process_failure_detail(&output.status, &output.stderr);
-        Err(format!("Failed to run sed script: {}", detail))
-    }
-}
-
-fn create_sed_staging_dir() -> std::result::Result<tempfile::TempDir, String> {
-    tempfile::Builder::new()
-        .prefix("cersei-sed-")
-        .tempdir_in(SED_STAGING_ROOT)
-        .or_else(|_| tempfile::Builder::new().prefix("cersei-sed-").tempdir())
-        .map_err(|e| format!("Failed to create sed staging directory: {}", e))
-}
-
-async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result<String, String> {
-    if patch_text.trim().is_empty() {
-        return Err("Patch input is empty.".to_string());
-    }
-
-    let parsed = parse_patch_manifest(patch_text)?;
-    if parsed.targets.is_empty() {
-        return Err(
-            "Patch does not contain any file targets. Expected standard diff headers like ---/+++ or diff --git."
-                .to_string(),
-        );
-    }
-
-    let patch_bin = patch_binary()?;
-    let staging_dir = create_patch_staging_dir()?;
-    stage_patch_targets(ctx, &staging_dir, &parsed.targets).await?;
-
-    let patch_file = staging_dir.path().join("input.patch");
-    tokio::fs::write(&patch_file, patch_text)
-        .await
-        .map_err(|e| format!("Failed to write staged patch file: {}", e))?;
-
-    let dry_run = run_patch_command(ctx, &patch_bin, staging_dir.path(), &patch_file, true).await?;
-    if !dry_run.status.success() {
-        return Err(explain_patch_failure(
-            "Patch could not be applied",
-            patch_text,
-            &parsed,
-            staging_dir.path(),
-            &dry_run,
-        ));
-    }
-
-    let apply = run_patch_command(ctx, &patch_bin, staging_dir.path(), &patch_file, false).await?;
-    if !apply.status.success() {
-        return Err(explain_patch_failure(
-            "Patch failed while being applied after passing dry-run",
-            patch_text,
-            &parsed,
-            staging_dir.path(),
-            &apply,
-        ));
-    }
-
-    let mut changed_files = Vec::new();
-    let mut previous_snapshot: Option<LastEditSnapshot> = None;
-    for target in &parsed.targets {
-        let workspace_path = ctx.working_dir.join(&target.workspace_rel);
-        let staged_path = staging_dir.path().join(&target.workspace_rel);
-        let old_bytes = read_optional_bytes(&workspace_path)
-            .await
-            .map_err(|e| format!("Failed to read {}: {}", target.workspace_rel, e))?;
-        let new_bytes = read_optional_bytes(&staged_path)
-            .await
-            .map_err(|e| format!("Failed to read staged {}: {}", target.workspace_rel, e))?;
-        if old_bytes == new_bytes {
-            continue;
-        }
-
-        let old_text = old_bytes
-            .as_ref()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .unwrap_or_default();
-        let new_text = new_bytes
-            .as_ref()
-            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-            .unwrap_or_default();
-        let snapshot = LastEditSnapshot {
-            file_path: workspace_path.clone(),
-            content: old_bytes.clone(),
-        };
-        let prior = LAST_EDIT_SNAPSHOT_REGISTRY.insert(ctx.session_id.clone(), snapshot);
-        if previous_snapshot.is_none() {
-            previous_snapshot = prior;
-        }
-
-        let apply_result = match new_bytes.as_deref() {
-            Some(bytes) => write_bytes(&workspace_path, bytes).await,
-            None => remove_file_if_exists(&workspace_path).await,
-        };
-        if let Err(err) = apply_result {
-            restore_previous_snapshot(&ctx.session_id, previous_snapshot);
-            return Err(format!("Failed to write {}: {}", target.workspace_rel, err));
-        }
-
-        if let Some(history) = ctx.extensions.get::<FileHistory>() {
-            history.record_change(
-                &workspace_path,
-                old_bytes.as_ref().map(|_| old_text.as_str()),
-                &new_text,
-                "patch",
-            );
-        }
-        changed_files.push(target.workspace_rel.clone());
-    }
-
-    let changed_summary = if changed_files.is_empty() {
-        "Patch applied successfully but produced no file changes.".to_string()
-    } else {
-        format!("Applied patch to: {}", changed_files.join(", "))
-    };
-
-    Ok(format!(
-        "{}\n\nComplete patch applied:\n{}",
-        changed_summary, patch_text
-    ))
-}
-
-fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, String> {
-    let lines: Vec<&str> = patch_text.lines().collect();
-    let mut git_old: Option<String> = None;
-    let mut git_new: Option<String> = None;
-    let mut old_header: Option<String> = None;
-    let mut saw_file_header = false;
-    let mut saw_hunk = false;
-    let mut targets = Vec::new();
-    let mut files = Vec::new();
-    let mut current_file_idx: Option<usize> = None;
-    let mut line_idx = 0;
-
-    while line_idx < lines.len() {
-        let line = lines[line_idx];
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() < 2 {
-                return Err(format!("Malformed diff --git header: {}", line));
-            }
-            git_old = Some(parts[0].to_string());
-            git_new = Some(parts[1].to_string());
-            saw_file_header = true;
-            current_file_idx = None;
-            line_idx += 1;
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("--- ") {
-            old_header = Some(extract_patch_path(path));
-            saw_file_header = true;
-            line_idx += 1;
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("+++ ") {
-            let new_header = extract_patch_path(path);
-            let target_path = choose_patch_target(
-                git_old.as_deref(),
-                git_new.as_deref(),
-                old_header.as_deref(),
-                Some(new_header.as_str()),
-            )?;
-            let workspace_rel = normalize_patch_workspace_path(&target_path)?;
-            if !targets
-                .iter()
-                .any(|t: &PatchTarget| t.workspace_rel == workspace_rel)
-            {
-                targets.push(PatchTarget {
-                    workspace_rel: workspace_rel.clone(),
-                });
-            }
-            current_file_idx = Some(
-                files
-                    .iter()
-                    .position(|file: &PatchFile| file.workspace_rel == workspace_rel)
-                    .unwrap_or_else(|| {
-                        files.push(PatchFile {
-                            workspace_rel: workspace_rel.clone(),
-                            hunks: Vec::new(),
-                        });
-                        files.len() - 1
-                    }),
-            );
-            git_old = None;
-            git_new = None;
-            old_header = None;
-            line_idx += 1;
-            continue;
-        }
-        if line.starts_with("@@ ") {
-            saw_hunk = true;
-            let file_idx = current_file_idx.ok_or_else(|| {
-                format!(
-                    "Unified diff hunk at line {} appears before any file headers.",
-                    line_idx + 1
-                )
-            })?;
-            let (hunk, next_line_idx) =
-                parse_unified_hunk(&lines, line_idx, &files[file_idx].workspace_rel)?;
-            files[file_idx].hunks.push(hunk);
-            line_idx = next_line_idx;
-            continue;
-        }
-        if line.starts_with("***************") {
-            saw_hunk = true;
-            line_idx += 1;
-            continue;
-        }
-        line_idx += 1;
-    }
-
-    if !saw_file_header {
-        return Err(
-            "Patch is missing file headers. Expected standard diff headers like ---/+++ or diff --git."
-                .to_string(),
-        );
-    }
-    if !saw_hunk {
-        return Err(
-            "Patch is missing hunk content. Expected unified/context diff hunks such as @@ ... @@."
-                .to_string(),
-        );
-    }
-
-    Ok(ParsedPatch { targets, files })
-}
-
-fn parse_unified_hunk(
-    lines: &[&str],
-    header_idx: usize,
-    workspace_rel: &str,
-) -> std::result::Result<(UnifiedHunk, usize), String> {
-    let header_line = lines[header_idx];
-    let captures = UNIFIED_HUNK_HEADER_RE
-        .captures(header_line)
-        .ok_or_else(|| {
-            format!(
-                "Malformed unified diff hunk header for '{}' at line {}: {}",
-                workspace_rel,
-                header_idx + 1,
-                header_line
-            )
-        })?;
-
-    let old_start =
-        parse_hunk_header_number(&captures, "old_start", workspace_rel, header_idx + 1)?;
-    let old_count = parse_hunk_header_number_with_default(
-        &captures,
-        "old_count",
-        1,
-        workspace_rel,
-        header_idx + 1,
-    )?;
-    let _new_start =
-        parse_hunk_header_number(&captures, "new_start", workspace_rel, header_idx + 1)?;
-    let new_count = parse_hunk_header_number_with_default(
-        &captures,
-        "new_count",
-        1,
-        workspace_rel,
-        header_idx + 1,
-    )?;
-
-    if old_count == 0 && new_count == 0 {
-        return Ok((
-            UnifiedHunk {
-                old_start,
-                old_lines: Vec::new(),
-            },
-            header_idx + 1,
-        ));
-    }
-
-    let mut old_seen = 0usize;
-    let mut new_seen = 0usize;
-    let mut old_lines = Vec::new();
-    let mut cursor = header_idx + 1;
-
-    while cursor < lines.len() {
-        let line = lines[cursor];
-        if line == "\\ No newline at end of file" {
-            cursor += 1;
-            continue;
-        }
-        if is_patch_section_boundary(line) {
-            break;
-        }
-
-        let mut chars = line.chars();
-        let prefix = chars.next().ok_or_else(|| {
-            format!(
-                "Malformed unified diff hunk for '{}' at line {}: empty hunk line.",
-                workspace_rel,
-                cursor + 1
-            )
-        })?;
-        let content = chars.as_str();
-        match prefix {
-            ' ' => {
-                old_seen += 1;
-                new_seen += 1;
-                old_lines.push(content.to_string());
-            }
-            '-' => {
-                old_seen += 1;
-                old_lines.push(content.to_string());
-            }
-            '+' => {
-                new_seen += 1;
-            }
-            _ => {
-                return Err(format!(
-                    "Malformed unified diff hunk for '{}' at line {}: each hunk line must start with ' ', '+', '-', or '\\\\ No newline at end of file'.",
-                    workspace_rel,
-                    cursor + 1
-                ));
-            }
-        }
-
-        if old_seen > old_count || new_seen > new_count {
-            return Err(format_hunk_count_mismatch(
-                workspace_rel,
-                header_idx + 1,
-                old_count,
-                new_count,
-                old_seen,
-                new_seen,
-            ));
-        }
-
-        cursor += 1;
-        if old_seen == old_count && new_seen == new_count {
-            while cursor < lines.len() && lines[cursor] == "\\ No newline at end of file" {
-                cursor += 1;
-            }
-            if cursor < lines.len() && !is_patch_section_boundary(lines[cursor]) {
-                let (extra_old, extra_new) =
-                    count_additional_hunk_lines(lines, cursor, workspace_rel)?;
-                return Err(format_hunk_count_mismatch(
-                    workspace_rel,
-                    header_idx + 1,
-                    old_count,
-                    new_count,
-                    old_seen + extra_old,
-                    new_seen + extra_new,
-                ));
-            }
-            return Ok((
-                UnifiedHunk {
-                    old_start,
-                    old_lines,
-                },
-                cursor,
-            ));
-        }
-    }
-
-    Err(format_hunk_count_mismatch(
-        workspace_rel,
-        header_idx + 1,
-        old_count,
-        new_count,
-        old_seen,
-        new_seen,
-    ))
-}
-
-fn parse_hunk_header_number(
-    captures: &regex::Captures<'_>,
-    name: &str,
-    workspace_rel: &str,
-    header_line_number: usize,
-) -> std::result::Result<usize, String> {
-    let value = captures
-        .name(name)
-        .ok_or_else(|| {
-            format!(
-                "Malformed unified diff hunk for '{}' at line {}: missing {} in hunk header.",
-                workspace_rel, header_line_number, name
-            )
-        })?
-        .as_str();
-    value.parse::<usize>().map_err(|err| {
-        format!(
-            "Malformed unified diff hunk for '{}' at line {}: invalid {} value '{}': {}",
-            workspace_rel, header_line_number, name, value, err
-        )
-    })
-}
-
-fn parse_hunk_header_number_with_default(
-    captures: &regex::Captures<'_>,
-    name: &str,
-    default: usize,
-    workspace_rel: &str,
-    header_line_number: usize,
-) -> std::result::Result<usize, String> {
-    match captures.name(name) {
-        Some(value) => value.as_str().parse::<usize>().map_err(|err| {
-            format!(
-                "Malformed unified diff hunk for '{}' at line {}: invalid {} value '{}': {}",
-                workspace_rel,
-                header_line_number,
-                name,
-                value.as_str(),
-                err
-            )
-        }),
-        None => Ok(default),
-    }
-}
-
-fn format_hunk_count_mismatch(
-    workspace_rel: &str,
-    header_line_number: usize,
-    expected_old: usize,
-    expected_new: usize,
-    actual_old: usize,
-    actual_new: usize,
-) -> String {
-    format!(
-        "Malformed unified diff hunk for '{}' at line {}: header expects {} old line(s) and {} new line(s), but the body contains {} old line(s) and {} new line(s).",
-        workspace_rel,
-        header_line_number,
-        expected_old,
-        expected_new,
-        actual_old,
-        actual_new
-    )
-}
-
-fn count_additional_hunk_lines(
-    lines: &[&str],
-    start_idx: usize,
-    workspace_rel: &str,
-) -> std::result::Result<(usize, usize), String> {
-    let mut extra_old = 0usize;
-    let mut extra_new = 0usize;
-    let mut cursor = start_idx;
-
-    while cursor < lines.len() {
-        let line = lines[cursor];
-        if line == "\\ No newline at end of file" {
-            cursor += 1;
-            continue;
-        }
-        if is_patch_section_boundary(line) {
-            break;
-        }
-
-        let mut chars = line.chars();
-        let prefix = chars.next().ok_or_else(|| {
-            format!(
-                "Malformed unified diff hunk for '{}' at line {}: empty hunk line.",
-                workspace_rel,
-                cursor + 1
-            )
-        })?;
-        match prefix {
-            ' ' => {
-                extra_old += 1;
-                extra_new += 1;
-            }
-            '-' => {
-                extra_old += 1;
-            }
-            '+' => {
-                extra_new += 1;
-            }
-            _ => {
-                return Err(format!(
-                    "Malformed unified diff hunk for '{}' at line {}: each hunk line must start with ' ', '+', '-', or '\\\\ No newline at end of file'.",
-                    workspace_rel,
-                    cursor + 1
-                ));
-            }
-        }
-        cursor += 1;
-    }
-
-    Ok((extra_old, extra_new))
-}
-
-fn is_patch_section_boundary(line: &str) -> bool {
-    line.starts_with("diff --git ")
-        || line.starts_with("--- ")
-        || line.starts_with("+++ ")
-        || line.starts_with("@@ ")
-        || line.starts_with("***************")
-}
-
-fn extract_patch_path(header_value: &str) -> String {
-    header_value
-        .split(|c: char| c == '\t' || c == ' ')
-        .next()
-        .unwrap_or("")
-        .to_string()
-}
-
-fn choose_patch_target(
-    git_old: Option<&str>,
-    git_new: Option<&str>,
-    old_header: Option<&str>,
-    new_header: Option<&str>,
-) -> std::result::Result<String, String> {
-    for candidate in [git_new, new_header, git_old, old_header]
-        .into_iter()
-        .flatten()
-    {
-        if candidate != "/dev/null" {
-            return Ok(strip_patch_prefix(candidate).to_string());
-        }
-    }
-    Err("Patch file header does not identify a workspace file target.".to_string())
-}
-
-fn strip_patch_prefix(path: &str) -> &str {
-    path.strip_prefix("a/")
-        .or_else(|| path.strip_prefix("b/"))
-        .unwrap_or(path)
-}
-
-fn normalize_patch_workspace_path(path: &str) -> std::result::Result<String, String> {
-    if path.is_empty() {
-        return Err("Patch contains an empty file path header.".to_string());
-    }
-
-    let candidate = Path::new(path);
-    if candidate.is_absolute() {
-        return Err(format!(
-            "Patch path '{}' is absolute; only workspace-relative paths are allowed.",
-            path
-        ));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(format!(
-            "Patch path '{}' attempts path traversal with '..', which is not allowed.",
-            path
-        ));
-    }
-
-    let normalized = candidate
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(segment) => Some(segment.to_os_string()),
-            Component::CurDir => None,
-            Component::ParentDir => None,
-            Component::RootDir => None,
-            _ => None,
-        })
-        .collect::<PathBuf>();
-    if normalized.as_os_str().is_empty() {
-        return Err("Patch path resolves to an empty workspace-relative path.".to_string());
-    }
-
-    Ok(normalized.to_string_lossy().into_owned())
-}
-
-async fn stage_patch_targets(
-    ctx: &ToolContext,
-    staging_dir: &TempDir,
-    targets: &[PatchTarget],
-) -> std::result::Result<(), String> {
-    for target in targets {
-        let workspace_path =
-            resolve_workspace_path(ctx, &target.workspace_rel, false).map_err(|err| err.content)?;
-        let staged_path = staging_dir.path().join(&target.workspace_rel);
-        if let Some(parent) = staged_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Failed to prepare patch staging directory: {}", e))?;
-        }
-        match tokio::fs::copy(&workspace_path, &staged_path).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("Failed to stage {}: {}", target.workspace_rel, e)),
-        }
-    }
-    Ok(())
-}
-
-fn create_patch_staging_dir() -> std::result::Result<TempDir, String> {
-    tempfile::Builder::new()
-        .prefix("cersei-patch-")
-        .tempdir_in(SED_STAGING_ROOT)
-        .or_else(|_| tempfile::Builder::new().prefix("cersei-patch-").tempdir())
-        .map_err(|e| format!("Failed to create patch staging directory: {}", e))
-}
-
-async fn run_patch_command(
-    ctx: &ToolContext,
-    patch_bin: &Path,
-    staging_root: &Path,
-    patch_file: &Path,
-    dry_run: bool,
-) -> std::result::Result<std::process::Output, String> {
-    let output = if let Some(firejail) = firejail_binary() {
-        let mut cmd = Command::new(firejail);
-        append_firejail_prefix(&mut cmd, Some(&ctx.working_dir));
-        cmd.arg("--");
-        cmd.arg(patch_bin);
-        append_patch_arguments(&mut cmd, staging_root, patch_file, dry_run);
-        cmd.output()
-            .await
-            .map_err(|e| format!("Failed to run patch in firejail: {}", e))?
-    } else {
-        let mut cmd = Command::new(patch_bin);
-        append_patch_arguments(&mut cmd, staging_root, patch_file, dry_run);
-        cmd.output()
-            .await
-            .map_err(|e| format!("Failed to run patch: {}", e))?
-    };
-
-    Ok(output)
-}
-
-fn append_patch_arguments(
-    cmd: &mut Command,
-    staging_root: &Path,
-    patch_file: &Path,
-    dry_run: bool,
-) {
-    cmd.arg("--batch");
-    cmd.arg("--forward");
-    cmd.arg("--strip=1");
-    cmd.arg("--directory");
-    cmd.arg(staging_root);
-    cmd.arg("--input");
-    cmd.arg(patch_file);
-    if dry_run {
-        cmd.arg("--dry-run");
-    }
-}
-
-fn patch_binary() -> std::result::Result<PathBuf, String> {
-    match &*PATCH_BINARY {
-        Ok(path) => Ok(path.clone()),
-        Err(err) => Err(err.clone()),
-    }
-}
-
-fn probe_patch() -> std::result::Result<PathBuf, String> {
-    let patch = which::which("patch").map_err(|_| {
-        "System `patch` binary not found in PATH; install patch on the host OS.".to_string()
-    })?;
-    let output = std::process::Command::new(&patch)
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("Failed to probe patch at {}: {}", patch.display(), e))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Failed to invoke patch at {}: {}",
-            patch.display(),
-            process_failure_detail(&output.status, &output.stderr)
-        ));
-    }
-    Ok(patch)
-}
-
-fn explain_patch_failure(
-    prefix: &str,
-    patch_text: &str,
-    parsed: &ParsedPatch,
-    staging_root: &Path,
-    output: &std::process::Output,
-) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let detail = if !stderr.is_empty() {
-        stderr
-    } else if !stdout.is_empty() {
-        stdout
-    } else {
-        process_failure_detail(&output.status, &output.stderr)
-    };
-    let mut message = format!("{}: {}", prefix, detail);
-    if let Some(diagnostics) = build_patch_failure_diagnostics(parsed, staging_root) {
-        message.push_str("\n\n");
-        message.push_str(&diagnostics);
-    }
-    message.push_str("\n\nPatch was:\n");
-    message.push_str(patch_text);
-    message
-}
-
-fn build_patch_failure_diagnostics(parsed: &ParsedPatch, staging_root: &Path) -> Option<String> {
-    let mut diagnostics = Vec::new();
-
-    for file in &parsed.files {
-        if diagnostics.len() >= 3 {
-            break;
-        }
-        if file.hunks.is_empty() {
-            continue;
-        }
-
-        let staged_path = staging_root.join(&file.workspace_rel);
-        let bytes = match std::fs::read(&staged_path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                diagnostics.push(format!(
-                    "Target file '{}' is missing in the staged workspace, so patch context could not be matched.",
-                    file.workspace_rel
-                ));
-                continue;
-            }
-            Err(err) => {
-                diagnostics.push(format!(
-                    "Failed to inspect staged file '{}': {}",
-                    file.workspace_rel, err
-                ));
-                continue;
-            }
-        };
-
-        let text = String::from_utf8_lossy(&bytes);
-        let file_lines: Vec<&str> = text.lines().collect();
-        for (hunk_idx, hunk) in file.hunks.iter().enumerate() {
-            if diagnostics.len() >= 3 {
-                break;
-            }
-            if hunk.old_lines.is_empty()
-                || hunk_old_lines_match(
-                    &file_lines,
-                    hunk.old_start.saturating_sub(1),
-                    &hunk.old_lines,
-                )
-            {
-                continue;
-            }
-
-            let mismatch = first_hunk_mismatch(
-                &file_lines,
-                hunk.old_start.saturating_sub(1),
-                &hunk.old_lines,
-            );
-            let mismatch_line = mismatch
-                .as_ref()
-                .map(|(line_number, _, _)| *line_number)
-                .unwrap_or(hunk.old_start);
-            let expected_line = mismatch
-                .as_ref()
-                .map(|(_, expected, _)| expected.as_str())
-                .unwrap_or("<unknown>");
-            let actual_line = mismatch
-                .as_ref()
-                .map(|(_, _, actual)| actual.as_deref().unwrap_or("<EOF>"))
-                .unwrap_or("<unknown>");
-            let nearby_match = find_exact_hunk_match(&file_lines, &hunk.old_lines)
-                .filter(|line_number| *line_number != hunk.old_start)
-                .map(|line_number| {
-                    format!(
-                        " The hunk's old-side text matches starting at line {} instead.",
-                        line_number
-                    )
-                })
-                .unwrap_or_default();
-
-            diagnostics.push(format!(
-                "Target file '{}' differs from hunk #{} near line {}. Expected old-side line {} to be {:?}, found {:?}.{}\nCurrent file context:\n{}",
-                file.workspace_rel,
-                hunk_idx + 1,
-                hunk.old_start,
-                mismatch_line,
-                expected_line,
-                actual_line,
-                nearby_match,
-                render_file_context(&file_lines, mismatch_line, 2),
-            ));
-        }
-    }
-
-    if diagnostics.is_empty() {
-        None
-    } else {
-        Some(diagnostics.join("\n\n"))
-    }
-}
-
-fn hunk_old_lines_match(file_lines: &[&str], start_idx: usize, old_lines: &[String]) -> bool {
-    old_lines.iter().enumerate().all(|(offset, expected)| {
-        file_lines
-            .get(start_idx + offset)
-            .copied()
-            .map(|actual| actual == expected)
-            .unwrap_or(false)
-    })
-}
-
-fn first_hunk_mismatch(
-    file_lines: &[&str],
-    start_idx: usize,
-    old_lines: &[String],
-) -> Option<(usize, String, Option<String>)> {
-    old_lines.iter().enumerate().find_map(|(offset, expected)| {
-        let line_number = start_idx + offset + 1;
-        match file_lines.get(start_idx + offset).copied() {
-            Some(actual) if actual == expected => None,
-            Some(actual) => Some((line_number, expected.clone(), Some(actual.to_string()))),
-            None => Some((line_number, expected.clone(), None)),
-        }
-    })
-}
-
-fn find_exact_hunk_match(file_lines: &[&str], old_lines: &[String]) -> Option<usize> {
-    if old_lines.is_empty() || old_lines.len() > file_lines.len() {
-        return None;
-    }
-
-    file_lines
-        .windows(old_lines.len())
-        .position(|window| {
-            window
-                .iter()
-                .zip(old_lines.iter())
-                .all(|(actual, expected)| *actual == expected)
-        })
-        .map(|idx| idx + 1)
-}
-
-fn render_file_context(file_lines: &[&str], center_line: usize, radius: usize) -> String {
-    if file_lines.is_empty() {
-        return "<file is empty>".to_string();
-    }
-
-    let start_line = center_line.saturating_sub(radius).max(1);
-    let end_line = (center_line + radius).min(file_lines.len());
-    let mut rendered = Vec::new();
-    for line_number in start_line..=end_line {
-        let text = file_lines.get(line_number - 1).copied().unwrap_or("");
-        rendered.push(format!("{:>4} | {}", line_number, text));
-    }
-    rendered.join("\n")
-}
-
-#[derive(Debug)]
-struct ParsedPatch {
-    targets: Vec<PatchTarget>,
-    files: Vec<PatchFile>,
-}
-
-#[derive(Debug)]
-struct PatchTarget {
-    workspace_rel: String,
-}
-
-#[derive(Debug)]
-struct PatchFile {
-    workspace_rel: String,
-    hunks: Vec<UnifiedHunk>,
-}
-
-#[derive(Debug)]
-struct UnifiedHunk {
-    old_start: usize,
-    old_lines: Vec<String>,
-}
-
-fn sed_command(
-    ctx: &ToolContext,
-    staged_path: &Path,
-    script: &str,
-    staged_script_path: Option<&Path>,
-    quiet: bool,
-    null_data: bool,
-) -> std::result::Result<Command, String> {
-    if let Some(firejail) = firejail_binary() {
-        return firejail_sed_command(
-            ctx,
-            &firejail,
-            staged_path,
-            script,
-            staged_script_path,
-            quiet,
-            null_data,
-        );
-    }
-
-    direct_sed_command(staged_path, script, staged_script_path, quiet, null_data)
-}
-
-fn append_firejail_prefix(cmd: &mut Command, blacklisted_dir: Option<&Path>) {
-    cmd.arg("--quiet");
-    cmd.arg("--noprofile");
-    cmd.arg("--net=none");
-    cmd.arg("--private");
-    cmd.arg("--private-cache");
-    cmd.arg("--private-dev");
-    cmd.arg("--private-cwd=/");
-
-    if let Some(working_dir) = blacklisted_dir.and_then(|path| path.canonicalize().ok()) {
-        cmd.arg(format!("--blacklist={}", working_dir.display()));
-    }
-
-    cmd.arg("--caps.drop=all");
-    cmd.arg("--nonewprivs");
-    cmd.arg("--nodbus");
-    cmd.arg("--x11=none");
-    cmd.arg("--noinput");
-    cmd.arg("--nosound");
-    cmd.arg("--nou2f");
-}
-
-fn firejail_sed_command(
-    ctx: &ToolContext,
-    firejail: &Path,
-    staged_path: &Path,
-    script: &str,
-    staged_script_path: Option<&Path>,
-    quiet: bool,
-    null_data: bool,
-) -> std::result::Result<Command, String> {
-    let sed = gnu_sed_binary()?;
-    let mut cmd = Command::new(firejail);
-
-    append_firejail_prefix(&mut cmd, Some(&ctx.working_dir));
-    cmd.arg("--");
-    cmd.arg(sed);
-    append_sed_arguments(
-        &mut cmd,
-        staged_path,
-        script,
-        staged_script_path,
-        quiet,
-        null_data,
-    );
-    Ok(cmd)
-}
-
-fn direct_sed_command(
-    staged_path: &Path,
-    script: &str,
-    staged_script_path: Option<&Path>,
-    quiet: bool,
-    null_data: bool,
-) -> std::result::Result<Command, String> {
-    let sed = gnu_sed_binary()?;
-    let mut cmd = Command::new(sed);
-    append_sed_arguments(
-        &mut cmd,
-        staged_path,
-        script,
-        staged_script_path,
-        quiet,
-        null_data,
-    );
-    Ok(cmd)
-}
-
-fn append_sed_arguments(
-    cmd: &mut Command,
-    staged_path: &Path,
-    script: &str,
-    staged_script_path: Option<&Path>,
-    quiet: bool,
-    null_data: bool,
-) {
-    cmd.arg("-E");
-    cmd.arg("--sandbox");
-    if quiet {
-        cmd.arg("--quiet");
-    }
-    if null_data {
-        cmd.arg("--null-data");
-    }
-    if let Some(staged_script_path) = staged_script_path {
-        cmd.arg("-f");
-        cmd.arg(staged_script_path);
-    } else {
-        cmd.arg("--expression");
-        cmd.arg(script);
-    }
-    cmd.arg("--");
-    cmd.arg(staged_path);
-}
-
-fn gnu_sed_binary() -> std::result::Result<PathBuf, String> {
-    match &*GNU_SED_BINARY {
-        Ok(path) => Ok(path.clone()),
-        Err(err) => Err(err.clone()),
-    }
-}
-
-fn firejail_binary() -> Option<PathBuf> {
-    FIREJAIL_BINARY.clone()
-}
-
-fn probe_gnu_sed() -> std::result::Result<PathBuf, String> {
-    let sed = which::which("sed")
-        .map_err(|_| "GNU sed not found in PATH; install `sed` on the host OS.".to_string())?;
-    let output = std::process::Command::new(&sed)
-        .arg("--help")
-        .output()
-        .map_err(|e| format!("Failed to probe sed at {}: {}", sed.display(), e))?;
-
-    let help = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() || !help.contains("--sandbox") {
-        return Err(format!(
-            "System sed at {} does not support `--sandbox`; GNU sed with sandbox support is required.",
-            sed.display()
-        ));
-    }
-
-    Ok(sed)
-}
-
-fn probe_firejail() -> Option<PathBuf> {
-    let firejail = match which::which("firejail") {
-        Ok(path) => path,
-        Err(_) => return None,
-    };
-    let sed = match gnu_sed_binary() {
-        Ok(path) => path,
-        Err(_) => return None,
-    };
-    let staged_file =
-        match NamedTempFile::new_in(SED_STAGING_ROOT).or_else(|_| NamedTempFile::new()) {
-            Ok(file) => file,
-            Err(err) => {
-                warn_firejail_fallback(format!("probe file setup failed: {}", err));
-                return None;
-            }
-        };
-    if let Err(err) = std::fs::write(staged_file.path(), b"probe\n") {
-        warn_firejail_fallback(format!("probe file setup failed: {}", err));
-        return None;
-    }
-
-    let output = match std::process::Command::new(&firejail)
-        .args([
-            "--quiet",
-            "--noprofile",
-            "--net=none",
-            "--private",
-            "--private-cache",
-            "--private-dev",
-            "--private-cwd=/",
-            "--caps.drop=all",
-            "--nonewprivs",
-            "--nodbus",
-            "--x11=none",
-            "--noinput",
-            "--nosound",
-            "--nou2f",
-            "--",
-        ])
-        .arg(&sed)
-        .arg("-E")
-        .arg("--sandbox")
-        .arg("--expression")
-        .arg("s/probe/probe/")
-        .arg("--")
-        .arg(staged_file.path())
-        .output()
-    {
-        Ok(output) => output,
-        Err(err) => {
-            warn_firejail_fallback(format!(
-                "failed to probe firejail at {}: {}",
-                firejail.display(),
-                err
-            ));
-            return None;
-        }
-    };
-
-    if output.status.success() && output.stdout == b"probe\n" {
-        Some(firejail)
-    } else {
-        warn_firejail_fallback(format!(
-            "firejail at {} cannot launch sandboxed sed ({})",
-            firejail.display(),
-            process_failure_detail(&output.status, &output.stderr)
-        ));
-        None
-    }
-}
-
-fn process_failure_detail(status: &std::process::ExitStatus, stderr: &[u8]) -> String {
-    let stderr = String::from_utf8_lossy(stderr).trim().to_string();
-    if stderr.is_empty() {
-        match status.code() {
-            Some(code) => format!("exit status {}", code),
-            None => "terminated by signal".to_string(),
-        }
-    } else {
-        stderr
-    }
-}
-
-fn warn_firejail_fallback(detail: String) {
-    if FIREJAIL_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    eprintln!(
-        "warning: SedTool firejail sandbox unavailable ({}); falling back to direct `sed --sandbox` on staged temp files.",
-        detail
-    );
 }
 
 pub async fn execute_edit(req: EditRequest) -> std::result::Result<String, String> {
@@ -1639,7 +274,7 @@ async fn execute_edit_inner(
     path: &Path,
     ctx: Option<&ToolContext>,
 ) -> std::result::Result<String, EditFailure> {
-    let (bytes, text, version) = read_file(path, &req.file_path).await?;
+    let (_bytes, text, version) = read_file(path, &req.file_path).await?;
 
     let missing_base_version = req.base_version.trim().is_empty();
     if missing_base_version && !is_first_edit_for_session_file(ctx, path) {
@@ -1685,7 +320,6 @@ async fn execute_edit_inner(
                 ctx.session_id.clone(),
                 LastEditSnapshot {
                     file_path: path.to_path_buf(),
-                    content: Some(bytes),
                 },
             );
         }
@@ -2173,83 +807,13 @@ fn serialize_failure(failure: &EditFailure) -> String {
     })
 }
 
-async fn write_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(path, bytes).await
-}
-
-async fn read_optional_bytes(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-async fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-fn resolve_existing_workspace_path(
-    ctx: &ToolContext,
-    input: &str,
-) -> std::result::Result<PathBuf, ToolResult> {
-    resolve_workspace_path(ctx, input, true)
-}
-
-fn resolve_workspace_path(
-    ctx: &ToolContext,
-    input: &str,
-    require_exists: bool,
-) -> std::result::Result<PathBuf, ToolResult> {
-    let candidate = Path::new(input);
-    if candidate.is_absolute() {
-        return Err(ToolResult::error(
-            "Absolute paths are not allowed; use a workspace-relative path.",
-        ));
-    }
-    if candidate
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(ToolResult::error(
-            "Path traversal with `..` is not allowed.",
-        ));
-    }
-
-    let path = ctx.working_dir.join(candidate);
-    if require_exists && !path.exists() {
-        return Err(ToolResult::error(format!(
-            "File not found: {}",
-            path.display()
-        )));
-    }
-
-    Ok(path)
-}
-
-fn restore_previous_snapshot(
-    session_id: &str,
-    previous: Option<LastEditSnapshot>,
-) -> Option<LastEditSnapshot> {
-    match previous {
-        Some(snapshot) => LAST_EDIT_SNAPSHOT_REGISTRY.insert(session_id.to_string(), snapshot),
-        None => LAST_EDIT_SNAPSHOT_REGISTRY
-            .remove(session_id)
-            .map(|(_, snapshot)| snapshot),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_xedit::XEditTool;
+    use crate::file_xwrite::XWriteTool;
     use crate::permissions::AllowAll;
+    use crate::xfile_storage::try_get_head;
     use serde_json::{json, Value};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -2309,75 +873,6 @@ mod tests {
 
         let payload: Value = serde_json::from_str(&result.content).unwrap();
         (result, payload)
-    }
-
-    async fn run_edit_request_without_version(
-        ctx: &ToolContext,
-        file_path: &str,
-        edits: Vec<Value>,
-    ) -> (ToolResult, Value) {
-        let tool = EditTool;
-        let result = tool
-            .execute(
-                json!({
-                    "file_path": file_path,
-                    "edits": edits,
-                }),
-                ctx,
-            )
-            .await;
-
-        let payload: Value = serde_json::from_str(&result.content).unwrap();
-        (result, payload)
-    }
-
-    async fn run_sed_request(
-        ctx: &ToolContext,
-        file_path: &str,
-        script: &str,
-        quiet: bool,
-        null_data: bool,
-    ) -> ToolResult {
-        let tool = SedTool;
-        tool.execute(
-            json!({
-                "file_path": file_path,
-                "script": script,
-                "quiet": quiet,
-                "null_data": null_data,
-            }),
-            ctx,
-        )
-        .await
-    }
-
-    async fn run_patch_request(ctx: &ToolContext, patch: &str) -> ToolResult {
-        let tool = PatchTool;
-        tool.execute(json!({ "patch": patch }), ctx).await
-    }
-
-    fn ensure_sed_runtime() -> bool {
-        match gnu_sed_binary() {
-            Ok(_) => true,
-            Err(err) => {
-                eprintln!("skipping sed test: {err}");
-                false
-            }
-        }
-    }
-
-    fn ensure_patch_runtime() -> bool {
-        match patch_binary() {
-            Ok(_) => true,
-            Err(err) => {
-                eprintln!("skipping patch test: {err}");
-                false
-            }
-        }
-    }
-
-    fn frontend_test_setup_fixture() -> &'static str {
-        "Object.defineProperty(window, 'matchMedia', {\n  writable: true,\n  value: (query: any) => ({\nmatches: false,\nmedia: query,\nonchange: null,\naddListener: () => {}, // Deprecated\nremoveListener: () => {}, // Deprecated\naddEventListener: () => {},\nremoveEventListener: () => {},\ndispatchEvent: () => false,\n  }),\n})\n\nclass ResizeObserverMock {\n  observe() {}\n  unobserve() {}\n  disconnect() {}\n}\n\nObject.defineProperty(globalThis, 'ResizeObserver', {\n  writable: true,\n  value: ResizeObserverMock,\n})\n\nObject.defineProperty(window, 'ResizeObserver', {\n  writable: true,\n  value: ResizeObserverMock,\n})\n\nObject.defineProperty(window, 'SVGElement', {\n  writable: true,\n  value: window.HTMLElement,\n})\n"
     }
 
     #[tokio::test]
@@ -2734,12 +1229,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let initial = "\
 pub struct EditTool;\n\
-pub struct SedTool;\n\
+pub struct LegacyTool;\n\
 \n\
 #[async_trait]\n\
-impl Tool for SedTool {\n\
+impl Tool for LegacyTool {\n\
     fn name(&self) -> &str {\n\
-        \"Sed\"\n\
+        \"Legacy\"\n\
     }\n\
 }\n";
         write_text(&tmp, "sample.txt", initial);
@@ -2755,7 +1250,7 @@ impl Tool for SedTool {\n\
                 "end_line": 3,
                 "end_column": 1,
                 "expected_text": "",
-                "new_text": "pub struct PatchTool;\n"
+                "new_text": "pub struct HelperTool;\n"
             })],
         )
         .await;
@@ -2772,17 +1267,17 @@ impl Tool for SedTool {\n\
                 "start_column": 1,
                 "end_line": 4,
                 "end_column": 1,
-                "expected_text": "#[async_trait]\nimpl Tool for SedTool {",
-                "new_text": "#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"
+                "expected_text": "#[async_trait]\nimpl Tool for LegacyTool {",
+                "new_text": "#[derive(Deserialize)]\nstruct HelperInput {\n    value: String,\n}\n\n#[async_trait]\nimpl Tool for LegacyTool {"
             })],
         )
         .await;
 
         assert!(!second_result.is_error, "{}", second_result.content);
         let updated = read_text(&tmp, "sample.txt");
-        assert!(after_first.contains("#[async_trait]\nimpl Tool for SedTool {"));
-        assert!(updated.contains("pub struct PatchTool;"));
-        assert!(updated.contains("#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"));
+        assert!(after_first.contains("#[async_trait]\nimpl Tool for LegacyTool {"));
+        assert!(updated.contains("pub struct HelperTool;"));
+        assert!(updated.contains("#[derive(Deserialize)]\nstruct HelperInput {\n    value: String,\n}\n\n#[async_trait]\nimpl Tool for LegacyTool {"));
         assert_eq!(second_payload["applied_edits"], json!(1));
     }
 
@@ -2790,11 +1285,11 @@ impl Tool for SedTool {\n\
     async fn nearby_function_boundary_match_recovers_from_newline_only_slice() {
         let tmp = tempfile::tempdir().unwrap();
         let initial = "\
-fn create_sed_staging_dir() -> std::result::Result<(), String> {\n\
+fn create_helper_dir() -> std::result::Result<(), String> {\n\
     Ok(())\n\
 }\n\
 \n\
-fn sed_command() {}\n";
+fn helper_command() {}\n";
         write_text(&tmp, "sample.txt", initial);
         let ctx = test_ctx(tmp.path());
 
@@ -2807,8 +1302,8 @@ fn sed_command() {}\n";
                 "start_column": 1,
                 "end_line": 5,
                 "end_column": 1,
-                "expected_text": "fn sed_command(",
-                "new_text": "fn patch_helper() {}\n\nfn sed_command("
+                "expected_text": "fn helper_command(",
+                "new_text": "fn inserted_helper() {}\n\nfn helper_command("
             })],
         )
         .await;
@@ -2818,13 +1313,13 @@ fn sed_command() {}\n";
         assert_eq!(
             read_text(&tmp, "sample.txt"),
             "\
-fn create_sed_staging_dir() -> std::result::Result<(), String> {\n\
+fn create_helper_dir() -> std::result::Result<(), String> {\n\
     Ok(())\n\
 }\n\
 \n\
-fn patch_helper() {}\n\
+fn inserted_helper() {}\n\
 \n\
-fn sed_command() {}\n"
+fn helper_command() {}\n"
         );
     }
 
@@ -2833,11 +1328,11 @@ fn sed_command() {}\n"
         let tmp = tempfile::tempdir().unwrap();
         let initial = "\
 #[async_trait]\n\
-impl Tool for SedTool {\n\
+impl Tool for LegacyTool {\n\
 }\n\
 \n\
 #[async_trait]\n\
-impl Tool for SedTool {\n\
+impl Tool for LegacyTool {\n\
 }\n";
         write_text(&tmp, "sample.txt", initial);
         let ctx = test_ctx(tmp.path());
@@ -2851,7 +1346,7 @@ impl Tool for SedTool {\n\
                 "start_column": 1,
                 "end_line": 4,
                 "end_column": 1,
-                "expected_text": "#[async_trait]\nimpl Tool for SedTool {",
+                "expected_text": "#[async_trait]\nimpl Tool for LegacyTool {",
                 "new_text": "ignored"
             })],
         )
@@ -2870,9 +1365,9 @@ impl Tool for SedTool {\n\
 alpha\n\
 \n\
 #[async_trait]\n\
-impl Tool for SedTool {\n\
+impl Tool for LegacyTool {\n\
     fn name(&self) -> &str {\n\
-        \"Sed\"\n\
+        \"Legacy\"\n\
     }\n\
 }\n";
         write_text(&tmp, "sample.txt", initial);
@@ -2888,7 +1383,7 @@ impl Tool for SedTool {\n\
                 "end_line": 2,
                 "end_column": 1,
                 "expected_text": "",
-                "new_text": "pub struct PatchTool;\n"
+                "new_text": "pub struct HelperTool;\n"
             })],
         )
         .await;
@@ -2907,8 +1402,8 @@ impl Tool for SedTool {\n\
                 "start_column": 1,
                 "end_line": 4,
                 "end_column": 1,
-                "expected_text": "#[async_trait]\nimpl Tool for SedTool {",
-                "new_text": "#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"
+                "expected_text": "#[async_trait]\nimpl Tool for LegacyTool {",
+                "new_text": "#[derive(Deserialize)]\nstruct HelperInput {\n    value: String,\n}\n\n#[async_trait]\nimpl Tool for LegacyTool {"
             })],
         )
         .await;
@@ -2916,8 +1411,8 @@ impl Tool for SedTool {\n\
         assert!(!second_result.is_error, "{}", second_result.content);
         assert_eq!(second_payload["applied_edits"], json!(1));
         let final_text = read_text(&tmp, "sample.txt");
-        assert!(final_text.contains("pub struct PatchTool;"));
-        assert!(final_text.contains("#[derive(Deserialize)]\nstruct PatchInput {\n    patch: String,\n}\n\n#[async_trait]\nimpl Tool for SedTool {"));
+        assert!(final_text.contains("pub struct HelperTool;"));
+        assert!(final_text.contains("#[derive(Deserialize)]\nstruct HelperInput {\n    value: String,\n}\n\n#[async_trait]\nimpl Tool for LegacyTool {"));
         assert_eq!(
             second_payload["new_version"],
             json!(compute_version(final_text.as_bytes()))
@@ -2928,11 +1423,11 @@ impl Tool for SedTool {\n\
     async fn mismatch_reports_context_for_newline_boundary_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let initial = "\
-fn create_sed_staging_dir() -> std::result::Result<(), String> {\n\
+fn create_helper_dir() -> std::result::Result<(), String> {\n\
     Ok(())\n\
 }\n\
 \n\
-fn sed_command() {}\n";
+fn helper_command() {}\n";
         write_text(&tmp, "sample.txt", initial);
         let ctx = test_ctx(tmp.path());
 
@@ -2956,58 +1451,37 @@ fn sed_command() {}\n";
         assert_eq!(payload["actual_text"], json!("\n"));
         let message = payload["message"].as_str().unwrap();
         assert!(message.contains("Nearby context:"));
-        assert!(message.contains("fn sed_command() {}"));
+        assert!(message.contains("fn helper_command() {}"));
         assert_eq!(read_text(&tmp, "sample.txt"), initial);
     }
 
     #[tokio::test]
-    async fn sed_successful_edit() {
-        if !ensure_sed_runtime() {
-            return;
-        }
-
+    async fn revert_restores_previous_xwrite_revision() {
         let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
         let ctx = test_ctx(tmp.path());
+        let writer = XWriteTool;
 
-        let result = run_sed_request(&ctx, "sample.txt", "s/world/there/\n", false, false).await;
+        let first = writer
+            .execute(
+                json!({
+                    "file_path": "sample.txt",
+                    "content": "hello world\n",
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!first.is_error, "{}", first.content);
 
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
-        assert!(result.content.contains("Applied sed script"));
-    }
-
-    #[tokio::test]
-    async fn sed_blocks_file_access_commands() {
-        if !ensure_sed_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_sed_request(&ctx, "sample.txt", "1r /etc/passwd\n", false, false).await;
-
-        assert!(result.is_error);
-        assert!(result
-            .content
-            .contains("e/r/w commands disabled in sandbox mode"));
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
-    }
-
-    #[tokio::test]
-    async fn sed_revert_compatibility() {
-        if !ensure_sed_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_sed_request(&ctx, "sample.txt", "s/world/there/\n", false, false).await;
-        assert!(!result.is_error, "{}", result.content);
+        let second = writer
+            .execute(
+                json!({
+                    "file_path": "sample.txt",
+                    "content": "hello there\n",
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!second.is_error, "{}", second.content);
         assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
 
         let revert_tool = RevertTool;
@@ -3020,82 +1494,41 @@ fn sed_command() {}\n";
     }
 
     #[tokio::test]
-    async fn sed_large_script_transparently_uses_staged_file() {
-        if !ensure_sed_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-        let filler = "#".repeat(1100);
-        let script = format!("s/world/there/\n#{}\n", filler);
-
-        let result = run_sed_request(&ctx, "sample.txt", &script, false, false).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
-    }
-
-    #[tokio::test]
-    async fn patch_applies_standard_git_diff_and_prints_complete_patch() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-hello world\n+hello there\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello there\n");
-        assert!(result.content.contains("Applied patch to: sample.txt"));
-        assert!(result.content.contains("Complete patch applied:"));
-        assert!(result.content.contains(patch));
-    }
-
-    #[tokio::test]
-    async fn patch_creates_new_file_and_revert_removes_it() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
+    async fn revert_restores_previous_xedit_revision() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/nested/new.txt b/nested/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/nested/new.txt\n@@ -0,0 +1 @@\n+hello there\n";
+        let writer = XWriteTool;
+        let editor = XEditTool;
 
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_text(&tmp, "nested/new.txt"), "hello there\n");
-
-        let revert_tool = RevertTool;
-        let revert = revert_tool
-            .execute(json!({ "file_path": "nested/new.txt" }), &ctx)
+        let write = writer
+            .execute(
+                json!({
+                    "file_path": "sample.txt",
+                    "content": "alpha\nbeta\n",
+                }),
+                &ctx,
+            )
             .await;
+        assert!(!write.is_error, "{}", write.content);
 
-        assert!(!revert.is_error, "{}", revert.content);
-        assert!(!tmp.path().join("nested/new.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn patch_deletes_file_and_revert_restores_it() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/sample.txt b/sample.txt\ndeleted file mode 100644\n--- a/sample.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello world\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert!(!tmp.path().join("sample.txt").exists());
+        let path = tmp.path().join("sample.txt");
+        let head = try_get_head(&ctx.session_id, &path).unwrap();
+        let edit = editor
+            .execute(
+                json!({
+                    "file_path": "sample.txt",
+                    "base_version": head.current_version,
+                    "operations": [{
+                        "op": "replace_line",
+                        "tag": head.file.content[1].tag,
+                        "new_text": "BETA",
+                    }],
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!edit.is_error, "{}", edit.content);
+        assert_eq!(read_text(&tmp, "sample.txt"), "alpha\nBETA\n");
 
         let revert_tool = RevertTool;
         let revert = revert_tool
@@ -3103,203 +1536,24 @@ fn sed_command() {}\n";
             .await;
 
         assert!(!revert.is_error, "{}", revert.content);
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+        assert_eq!(read_text(&tmp, "sample.txt"), "alpha\nbeta\n");
     }
 
     #[tokio::test]
-    async fn patch_rejects_invalid_syntax_with_explanatory_error() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
+    async fn revert_rejects_untracked_non_xstorage_files() {
         let tmp = tempfile::tempdir().unwrap();
         write_text(&tmp, "sample.txt", "hello world\n");
         let ctx = test_ctx(tmp.path());
-        let result = run_patch_request(&ctx, "diff --git a/sample.txt\n@@ -1 +1 @@\n").await;
 
-        assert!(result.is_error);
-        assert!(result.content.contains("Malformed diff --git header"));
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
-    }
+        let revert_tool = RevertTool;
+        let revert = revert_tool
+            .execute(json!({ "file_path": "sample.txt" }), &ctx)
+            .await;
 
-    #[tokio::test]
-    async fn patch_rejects_paths_outside_workspace() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/../../etc/passwd b/../../etc/passwd\n--- a/../../etc/passwd\n+++ b/../../etc/passwd\n@@ -1 +1 @@\n-root\n+user\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(result.is_error);
-        assert!(result.content.contains("attempts path traversal"));
-        assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
-    }
-
-    #[tokio::test]
-    async fn patch_rejects_reported_example1_with_hunk_count_diagnostic() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(
-            &tmp,
-            "chatbot_frontend/test-setup.ts",
-            frontend_test_setup_fixture(),
-        );
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/chatbot_frontend/test-setup.ts b/chatbot_frontend/test-setup.ts\n--- a/chatbot_frontend/test-setup.ts\n+++ b/chatbot_frontend/test-setup.ts\n@@ -28,8 +28,10 @@ Object.defineProperty(window, 'SVGElement', {\n   value: window.HTMLElement,\n })\n \n Object.defineProperty(globalThis, 'SVGElement', {\n   writable: true,\n   value: window.HTMLElement,\n })\n+\n+window.SVGElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n+window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(result.is_error);
-        assert!(result.content.contains("Malformed unified diff hunk"));
-        assert!(result.content.contains(
-            "header expects 8 old line(s) and 10 new line(s), but the body contains 7 old line(s) and 10 new line(s)"
-        ));
-        assert_eq!(
-            read_text(&tmp, "chatbot_frontend/test-setup.ts"),
-            frontend_test_setup_fixture()
-        );
-    }
-
-    #[tokio::test]
-    async fn patch_rejects_reported_example2_instead_of_silently_truncating_it() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(
-            &tmp,
-            "chatbot_frontend/test-setup.ts",
-            frontend_test_setup_fixture(),
-        );
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/chatbot_frontend/test-setup.ts b/chatbot_frontend/test-setup.ts\n--- a/chatbot_frontend/test-setup.ts\n+++ b/chatbot_frontend/test-setup.ts\n@@ -31,4 +31,11 @@\n Object.defineProperty(window, 'SVGElement', {\n   writable: true,\n   value: window.HTMLElement,\n })\n+\n+Object.defineProperty(globalThis, 'SVGElement', {\n+  writable: true,\n+  value: window.HTMLElement,\n+})\n+\n+window.SVGElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n+window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(result.is_error);
-        assert!(result.content.contains("Malformed unified diff hunk"));
-        assert!(result.content.contains(
-            "header expects 4 old line(s) and 11 new line(s), but the body contains 4 old line(s) and 12 new line(s)"
-        ));
-        assert_eq!(
-            read_text(&tmp, "chatbot_frontend/test-setup.ts"),
-            frontend_test_setup_fixture()
-        );
-    }
-
-    #[tokio::test]
-    async fn patch_applies_corrected_version_of_reported_example2() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(
-            &tmp,
-            "chatbot_frontend/test-setup.ts",
-            frontend_test_setup_fixture(),
-        );
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/chatbot_frontend/test-setup.ts b/chatbot_frontend/test-setup.ts\n--- a/chatbot_frontend/test-setup.ts\n+++ b/chatbot_frontend/test-setup.ts\n@@ -31,4 +31,12 @@\n Object.defineProperty(window, 'SVGElement', {\n   writable: true,\n   value: window.HTMLElement,\n })\n+\n+Object.defineProperty(globalThis, 'SVGElement', {\n+  writable: true,\n+  value: window.HTMLElement,\n+})\n+\n+window.SVGElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n+window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert!(read_text(&tmp, "chatbot_frontend/test-setup.ts").contains(
-            "window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n"
-        ));
-    }
-
-    #[tokio::test]
-    async fn patch_reports_when_patch_cannot_apply() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "hello world\n");
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-goodbye world\n+hello there\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(result.is_error);
-        assert!(result.content.contains("Patch could not be applied"));
-        assert!(result
+        assert!(revert.is_error);
+        assert!(revert
             .content
-            .contains("Target file 'sample.txt' differs from hunk #1"));
-        assert!(result.content.contains("Current file context:"));
-        assert!(result.content.contains("Patch was:"));
+            .contains("File is not loaded in XFileStorage"));
         assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
-    }
-
-    #[tokio::test]
-    async fn patch_includes_current_file_context_for_hunk_mismatches() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "alpha\nbeta\ngamma\n");
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1,3 +1,3 @@\n alpha\n-delta\n+beta patched\n gamma\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(result.is_error);
-        assert!(result
-            .content
-            .contains("Expected old-side line 2 to be \"delta\", found \"beta\"."));
-        assert!(result.content.contains("   1 | alpha"));
-        assert!(result.content.contains("   2 | beta"));
-        assert!(result.content.contains("   3 | gamma"));
-        assert_eq!(read_text(&tmp, "sample.txt"), "alpha\nbeta\ngamma\n");
-    }
-
-    #[tokio::test]
-    async fn patch_edits_created_test_file_in_multiple_hunks() {
-        if !ensure_patch_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_text(&tmp, "sample.txt", "alpha\nbeta\ngamma\n");
-        let ctx = test_ctx(tmp.path());
-        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1,3 +1,4 @@\n alpha\n-beta\n+beta patched\n gamma\n+delta\n";
-
-        let result = run_patch_request(&ctx, patch).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(
-            read_text(&tmp, "sample.txt"),
-            "alpha\nbeta patched\ngamma\ndelta\n"
-        );
-        assert!(result.content.contains("Applied patch to: sample.txt"));
-        assert!(result.content.contains(patch));
-    }
-
-    #[tokio::test]
-    async fn sed_supports_null_data() {
-        if !ensure_sed_runtime() {
-            return;
-        }
-
-        let tmp = tempfile::tempdir().unwrap();
-        write_bytes_fixture(&tmp, "sample.txt", b"alpha\0beta\0");
-        let ctx = test_ctx(tmp.path());
-
-        let result = run_sed_request(&ctx, "sample.txt", "s/beta/gamma/\n", false, true).await;
-
-        assert!(!result.is_error, "{}", result.content);
-        assert_eq!(read_bytes_fixture(&tmp, "sample.txt"), b"alpha\0gamma\0");
     }
 }
