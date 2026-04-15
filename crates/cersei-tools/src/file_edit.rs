@@ -1,8 +1,9 @@
 //! Exact-position and GNU sed-backed file editing with one-step session-local revert.
 
 use super::*;
-use crate::file_history::{FileHistory, unified_diff};
+use crate::file_history::{unified_diff, FileHistory};
 use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;
 use std::io::Write;
@@ -23,6 +24,10 @@ static GNU_SED_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(pr
 static PATCH_BINARY: Lazy<std::result::Result<PathBuf, String>> = Lazy::new(probe_patch);
 static FIREJAIL_BINARY: Lazy<Option<PathBuf>> = Lazy::new(probe_firejail);
 static FIREJAIL_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+static UNIFIED_HUNK_HEADER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@(?: ?.*)?$")
+        .expect("valid unified hunk header regex")
+});
 
 const INLINE_SED_SCRIPT_MAX_BYTES: usize = 1024;
 const SED_STAGING_ROOT: &str = "/tmp";
@@ -560,6 +565,8 @@ async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result
         return Err(explain_patch_failure(
             "Patch could not be applied",
             patch_text,
+            &parsed,
+            staging_dir.path(),
             &dry_run,
         ));
     }
@@ -569,6 +576,8 @@ async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result
         return Err(explain_patch_failure(
             "Patch failed while being applied after passing dry-run",
             patch_text,
+            &parsed,
+            staging_dir.path(),
             &apply,
         ));
     }
@@ -638,14 +647,19 @@ async fn apply_patch(ctx: &ToolContext, patch_text: &str) -> std::result::Result
 }
 
 fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, String> {
+    let lines: Vec<&str> = patch_text.lines().collect();
     let mut git_old: Option<String> = None;
     let mut git_new: Option<String> = None;
     let mut old_header: Option<String> = None;
     let mut saw_file_header = false;
     let mut saw_hunk = false;
     let mut targets = Vec::new();
+    let mut files = Vec::new();
+    let mut current_file_idx: Option<usize> = None;
+    let mut line_idx = 0;
 
-    for line in patch_text.lines() {
+    while line_idx < lines.len() {
+        let line = lines[line_idx];
         if let Some(rest) = line.strip_prefix("diff --git ") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() < 2 {
@@ -654,11 +668,14 @@ fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, St
             git_old = Some(parts[0].to_string());
             git_new = Some(parts[1].to_string());
             saw_file_header = true;
+            current_file_idx = None;
+            line_idx += 1;
             continue;
         }
         if let Some(path) = line.strip_prefix("--- ") {
             old_header = Some(extract_patch_path(path));
             saw_file_header = true;
+            line_idx += 1;
             continue;
         }
         if let Some(path) = line.strip_prefix("+++ ") {
@@ -674,16 +691,48 @@ fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, St
                 .iter()
                 .any(|t: &PatchTarget| t.workspace_rel == workspace_rel)
             {
-                targets.push(PatchTarget { workspace_rel });
+                targets.push(PatchTarget {
+                    workspace_rel: workspace_rel.clone(),
+                });
             }
+            current_file_idx = Some(
+                files
+                    .iter()
+                    .position(|file: &PatchFile| file.workspace_rel == workspace_rel)
+                    .unwrap_or_else(|| {
+                        files.push(PatchFile {
+                            workspace_rel: workspace_rel.clone(),
+                            hunks: Vec::new(),
+                        });
+                        files.len() - 1
+                    }),
+            );
             git_old = None;
             git_new = None;
             old_header = None;
+            line_idx += 1;
             continue;
         }
-        if line.starts_with("@@ ") || line.starts_with("***************") {
+        if line.starts_with("@@ ") {
             saw_hunk = true;
+            let file_idx = current_file_idx.ok_or_else(|| {
+                format!(
+                    "Unified diff hunk at line {} appears before any file headers.",
+                    line_idx + 1
+                )
+            })?;
+            let (hunk, next_line_idx) =
+                parse_unified_hunk(&lines, line_idx, &files[file_idx].workspace_rel)?;
+            files[file_idx].hunks.push(hunk);
+            line_idx = next_line_idx;
+            continue;
         }
+        if line.starts_with("***************") {
+            saw_hunk = true;
+            line_idx += 1;
+            continue;
+        }
+        line_idx += 1;
     }
 
     if !saw_file_header {
@@ -699,7 +748,271 @@ fn parse_patch_manifest(patch_text: &str) -> std::result::Result<ParsedPatch, St
         );
     }
 
-    Ok(ParsedPatch { targets })
+    Ok(ParsedPatch { targets, files })
+}
+
+fn parse_unified_hunk(
+    lines: &[&str],
+    header_idx: usize,
+    workspace_rel: &str,
+) -> std::result::Result<(UnifiedHunk, usize), String> {
+    let header_line = lines[header_idx];
+    let captures = UNIFIED_HUNK_HEADER_RE
+        .captures(header_line)
+        .ok_or_else(|| {
+            format!(
+                "Malformed unified diff hunk header for '{}' at line {}: {}",
+                workspace_rel,
+                header_idx + 1,
+                header_line
+            )
+        })?;
+
+    let old_start =
+        parse_hunk_header_number(&captures, "old_start", workspace_rel, header_idx + 1)?;
+    let old_count = parse_hunk_header_number_with_default(
+        &captures,
+        "old_count",
+        1,
+        workspace_rel,
+        header_idx + 1,
+    )?;
+    let _new_start =
+        parse_hunk_header_number(&captures, "new_start", workspace_rel, header_idx + 1)?;
+    let new_count = parse_hunk_header_number_with_default(
+        &captures,
+        "new_count",
+        1,
+        workspace_rel,
+        header_idx + 1,
+    )?;
+
+    if old_count == 0 && new_count == 0 {
+        return Ok((
+            UnifiedHunk {
+                old_start,
+                old_lines: Vec::new(),
+            },
+            header_idx + 1,
+        ));
+    }
+
+    let mut old_seen = 0usize;
+    let mut new_seen = 0usize;
+    let mut old_lines = Vec::new();
+    let mut cursor = header_idx + 1;
+
+    while cursor < lines.len() {
+        let line = lines[cursor];
+        if line == "\\ No newline at end of file" {
+            cursor += 1;
+            continue;
+        }
+        if is_patch_section_boundary(line) {
+            break;
+        }
+
+        let mut chars = line.chars();
+        let prefix = chars.next().ok_or_else(|| {
+            format!(
+                "Malformed unified diff hunk for '{}' at line {}: empty hunk line.",
+                workspace_rel,
+                cursor + 1
+            )
+        })?;
+        let content = chars.as_str();
+        match prefix {
+            ' ' => {
+                old_seen += 1;
+                new_seen += 1;
+                old_lines.push(content.to_string());
+            }
+            '-' => {
+                old_seen += 1;
+                old_lines.push(content.to_string());
+            }
+            '+' => {
+                new_seen += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "Malformed unified diff hunk for '{}' at line {}: each hunk line must start with ' ', '+', '-', or '\\\\ No newline at end of file'.",
+                    workspace_rel,
+                    cursor + 1
+                ));
+            }
+        }
+
+        if old_seen > old_count || new_seen > new_count {
+            return Err(format_hunk_count_mismatch(
+                workspace_rel,
+                header_idx + 1,
+                old_count,
+                new_count,
+                old_seen,
+                new_seen,
+            ));
+        }
+
+        cursor += 1;
+        if old_seen == old_count && new_seen == new_count {
+            while cursor < lines.len() && lines[cursor] == "\\ No newline at end of file" {
+                cursor += 1;
+            }
+            if cursor < lines.len() && !is_patch_section_boundary(lines[cursor]) {
+                let (extra_old, extra_new) =
+                    count_additional_hunk_lines(lines, cursor, workspace_rel)?;
+                return Err(format_hunk_count_mismatch(
+                    workspace_rel,
+                    header_idx + 1,
+                    old_count,
+                    new_count,
+                    old_seen + extra_old,
+                    new_seen + extra_new,
+                ));
+            }
+            return Ok((
+                UnifiedHunk {
+                    old_start,
+                    old_lines,
+                },
+                cursor,
+            ));
+        }
+    }
+
+    Err(format_hunk_count_mismatch(
+        workspace_rel,
+        header_idx + 1,
+        old_count,
+        new_count,
+        old_seen,
+        new_seen,
+    ))
+}
+
+fn parse_hunk_header_number(
+    captures: &regex::Captures<'_>,
+    name: &str,
+    workspace_rel: &str,
+    header_line_number: usize,
+) -> std::result::Result<usize, String> {
+    let value = captures
+        .name(name)
+        .ok_or_else(|| {
+            format!(
+                "Malformed unified diff hunk for '{}' at line {}: missing {} in hunk header.",
+                workspace_rel, header_line_number, name
+            )
+        })?
+        .as_str();
+    value.parse::<usize>().map_err(|err| {
+        format!(
+            "Malformed unified diff hunk for '{}' at line {}: invalid {} value '{}': {}",
+            workspace_rel, header_line_number, name, value, err
+        )
+    })
+}
+
+fn parse_hunk_header_number_with_default(
+    captures: &regex::Captures<'_>,
+    name: &str,
+    default: usize,
+    workspace_rel: &str,
+    header_line_number: usize,
+) -> std::result::Result<usize, String> {
+    match captures.name(name) {
+        Some(value) => value.as_str().parse::<usize>().map_err(|err| {
+            format!(
+                "Malformed unified diff hunk for '{}' at line {}: invalid {} value '{}': {}",
+                workspace_rel,
+                header_line_number,
+                name,
+                value.as_str(),
+                err
+            )
+        }),
+        None => Ok(default),
+    }
+}
+
+fn format_hunk_count_mismatch(
+    workspace_rel: &str,
+    header_line_number: usize,
+    expected_old: usize,
+    expected_new: usize,
+    actual_old: usize,
+    actual_new: usize,
+) -> String {
+    format!(
+        "Malformed unified diff hunk for '{}' at line {}: header expects {} old line(s) and {} new line(s), but the body contains {} old line(s) and {} new line(s).",
+        workspace_rel,
+        header_line_number,
+        expected_old,
+        expected_new,
+        actual_old,
+        actual_new
+    )
+}
+
+fn count_additional_hunk_lines(
+    lines: &[&str],
+    start_idx: usize,
+    workspace_rel: &str,
+) -> std::result::Result<(usize, usize), String> {
+    let mut extra_old = 0usize;
+    let mut extra_new = 0usize;
+    let mut cursor = start_idx;
+
+    while cursor < lines.len() {
+        let line = lines[cursor];
+        if line == "\\ No newline at end of file" {
+            cursor += 1;
+            continue;
+        }
+        if is_patch_section_boundary(line) {
+            break;
+        }
+
+        let mut chars = line.chars();
+        let prefix = chars.next().ok_or_else(|| {
+            format!(
+                "Malformed unified diff hunk for '{}' at line {}: empty hunk line.",
+                workspace_rel,
+                cursor + 1
+            )
+        })?;
+        match prefix {
+            ' ' => {
+                extra_old += 1;
+                extra_new += 1;
+            }
+            '-' => {
+                extra_old += 1;
+            }
+            '+' => {
+                extra_new += 1;
+            }
+            _ => {
+                return Err(format!(
+                    "Malformed unified diff hunk for '{}' at line {}: each hunk line must start with ' ', '+', '-', or '\\\\ No newline at end of file'.",
+                    workspace_rel,
+                    cursor + 1
+                ));
+            }
+        }
+        cursor += 1;
+    }
+
+    Ok((extra_old, extra_new))
+}
+
+fn is_patch_section_boundary(line: &str) -> bool {
+    line.starts_with("diff --git ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+        || line.starts_with("@@ ")
+        || line.starts_with("***************")
 }
 
 fn extract_patch_path(header_value: &str) -> String {
@@ -873,7 +1186,13 @@ fn probe_patch() -> std::result::Result<PathBuf, String> {
     Ok(patch)
 }
 
-fn explain_patch_failure(prefix: &str, patch_text: &str, output: &std::process::Output) -> String {
+fn explain_patch_failure(
+    prefix: &str,
+    patch_text: &str,
+    parsed: &ParsedPatch,
+    staging_root: &Path,
+    output: &std::process::Output,
+) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let detail = if !stderr.is_empty() {
@@ -883,17 +1202,187 @@ fn explain_patch_failure(prefix: &str, patch_text: &str, output: &std::process::
     } else {
         process_failure_detail(&output.status, &output.stderr)
     };
-    format!("{}: {}\n\nPatch was:\n{}", prefix, detail, patch_text)
+    let mut message = format!("{}: {}", prefix, detail);
+    if let Some(diagnostics) = build_patch_failure_diagnostics(parsed, staging_root) {
+        message.push_str("\n\n");
+        message.push_str(&diagnostics);
+    }
+    message.push_str("\n\nPatch was:\n");
+    message.push_str(patch_text);
+    message
+}
+
+fn build_patch_failure_diagnostics(parsed: &ParsedPatch, staging_root: &Path) -> Option<String> {
+    let mut diagnostics = Vec::new();
+
+    for file in &parsed.files {
+        if diagnostics.len() >= 3 {
+            break;
+        }
+        if file.hunks.is_empty() {
+            continue;
+        }
+
+        let staged_path = staging_root.join(&file.workspace_rel);
+        let bytes = match std::fs::read(&staged_path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                diagnostics.push(format!(
+                    "Target file '{}' is missing in the staged workspace, so patch context could not be matched.",
+                    file.workspace_rel
+                ));
+                continue;
+            }
+            Err(err) => {
+                diagnostics.push(format!(
+                    "Failed to inspect staged file '{}': {}",
+                    file.workspace_rel, err
+                ));
+                continue;
+            }
+        };
+
+        let text = String::from_utf8_lossy(&bytes);
+        let file_lines: Vec<&str> = text.lines().collect();
+        for (hunk_idx, hunk) in file.hunks.iter().enumerate() {
+            if diagnostics.len() >= 3 {
+                break;
+            }
+            if hunk.old_lines.is_empty()
+                || hunk_old_lines_match(
+                    &file_lines,
+                    hunk.old_start.saturating_sub(1),
+                    &hunk.old_lines,
+                )
+            {
+                continue;
+            }
+
+            let mismatch = first_hunk_mismatch(
+                &file_lines,
+                hunk.old_start.saturating_sub(1),
+                &hunk.old_lines,
+            );
+            let mismatch_line = mismatch
+                .as_ref()
+                .map(|(line_number, _, _)| *line_number)
+                .unwrap_or(hunk.old_start);
+            let expected_line = mismatch
+                .as_ref()
+                .map(|(_, expected, _)| expected.as_str())
+                .unwrap_or("<unknown>");
+            let actual_line = mismatch
+                .as_ref()
+                .map(|(_, _, actual)| actual.as_deref().unwrap_or("<EOF>"))
+                .unwrap_or("<unknown>");
+            let nearby_match = find_exact_hunk_match(&file_lines, &hunk.old_lines)
+                .filter(|line_number| *line_number != hunk.old_start)
+                .map(|line_number| {
+                    format!(
+                        " The hunk's old-side text matches starting at line {} instead.",
+                        line_number
+                    )
+                })
+                .unwrap_or_default();
+
+            diagnostics.push(format!(
+                "Target file '{}' differs from hunk #{} near line {}. Expected old-side line {} to be {:?}, found {:?}.{}\nCurrent file context:\n{}",
+                file.workspace_rel,
+                hunk_idx + 1,
+                hunk.old_start,
+                mismatch_line,
+                expected_line,
+                actual_line,
+                nearby_match,
+                render_file_context(&file_lines, mismatch_line, 2),
+            ));
+        }
+    }
+
+    if diagnostics.is_empty() {
+        None
+    } else {
+        Some(diagnostics.join("\n\n"))
+    }
+}
+
+fn hunk_old_lines_match(file_lines: &[&str], start_idx: usize, old_lines: &[String]) -> bool {
+    old_lines.iter().enumerate().all(|(offset, expected)| {
+        file_lines
+            .get(start_idx + offset)
+            .copied()
+            .map(|actual| actual == expected)
+            .unwrap_or(false)
+    })
+}
+
+fn first_hunk_mismatch(
+    file_lines: &[&str],
+    start_idx: usize,
+    old_lines: &[String],
+) -> Option<(usize, String, Option<String>)> {
+    old_lines.iter().enumerate().find_map(|(offset, expected)| {
+        let line_number = start_idx + offset + 1;
+        match file_lines.get(start_idx + offset).copied() {
+            Some(actual) if actual == expected => None,
+            Some(actual) => Some((line_number, expected.clone(), Some(actual.to_string()))),
+            None => Some((line_number, expected.clone(), None)),
+        }
+    })
+}
+
+fn find_exact_hunk_match(file_lines: &[&str], old_lines: &[String]) -> Option<usize> {
+    if old_lines.is_empty() || old_lines.len() > file_lines.len() {
+        return None;
+    }
+
+    file_lines
+        .windows(old_lines.len())
+        .position(|window| {
+            window
+                .iter()
+                .zip(old_lines.iter())
+                .all(|(actual, expected)| *actual == expected)
+        })
+        .map(|idx| idx + 1)
+}
+
+fn render_file_context(file_lines: &[&str], center_line: usize, radius: usize) -> String {
+    if file_lines.is_empty() {
+        return "<file is empty>".to_string();
+    }
+
+    let start_line = center_line.saturating_sub(radius).max(1);
+    let end_line = (center_line + radius).min(file_lines.len());
+    let mut rendered = Vec::new();
+    for line_number in start_line..=end_line {
+        let text = file_lines.get(line_number - 1).copied().unwrap_or("");
+        rendered.push(format!("{:>4} | {}", line_number, text));
+    }
+    rendered.join("\n")
 }
 
 #[derive(Debug)]
 struct ParsedPatch {
     targets: Vec<PatchTarget>,
+    files: Vec<PatchFile>,
 }
 
 #[derive(Debug)]
 struct PatchTarget {
     workspace_rel: String,
+}
+
+#[derive(Debug)]
+struct PatchFile {
+    workspace_rel: String,
+    hunks: Vec<UnifiedHunk>,
+}
+
+#[derive(Debug)]
+struct UnifiedHunk {
+    old_start: usize,
+    old_lines: Vec<String>,
 }
 
 fn sed_command(
@@ -1761,7 +2250,7 @@ fn restore_previous_snapshot(
 mod tests {
     use super::*;
     use crate::permissions::AllowAll;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
     use std::sync::Arc;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -1779,10 +2268,16 @@ mod tests {
     }
 
     fn write_text(tmp: &TempDir, rel_path: &str, content: &str) {
+        if let Some(parent) = tmp.path().join(rel_path).parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(tmp.path().join(rel_path), content).unwrap();
     }
 
     fn write_bytes_fixture(tmp: &TempDir, rel_path: &str, content: &[u8]) {
+        if let Some(parent) = tmp.path().join(rel_path).parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(tmp.path().join(rel_path), content).unwrap();
     }
 
@@ -1879,6 +2374,10 @@ mod tests {
                 false
             }
         }
+    }
+
+    fn frontend_test_setup_fixture() -> &'static str {
+        "Object.defineProperty(window, 'matchMedia', {\n  writable: true,\n  value: (query: any) => ({\nmatches: false,\nmedia: query,\nonchange: null,\naddListener: () => {}, // Deprecated\nremoveListener: () => {}, // Deprecated\naddEventListener: () => {},\nremoveEventListener: () => {},\ndispatchEvent: () => false,\n  }),\n})\n\nclass ResizeObserverMock {\n  observe() {}\n  unobserve() {}\n  disconnect() {}\n}\n\nObject.defineProperty(globalThis, 'ResizeObserver', {\n  writable: true,\n  value: ResizeObserverMock,\n})\n\nObject.defineProperty(window, 'ResizeObserver', {\n  writable: true,\n  value: ResizeObserverMock,\n})\n\nObject.defineProperty(window, 'SVGElement', {\n  writable: true,\n  value: window.HTMLElement,\n})\n"
     }
 
     #[tokio::test]
@@ -2491,11 +2990,9 @@ fn sed_command() {}\n";
         let result = run_sed_request(&ctx, "sample.txt", "1r /etc/passwd\n", false, false).await;
 
         assert!(result.is_error);
-        assert!(
-            result
-                .content
-                .contains("e/r/w commands disabled in sandbox mode")
-        );
+        assert!(result
+            .content
+            .contains("e/r/w commands disabled in sandbox mode"));
         assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
     }
 
@@ -2644,6 +3141,85 @@ fn sed_command() {}\n";
     }
 
     #[tokio::test]
+    async fn patch_rejects_reported_example1_with_hunk_count_diagnostic() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(
+            &tmp,
+            "chatbot_frontend/test-setup.ts",
+            frontend_test_setup_fixture(),
+        );
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/chatbot_frontend/test-setup.ts b/chatbot_frontend/test-setup.ts\n--- a/chatbot_frontend/test-setup.ts\n+++ b/chatbot_frontend/test-setup.ts\n@@ -28,8 +28,10 @@ Object.defineProperty(window, 'SVGElement', {\n   value: window.HTMLElement,\n })\n \n Object.defineProperty(globalThis, 'SVGElement', {\n   writable: true,\n   value: window.HTMLElement,\n })\n+\n+window.SVGElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n+window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Malformed unified diff hunk"));
+        assert!(result.content.contains(
+            "header expects 8 old line(s) and 10 new line(s), but the body contains 7 old line(s) and 10 new line(s)"
+        ));
+        assert_eq!(
+            read_text(&tmp, "chatbot_frontend/test-setup.ts"),
+            frontend_test_setup_fixture()
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_rejects_reported_example2_instead_of_silently_truncating_it() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(
+            &tmp,
+            "chatbot_frontend/test-setup.ts",
+            frontend_test_setup_fixture(),
+        );
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/chatbot_frontend/test-setup.ts b/chatbot_frontend/test-setup.ts\n--- a/chatbot_frontend/test-setup.ts\n+++ b/chatbot_frontend/test-setup.ts\n@@ -31,4 +31,11 @@\n Object.defineProperty(window, 'SVGElement', {\n   writable: true,\n   value: window.HTMLElement,\n })\n+\n+Object.defineProperty(globalThis, 'SVGElement', {\n+  writable: true,\n+  value: window.HTMLElement,\n+})\n+\n+window.SVGElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n+window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Malformed unified diff hunk"));
+        assert!(result.content.contains(
+            "header expects 4 old line(s) and 11 new line(s), but the body contains 4 old line(s) and 12 new line(s)"
+        ));
+        assert_eq!(
+            read_text(&tmp, "chatbot_frontend/test-setup.ts"),
+            frontend_test_setup_fixture()
+        );
+    }
+
+    #[tokio::test]
+    async fn patch_applies_corrected_version_of_reported_example2() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(
+            &tmp,
+            "chatbot_frontend/test-setup.ts",
+            frontend_test_setup_fixture(),
+        );
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/chatbot_frontend/test-setup.ts b/chatbot_frontend/test-setup.ts\n--- a/chatbot_frontend/test-setup.ts\n+++ b/chatbot_frontend/test-setup.ts\n@@ -31,4 +31,12 @@\n Object.defineProperty(window, 'SVGElement', {\n   writable: true,\n   value: window.HTMLElement,\n })\n+\n+Object.defineProperty(globalThis, 'SVGElement', {\n+  writable: true,\n+  value: window.HTMLElement,\n+})\n+\n+window.SVGElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n+window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(read_text(&tmp, "chatbot_frontend/test-setup.ts").contains(
+            "window.HTMLElement.prototype.getBBox = () => ({ x: 0, y: 0, width: 120, height: 80 })\n"
+        ));
+    }
+
+    #[tokio::test]
     async fn patch_reports_when_patch_cannot_apply() {
         if !ensure_patch_runtime() {
             return;
@@ -2658,8 +3234,35 @@ fn sed_command() {}\n";
 
         assert!(result.is_error);
         assert!(result.content.contains("Patch could not be applied"));
+        assert!(result
+            .content
+            .contains("Target file 'sample.txt' differs from hunk #1"));
+        assert!(result.content.contains("Current file context:"));
         assert!(result.content.contains("Patch was:"));
         assert_eq!(read_text(&tmp, "sample.txt"), "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn patch_includes_current_file_context_for_hunk_mismatches() {
+        if !ensure_patch_runtime() {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        write_text(&tmp, "sample.txt", "alpha\nbeta\ngamma\n");
+        let ctx = test_ctx(tmp.path());
+        let patch = "diff --git a/sample.txt b/sample.txt\n--- a/sample.txt\n+++ b/sample.txt\n@@ -1,3 +1,3 @@\n alpha\n-delta\n+beta patched\n gamma\n";
+
+        let result = run_patch_request(&ctx, patch).await;
+
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .contains("Expected old-side line 2 to be \"delta\", found \"beta\"."));
+        assert!(result.content.contains("   1 | alpha"));
+        assert!(result.content.contains("   2 | beta"));
+        assert!(result.content.contains("   3 | gamma"));
+        assert_eq!(read_text(&tmp, "sample.txt"), "alpha\nbeta\ngamma\n");
     }
 
     #[tokio::test]

@@ -142,7 +142,6 @@ pub async fn run_repl(
     let mut current_model = repl_config.model.clone();
     let mut exit_session_name: Option<String> = None;
 
-
     loop {
         // Prefer API-reported input tokens (exact); fall back to rough estimate before first turn
         let usage = agent.usage();
@@ -295,11 +294,12 @@ pub async fn run_repl(
                         ) {
                             Ok((new_agent, resolved)) => {
                                 agent = new_agent;
-                                current_model = if let Some((provider, _)) = current_model.split_once('/') {
-                                    format!("{provider}/{resolved}")
-                                } else {
-                                    resolved.clone()
-                                };
+                                current_model =
+                                    if let Some((provider, _)) = current_model.split_once('/') {
+                                        format!("{provider}/{resolved}")
+                                    } else {
+                                        resolved.clone()
+                                    };
                                 repl_config.model = current_model.clone();
                                 status.set_model(&current_model);
                             }

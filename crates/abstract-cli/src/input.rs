@@ -98,18 +98,14 @@ impl Helper for AbstractHelper {}
 struct ShiftEnterHandler;
 
 impl ConditionalEventHandler for ShiftEnterHandler {
-    fn handle(
-        &self,
-        evt: &Event,
-        _: RepeatCount,
-        _: bool,
-        ctx: &EventContext<'_>,
-    ) -> Option<Cmd> {
-        if matches!(evt, Event::KeySeq(seq) if seq.len() == 1 && seq[0] == KeyEvent(KeyCode::Enter, Modifiers::SHIFT)) {
+    fn handle(&self, evt: &Event, _: RepeatCount, _: bool, ctx: &EventContext<'_>) -> Option<Cmd> {
+        if matches!(evt, Event::KeySeq(seq) if seq.len() == 1 && seq[0] == KeyEvent(KeyCode::Enter, Modifiers::SHIFT))
+        {
             return Some(Cmd::Insert(1, "\n".to_string()));
         }
 
-        if matches!(evt, Event::KeySeq(seq) if seq.len() == 1 && seq[0] == KeyEvent(KeyCode::Enter, Modifiers::NONE)) {
+        if matches!(evt, Event::KeySeq(seq) if seq.len() == 1 && seq[0] == KeyEvent(KeyCode::Enter, Modifiers::NONE))
+        {
             let input = ctx.line();
             if !input.is_empty() && input.ends_with('\n') {
                 return Some(Cmd::AcceptLine);
