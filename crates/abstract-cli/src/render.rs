@@ -13,6 +13,18 @@ pub struct StreamRenderer {
     json_mode: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolConsoleBody {
+    text: String,
+    kind: ToolConsoleBodyKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolConsoleBodyKind {
+    Content,
+    Diff,
+}
+
 impl StreamRenderer {
     pub fn new(theme: &Theme, json_mode: bool) -> Self {
         Self {
@@ -82,6 +94,10 @@ impl StreamRenderer {
             ResetColor,
             Print("\n"),
         );
+
+        if let Some(body) = tool_input_console_body(name, input) {
+            self.print_tool_body(&body);
+        }
     }
 
     /// Show a tool completion.
@@ -120,8 +136,8 @@ impl StreamRenderer {
             );
         }
 
-        if name.eq_ignore_ascii_case("patch") {
-            self.print_patch_result(result);
+        if let Some(body) = tool_result_console_body(name, result) {
+            self.print_tool_body(&body);
         }
 
         let _ = execute!(io::stderr(), Print("\n"));
@@ -224,26 +240,36 @@ impl StreamRenderer {
         print!("{rendered}");
         let _ = io::stdout().flush();
     }
-    fn print_patch_result(&self, result: &str) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(result) {
-            if let Some(patch) = value.get("patch").and_then(|v| v.as_str()) {
-                let _ = execute!(io::stderr(), Print("\n"));
-                for line in patch.lines() {
-                    let color = match line.chars().next() {
-                        Some('+') => self.theme.success,
-                        Some('-') => self.theme.error,
-                        _ => self.theme.dim,
-                    };
-                    let _ = execute!(
-                        io::stderr(),
-                        SetForegroundColor(color),
-                        Print("    "),
-                        Print(line),
-                        ResetColor,
-                        Print("\n"),
-                    );
-                }
-            }
+    fn print_tool_body(&self, body: &ToolConsoleBody) {
+        let _ = execute!(io::stderr(), Print("\n"));
+
+        if body.text.is_empty() {
+            let _ = execute!(
+                io::stderr(),
+                SetForegroundColor(self.theme.dim),
+                Print("    (empty)\n"),
+                ResetColor,
+            );
+            return;
+        }
+
+        for line in body_lines(&body.text) {
+            let color = match body.kind {
+                ToolConsoleBodyKind::Content => self.theme.text,
+                ToolConsoleBodyKind::Diff => match line.chars().next() {
+                    Some('+') => self.theme.success,
+                    Some('-') => self.theme.error,
+                    _ => self.theme.dim,
+                },
+            };
+            let _ = execute!(
+                io::stderr(),
+                SetForegroundColor(color),
+                Print("    "),
+                Print(line),
+                ResetColor,
+                Print("\n"),
+            );
         }
     }
 }
@@ -467,6 +493,54 @@ fn write_tool_summary(input: &serde_json::Value) -> String {
     format!("{file_path} {char_count} chars")
 }
 
+fn tool_input_console_body(name: &str, input: &serde_json::Value) -> Option<ToolConsoleBody> {
+    if matches!(name, "Write" | "write" | "file_write") {
+        return input
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|content| ToolConsoleBody {
+                text: content.to_string(),
+                kind: ToolConsoleBodyKind::Content,
+            });
+    }
+
+    None
+}
+
+fn tool_result_console_body(name: &str, result: &str) -> Option<ToolConsoleBody> {
+    if matches!(name, "Patch" | "patch") {
+        return extract_result_string_field(result, "patch").map(|patch| ToolConsoleBody {
+            text: patch,
+            kind: ToolConsoleBodyKind::Diff,
+        });
+    }
+
+    if matches!(name, "Edit" | "edit" | "file_edit") {
+        return extract_result_string_field(result, "diff").map(|diff| ToolConsoleBody {
+            text: diff,
+            kind: ToolConsoleBodyKind::Diff,
+        });
+    }
+
+    None
+}
+
+fn extract_result_string_field(result: &str, field: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()
+        .and_then(|value| {
+            value
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+}
+
+fn body_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,5 +585,59 @@ mod tests {
             &serde_json::json!({"file_path": "src/main.rs", "content": "aé🙂"}),
         );
         assert_eq!(summary, "src/main.rs 3 chars");
+    }
+
+    #[test]
+    fn write_console_body_uses_full_content() {
+        let body = tool_input_console_body(
+            "Write",
+            &serde_json::json!({"file_path": "src/main.rs", "content": "alpha\nbeta\n"}),
+        )
+        .unwrap();
+
+        assert_eq!(
+            body,
+            ToolConsoleBody {
+                text: "alpha\nbeta\n".to_string(),
+                kind: ToolConsoleBodyKind::Content,
+            }
+        );
+    }
+
+    #[test]
+    fn edit_console_body_extracts_diff_from_result() {
+        let body = tool_result_console_body(
+            "Edit",
+            r#"{"ok":true,"diff":"--- old\n+++ new\n@@ tags @@\n-old\n+new"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            body,
+            ToolConsoleBody {
+                text: "--- old\n+++ new\n@@ tags @@\n-old\n+new".to_string(),
+                kind: ToolConsoleBodyKind::Diff,
+            }
+        );
+    }
+
+    #[test]
+    fn patch_console_body_extracts_patch_from_result() {
+        let body =
+            tool_result_console_body("Patch", r#"{"ok":true,"patch":"@@\n-old\n+new"}"#).unwrap();
+
+        assert_eq!(
+            body,
+            ToolConsoleBody {
+                text: "@@\n-old\n+new".to_string(),
+                kind: ToolConsoleBodyKind::Diff,
+            }
+        );
+    }
+
+    #[test]
+    fn body_lines_preserve_blank_lines() {
+        let lines: Vec<&str> = body_lines("alpha\n\nbeta").collect();
+        assert_eq!(lines, vec!["alpha", "", "beta"]);
     }
 }
