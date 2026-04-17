@@ -102,7 +102,7 @@ impl Tool for NpxTool {
         };
 
         let firejail_args =
-            home_entries_and_workspace_firejail_args(&workspace_root, &[".npm", ".npmrc"]);
+            home_entries_and_workspace_firejail_args(&workspace_root, &[".npm", ".npmrc", ".nvm"]);
         let mut cmd =
             firejailed_shell_command_with_extra_firejail_args(&command, access, &firejail_args);
         cmd.current_dir(&cwd)
