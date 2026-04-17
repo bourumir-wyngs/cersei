@@ -40,6 +40,7 @@ pub mod synthetic_output;
 pub mod tasks;
 pub mod todo_write;
 pub mod tool_search;
+pub mod structure_tool;
 pub mod web_fetch;
 pub mod web_search;
 pub mod worktree;
@@ -415,6 +416,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
+        Box::new(structure_tool::StructureTool),
     ]
 }
 
@@ -432,6 +434,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
+        Box::new(structure_tool::StructureTool),
     ]
 }
 

@@ -40,6 +40,12 @@ url = { workspace = true }
 chromiumoxide = { workspace = true }
 giacrs = { workspace = true, optional = true }
 gix = { workspace = true }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+tree-sitter = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+rustpython-parser = { workspace = true }
 
 [features]
 cas = ["giacrs"]
