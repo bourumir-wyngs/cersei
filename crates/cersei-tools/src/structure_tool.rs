@@ -3,9 +3,9 @@
 use super::*;
 use crate::xfile_storage::resolve_xfile_path;
 use quote::ToTokens;
+use rustpython_parser::{ast, Parse};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use rustpython_parser::{ast, Parse};
 use syn::{
     Fields, File, ImplItem, Item, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMod, ItemStatic,
     ItemStruct, ItemTrait, ItemType, ItemUse, ReturnType, Signature, TraitItem, Type, Visibility,
@@ -22,7 +22,6 @@ struct StructureRequest {
     #[serde(default)]
     lang: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize)]
 struct StructureNode {
@@ -207,13 +206,19 @@ impl Tool for StructureTool {
             }),
         };
 
-        ToolResult::success(serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string())).with_metadata(response)
+        ToolResult::success(
+            serde_json::to_string_pretty(&response).unwrap_or_else(|_| response.to_string()),
+        )
+        .with_metadata(response)
     }
 }
 
-fn extract_rust_structure(content: &str, path: &Path) -> std::result::Result<Vec<StructureNode>, String> {
-    let file: File = syn::parse_file(content)
-        .map_err(|err| format!("{}: {}", path.display(), err))?;
+fn extract_rust_structure(
+    content: &str,
+    path: &Path,
+) -> std::result::Result<Vec<StructureNode>, String> {
+    let file: File =
+        syn::parse_file(content).map_err(|err| format!("{}: {}", path.display(), err))?;
     Ok(file
         .items
         .iter()
@@ -255,7 +260,12 @@ fn extract_struct_node(item: &ItemStruct) -> StructureNode {
         kind: "struct".to_string(),
         name: item.ident.to_string(),
         visibility: non_empty(visibility_to_string(&item.vis)),
-        signature: normalize_token_string(format!("{}struct {}{}", visibility_prefix(&item.vis), item.ident, generics_suffix(&item.generics))),
+        signature: normalize_token_string(format!(
+            "{}struct {}{}",
+            visibility_prefix(&item.vis),
+            item.ident,
+            generics_suffix(&item.generics)
+        )),
         target: None,
         trait_name: None,
         detail: struct_detail(&item.fields),
@@ -268,7 +278,12 @@ fn extract_enum_node(item: &ItemEnum) -> StructureNode {
         kind: "enum".to_string(),
         name: item.ident.to_string(),
         visibility: non_empty(visibility_to_string(&item.vis)),
-        signature: normalize_token_string(format!("{}enum {}{}", visibility_prefix(&item.vis), item.ident, generics_suffix(&item.generics))),
+        signature: normalize_token_string(format!(
+            "{}enum {}{}",
+            visibility_prefix(&item.vis),
+            item.ident,
+            generics_suffix(&item.generics)
+        )),
         target: None,
         trait_name: None,
         detail: enum_detail(item),
@@ -299,7 +314,12 @@ fn extract_trait_node(item: &ItemTrait) -> StructureNode {
         kind: "trait".to_string(),
         name: item.ident.to_string(),
         visibility: non_empty(visibility_to_string(&item.vis)),
-        signature: normalize_token_string(format!("{}trait {}{}", visibility_prefix(&item.vis), item.ident, generics_suffix(&item.generics))),
+        signature: normalize_token_string(format!(
+            "{}trait {}{}",
+            visibility_prefix(&item.vis),
+            item.ident,
+            generics_suffix(&item.generics)
+        )),
         target: None,
         trait_name: None,
         detail: trait_detail(item),
@@ -363,7 +383,11 @@ fn extract_mod_node(item: &ItemMod) -> StructureNode {
         kind: "mod".to_string(),
         name: item.ident.to_string(),
         visibility: non_empty(visibility_to_string(&item.vis)),
-        signature: normalize_token_string(format!("{}mod {}", visibility_prefix(&item.vis), item.ident)),
+        signature: normalize_token_string(format!(
+            "{}mod {}",
+            visibility_prefix(&item.vis),
+            item.ident
+        )),
         target: None,
         trait_name: None,
         detail: mod_detail(item),
@@ -415,13 +439,20 @@ fn extract_static_node(item: &ItemStatic) -> StructureNode {
         signature: normalize_token_string(format!(
             "{}{}static {}: {}",
             visibility_prefix(&item.vis),
-            if matches!(item.mutability, syn::StaticMutability::Mut(_)) { "mut " } else { "" },
+            if matches!(item.mutability, syn::StaticMutability::Mut(_)) {
+                "mut "
+            } else {
+                ""
+            },
             item.ident,
             type_to_string(&item.ty)
         )),
         target: None,
         trait_name: None,
-        detail: non_empty_bool_detail("mutable", matches!(item.mutability, syn::StaticMutability::Mut(_))),
+        detail: non_empty_bool_detail(
+            "mutable",
+            matches!(item.mutability, syn::StaticMutability::Mut(_)),
+        ),
         children: Vec::new(),
     }
 }
@@ -431,7 +462,11 @@ fn extract_use_node(item: &ItemUse) -> StructureNode {
         kind: "use".to_string(),
         name: item.tree.to_token_stream().to_string(),
         visibility: non_empty(visibility_to_string(&item.vis)),
-        signature: normalize_token_string(format!("{}use {}", visibility_prefix(&item.vis), item.tree.to_token_stream())),
+        signature: normalize_token_string(format!(
+            "{}use {}",
+            visibility_prefix(&item.vis),
+            item.tree.to_token_stream()
+        )),
         target: None,
         trait_name: None,
         detail: None,
@@ -518,7 +553,11 @@ fn enum_detail(item: &ItemEnum) -> Option<Value> {
     }
 }
 
-fn function_detail(sig: &Signature, has_default_body: Option<bool>, in_impl: bool) -> Option<Value> {
+fn function_detail(
+    sig: &Signature,
+    has_default_body: Option<bool>,
+    in_impl: bool,
+) -> Option<Value> {
     let mut map = serde_json::Map::new();
     if sig.asyncness.is_some() {
         map.insert("async".to_string(), Value::Bool(true));
@@ -673,12 +712,11 @@ struct VueBlock {
     inner_content: String,
 }
 
-
 fn extract_ts_structure(
     content: &str,
     is_typescript: bool,
     path: &Path,
- ) -> std::result::Result<Vec<StructureNode>, String> {
+) -> std::result::Result<Vec<StructureNode>, String> {
     let mut parser = Parser::new();
     let language = if is_typescript {
         if path.extension().and_then(|ext| ext.to_str()) == Some("tsx") {
@@ -693,10 +731,10 @@ fn extract_ts_structure(
     parser
         .set_language(&language.into())
         .map_err(|err| format!("{}: {}", path.display(), err))?;
-        let syntax_err = "parser produced no syntax tree";
-        let tree = parser
-            .parse(content, None)
-            .ok_or_else(|| format!("{}: {}", path.display(), syntax_err))?;
+    let syntax_err = "parser produced no syntax tree";
+    let tree = parser
+        .parse(content, None)
+        .ok_or_else(|| format!("{}: {}", path.display(), syntax_err))?;
 
     let root = tree.root_node();
     let mut cursor = root.walk();
@@ -766,7 +804,11 @@ fn ts_function_node(node: Node<'_>, source: &str, generator: bool) -> StructureN
         signature: snippet(node, source),
         target: None,
         trait_name: None,
-        detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        },
         children: Vec::new(),
     }
 }
@@ -802,7 +844,11 @@ fn ts_class_node(node: Node<'_>, source: &str) -> StructureNode {
         signature: snippet(node, source),
         target: None,
         trait_name: None,
-        detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        },
         children,
     }
 }
@@ -872,7 +918,11 @@ fn ts_variable_node(node: Node<'_>, source: &str) -> StructureNode {
         signature: snippet(node, source),
         target: None,
         trait_name: None,
-        detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        },
         children: Vec::new(),
     }
 }
@@ -966,7 +1016,6 @@ fn ts_import_node(node: Node<'_>, source: &str) -> StructureNode {
     }
 }
 
-
 fn react_function_detail(node: Node<'_>, source: &str) -> serde_json::Map<String, Value> {
     let mut detail = serde_json::Map::new();
     let name = node
@@ -976,7 +1025,10 @@ fn react_function_detail(node: Node<'_>, source: &str) -> serde_json::Map<String
 
     if looks_like_react_component_name(&name) && contains_jsx_descendant(node) {
         detail.insert("component".to_string(), Value::Bool(true));
-        detail.insert("react_kind".to_string(), Value::String("function".to_string()));
+        detail.insert(
+            "react_kind".to_string(),
+            Value::String("function".to_string()),
+        );
         detail.insert("classic_react".to_string(), Value::Bool(true));
     }
 
@@ -996,9 +1048,14 @@ fn react_class_detail(node: Node<'_>, source: &str) -> serde_json::Map<String, V
     let react_component = "React.Component";
     if let Some(heritage) = find_named_descendant_by_kind(node, "class_heritage") {
         let extends = snippet(heritage, source);
-        if extends.contains(react_component) || extends.contains("Component") || extends.contains("PureComponent") {
+        if extends.contains(react_component)
+            || extends.contains("Component")
+            || extends.contains("PureComponent")
+        {
             detail.insert("extends".to_string(), Value::String(extends.clone()));
-            detail.entry("component".to_string()).or_insert(Value::Bool(true));
+            detail
+                .entry("component".to_string())
+                .or_insert(Value::Bool(true));
             detail
                 .entry("react_kind".to_string())
                 .or_insert(Value::String("class".to_string()));
@@ -1024,7 +1081,10 @@ fn react_variable_detail(node: Node<'_>, source: &str) -> Option<serde_json::Map
     if contains_jsx_descendant(node) {
         let mut detail = serde_json::Map::new();
         detail.insert("component".to_string(), Value::Bool(true));
-        detail.insert("react_kind".to_string(), Value::String("function".to_string()));
+        detail.insert(
+            "react_kind".to_string(),
+            Value::String("function".to_string()),
+        );
         detail.insert("classic_react".to_string(), Value::Bool(true));
         return Some(detail);
     }
@@ -1032,7 +1092,10 @@ fn react_variable_detail(node: Node<'_>, source: &str) -> Option<serde_json::Map
     None
 }
 
-fn react_create_class_detail(node: Node<'_>, source: &str) -> Option<serde_json::Map<String, Value>> {
+fn react_create_class_detail(
+    node: Node<'_>,
+    source: &str,
+) -> Option<serde_json::Map<String, Value>> {
     let create_class = "React.createClass";
     let text = snippet(node, source);
     if !text.contains(create_class) {
@@ -1041,13 +1104,18 @@ fn react_create_class_detail(node: Node<'_>, source: &str) -> Option<serde_json:
 
     let mut detail = serde_json::Map::new();
     detail.insert("component".to_string(), Value::Bool(true));
-    detail.insert("react_kind".to_string(), Value::String("createClass".to_string()));
+    detail.insert(
+        "react_kind".to_string(),
+        Value::String("createClass".to_string()),
+    );
     detail.insert("classic_react".to_string(), Value::Bool(true));
     Some(detail)
 }
 
 fn looks_like_react_component_name(name: &str) -> bool {
-    name.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 fn class_has_render_method(node: Node<'_>, source: &str) -> bool {
@@ -1119,7 +1187,12 @@ fn first_named_descendant_of_kind(node: Node<'_>, kind: &str, source: &str) -> O
 
 fn first_string_like_descendant(node: Node<'_>, source: &str) -> Option<String> {
     if matches!(node.kind(), "string" | "string_fragment") {
-        return Some(snippet(node, source).trim_matches('"').trim_matches('\'').to_string());
+        return Some(
+            snippet(node, source)
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string(),
+        );
     }
 
     let mut cursor = node.walk();
@@ -1138,13 +1211,12 @@ fn snippet(node: Node<'_>, source: &str) -> String {
         .unwrap_or_else(|_| node.kind().to_string())
 }
 
-
 fn extract_python_structure(
     content: &str,
     path: &Path,
- ) -> std::result::Result<Vec<StructureNode>, String> {
-    let suite = ast::Suite::parse(content, &path.display().to_string())
-        .map_err(|err| err.to_string())?;
+) -> std::result::Result<Vec<StructureNode>, String> {
+    let suite =
+        ast::Suite::parse(content, &path.display().to_string()).map_err(|err| err.to_string())?;
     Ok(extract_python_suite(&suite))
 }
 
@@ -1212,7 +1284,11 @@ fn python_import_from_node(import: &ast::StmtImportFrom) -> StructureNode {
         signature: format!("from {} import {}", module, names.join(", ")),
         target: None,
         trait_name: None,
-        detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        },
         children: Vec::new(),
     }
 }
@@ -1244,7 +1320,11 @@ where
         signature: python_function_signature(func, is_async),
         target: None,
         trait_name: None,
-        detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        },
         children: Vec::new(),
     }
 }
@@ -1293,7 +1373,11 @@ fn python_class_node(class_def: &ast::StmtClassDef) -> StructureNode {
         signature: python_class_signature(class_def),
         target: None,
         trait_name: None,
-        detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+        detail: if detail.is_empty() {
+            None
+        } else {
+            Some(Value::Object(detail))
+        },
         children,
     }
 }
@@ -1445,11 +1529,25 @@ fn python_alias_name(alias: &ast::Alias) -> String {
 fn python_expr_name(expr: &ast::Expr) -> String {
     match expr {
         ast::Expr::Name(name) => name.id.to_string(),
-        ast::Expr::Attribute(attr) => format!("{}.{}", python_expr_name(attr.value.as_ref()), attr.attr),
+        ast::Expr::Attribute(attr) => {
+            format!("{}.{}", python_expr_name(attr.value.as_ref()), attr.attr)
+        }
         ast::Expr::Subscript(sub) => format!("{}[...]", python_expr_name(sub.value.as_ref())),
         ast::Expr::Call(call) => python_expr_name(call.func.as_ref()),
-        ast::Expr::Tuple(tuple) => tuple.elts.iter().map(python_expr_name).collect::<Vec<_>>().join(", "),
-        ast::Expr::List(list) => format!("[{}]", list.elts.iter().map(python_expr_name).collect::<Vec<_>>().join(", ")),
+        ast::Expr::Tuple(tuple) => tuple
+            .elts
+            .iter()
+            .map(python_expr_name)
+            .collect::<Vec<_>>()
+            .join(", "),
+        ast::Expr::List(list) => format!(
+            "[{}]",
+            list.elts
+                .iter()
+                .map(python_expr_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         ast::Expr::Constant(value) => format!("{:?}", value.value),
         _ => "expr".to_string(),
     }
@@ -1465,7 +1563,6 @@ fn merge_detail(existing: Option<Value>, extra: Value) -> Option<Value> {
         (Some(value), _) => Some(value),
     }
 }
-
 
 fn extract_svelte_structure(content: &str) -> Vec<StructureNode> {
     let blocks = extract_vue_blocks(content);
@@ -1504,7 +1601,11 @@ fn extract_svelte_structure(content: &str) -> Vec<StructureNode> {
             signature: build_vue_signature(&block),
             target: None,
             trait_name: None,
-            detail: if detail.is_empty() { None } else { Some(Value::Object(detail)) },
+            detail: if detail.is_empty() {
+                None
+            } else {
+                Some(Value::Object(detail))
+            },
             children: Vec::new(),
         });
 
@@ -1685,7 +1786,9 @@ fn parse_tag_attributes(raw_open_tag: &str, tag_name: &str) -> Vec<(String, Opti
             chars.next();
         }
 
-        let name = remainder[start_idx..end_idx].trim_end_matches('/').to_string();
+        let name = remainder[start_idx..end_idx]
+            .trim_end_matches('/')
+            .to_string();
         while let Some(&(_, next_ch)) = chars.peek() {
             if next_ch.is_whitespace() {
                 chars.next();
@@ -1839,7 +1942,10 @@ fn vue_block_detail(block: &VueBlock, kind: &str) -> Option<Value> {
 }
 
 fn has_vue_attr(block: &VueBlock, name: &str) -> bool {
-    block.attributes.iter().any(|(attr_name, _)| attr_name == name)
+    block
+        .attributes
+        .iter()
+        .any(|(attr_name, _)| attr_name == name)
 }
 
 fn vue_attr_value<'a>(block: &'a VueBlock, name: &str) -> Option<&'a str> {
@@ -1894,7 +2000,6 @@ mod tests {
             network_policy: None,
         }
     }
-
 
     #[test]
     fn filesystem_toolset_includes_structure() {
@@ -2001,16 +2106,21 @@ pub mod api {
             .and_then(Value::as_array)
             .expect("mod children");
         assert_eq!(mod_children.len(), 1);
-        assert_eq!(mod_children[0].get("kind").and_then(Value::as_str), Some("trait"));
+        assert_eq!(
+            mod_children[0].get("kind").and_then(Value::as_str),
+            Some("trait")
+        );
 
         let trait_children = mod_children[0]
             .get("children")
             .and_then(Value::as_array)
             .expect("trait children");
         assert_eq!(trait_children.len(), 1);
-        assert_eq!(trait_children[0].get("name").and_then(Value::as_str), Some("handle"));
+        assert_eq!(
+            trait_children[0].get("name").and_then(Value::as_str),
+            Some("handle")
+        );
     }
-
 
     #[tokio::test]
     async fn omits_empty_visibility_and_normalizes_signatures() {
@@ -2049,14 +2159,20 @@ impl<T> Pair<T> {
             .expect("nodes array");
 
         assert_eq!(nodes[0].get("visibility"), None);
-        assert_eq!(nodes[0].get("signature").and_then(Value::as_str), Some("struct Pair < T >"));
+        assert_eq!(
+            nodes[0].get("signature").and_then(Value::as_str),
+            Some("struct Pair < T >")
+        );
 
         let children = nodes[1]
             .get("children")
             .and_then(Value::as_array)
             .expect("impl children");
         assert_eq!(children[0].get("visibility"), None);
-        assert_eq!(children[0].get("signature").and_then(Value::as_str), Some("fn first (& self) -> & T"));
+        assert_eq!(
+            children[0].get("signature").and_then(Value::as_str),
+            Some("fn first (& self) -> & T")
+        );
         assert_eq!(
             children[0]
                 .get("detail")
@@ -2115,8 +2231,14 @@ Hello docs
             .expect("nodes array");
         assert_eq!(nodes.len(), 4);
 
-        assert_eq!(nodes[0].get("kind").and_then(Value::as_str), Some("template"));
-        assert_eq!(nodes[0].get("signature").and_then(Value::as_str), Some("<template>"));
+        assert_eq!(
+            nodes[0].get("kind").and_then(Value::as_str),
+            Some("template")
+        );
+        assert_eq!(
+            nodes[0].get("signature").and_then(Value::as_str),
+            Some("<template>")
+        );
 
         assert_eq!(nodes[1].get("kind").and_then(Value::as_str), Some("script"));
         assert_eq!(
@@ -2198,7 +2320,10 @@ const count = ref(0);
 
         assert_eq!(nodes[0].get("kind").and_then(Value::as_str), Some("import"));
         assert_eq!(nodes[0].get("name").and_then(Value::as_str), Some("vue"));
-        assert_eq!(nodes[1].get("kind").and_then(Value::as_str), Some("function"));
+        assert_eq!(
+            nodes[1].get("kind").and_then(Value::as_str),
+            Some("function")
+        );
         assert_eq!(nodes[1].get("name").and_then(Value::as_str), Some("greet"));
         assert_eq!(
             nodes[1]
@@ -2209,9 +2334,11 @@ const count = ref(0);
         );
         assert_eq!(nodes[2].get("kind").and_then(Value::as_str), Some("class"));
         assert_eq!(nodes[2].get("name").and_then(Value::as_str), Some("Person"));
-        assert_eq!(nodes[3].get("kind").and_then(Value::as_str), Some("variable"));
+        assert_eq!(
+            nodes[3].get("kind").and_then(Value::as_str),
+            Some("variable")
+        );
     }
-
 
     #[tokio::test]
     async fn detects_classic_react_components_in_jsx() {
@@ -2365,8 +2492,14 @@ const Legacy = React.createClass({
 
         assert_eq!(nodes[1].get("kind").and_then(Value::as_str), Some("script"));
         assert_eq!(nodes[2].get("kind").and_then(Value::as_str), Some("style"));
-        assert_eq!(nodes[3].get("kind").and_then(Value::as_str), Some("template"));
-        assert_eq!(nodes[3].get("signature").and_then(Value::as_str), Some("<template>"));
+        assert_eq!(
+            nodes[3].get("kind").and_then(Value::as_str),
+            Some("template")
+        );
+        assert_eq!(
+            nodes[3].get("signature").and_then(Value::as_str),
+            Some("<template>")
+        );
     }
 
     #[tokio::test]
@@ -2421,10 +2554,16 @@ async def run(task):
 
         assert_eq!(nodes[0].get("kind").and_then(Value::as_str), Some("import"));
         assert_eq!(nodes[1].get("kind").and_then(Value::as_str), Some("import"));
-        assert_eq!(nodes[2].get("kind").and_then(Value::as_str), Some("variable"));
+        assert_eq!(
+            nodes[2].get("kind").and_then(Value::as_str),
+            Some("variable")
+        );
         assert_eq!(nodes[2].get("name").and_then(Value::as_str), Some("VALUE"));
         assert_eq!(nodes[3].get("kind").and_then(Value::as_str), Some("class"));
-        assert_eq!(nodes[3].get("name").and_then(Value::as_str), Some("Service"));
+        assert_eq!(
+            nodes[3].get("name").and_then(Value::as_str),
+            Some("Service")
+        );
         assert_eq!(
             nodes[3]
                 .get("detail")
@@ -2439,15 +2578,27 @@ async def run(task):
             .get("children")
             .and_then(Value::as_array)
             .expect("class children");
-        assert_eq!(class_children[0].get("kind").and_then(Value::as_str), Some("variable"));
-        assert_eq!(class_children[1].get("kind").and_then(Value::as_str), Some("function"));
-        assert_eq!(class_children[1].get("name").and_then(Value::as_str), Some("build"));
+        assert_eq!(
+            class_children[0].get("kind").and_then(Value::as_str),
+            Some("variable")
+        );
+        assert_eq!(
+            class_children[1].get("kind").and_then(Value::as_str),
+            Some("function")
+        );
+        assert_eq!(
+            class_children[1].get("name").and_then(Value::as_str),
+            Some("build")
+        );
         assert_eq!(
             class_children[2].get("kind").and_then(Value::as_str),
             Some("async_function")
         );
 
-        assert_eq!(nodes[4].get("kind").and_then(Value::as_str), Some("async_function"));
+        assert_eq!(
+            nodes[4].get("kind").and_then(Value::as_str),
+            Some("async_function")
+        );
         assert_eq!(nodes[4].get("name").and_then(Value::as_str), Some("run"));
     }
     #[tokio::test]
@@ -2495,14 +2646,20 @@ export class Service {
             .and_then(Value::as_array)
             .expect("nodes array");
 
-        assert_eq!(nodes[0].get("kind").and_then(Value::as_str), Some("interface"));
+        assert_eq!(
+            nodes[0].get("kind").and_then(Value::as_str),
+            Some("interface")
+        );
         assert_eq!(nodes[0].get("name").and_then(Value::as_str), Some("User"));
         assert_eq!(nodes[1].get("kind").and_then(Value::as_str), Some("type"));
         assert_eq!(nodes[1].get("name").and_then(Value::as_str), Some("Id"));
         assert_eq!(nodes[2].get("kind").and_then(Value::as_str), Some("enum"));
         assert_eq!(nodes[2].get("name").and_then(Value::as_str), Some("State"));
         assert_eq!(nodes[3].get("kind").and_then(Value::as_str), Some("class"));
-        assert_eq!(nodes[3].get("name").and_then(Value::as_str), Some("Service"));
+        assert_eq!(
+            nodes[3].get("name").and_then(Value::as_str),
+            Some("Service")
+        );
     }
     #[tokio::test]
     async fn lang_override_is_respected_for_unsupported_lang() {

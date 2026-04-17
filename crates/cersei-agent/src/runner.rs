@@ -47,15 +47,10 @@ fn append_tool_usage_log(tool_id: &str, tool_name: &str, tool_input: &serde_json
         return;
     };
 
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         let _ = writeln!(file, "{serialized}");
     }
 }
-
 
 fn assistant_message_has_progress_summary(message: &Message) -> bool {
     let text = message.get_all_text();

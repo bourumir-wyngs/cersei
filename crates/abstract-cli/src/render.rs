@@ -632,10 +632,7 @@ mod tests {
                 "length": 25
             }),
         );
-        assert_eq!(
-            summary,
-            "src/main.rs tag:4 search /todo/ len 25"
-        );
+        assert_eq!(summary, "src/main.rs tag:4 search /todo/ len 25");
     }
     #[test]
     fn write_summary_includes_char_count() {

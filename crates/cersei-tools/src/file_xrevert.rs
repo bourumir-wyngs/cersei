@@ -168,7 +168,10 @@ mod tests {
             .await;
         assert!(!second.is_error, "{}", second.content);
         let path = tmp.path().join("sample.txt");
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "hello there\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "hello there\n"
+        );
 
         let revert_tool = XRevertTool;
         let revert = revert_tool
@@ -176,7 +179,10 @@ mod tests {
             .await;
 
         assert!(!revert.is_error, "{}", revert.content);
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "hello world\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "hello world\n"
+        );
     }
 
     #[tokio::test]
@@ -215,7 +221,10 @@ mod tests {
             )
             .await;
         assert!(!edit.is_error, "{}", edit.content);
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "alpha\nBETA\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "alpha\nBETA\n"
+        );
 
         let revert_tool = XRevertTool;
         let revert = revert_tool
@@ -223,7 +232,10 @@ mod tests {
             .await;
 
         assert!(!revert.is_error, "{}", revert.content);
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "alpha\nbeta\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "alpha\nbeta\n"
+        );
     }
 
     #[tokio::test]
@@ -243,6 +255,9 @@ mod tests {
         assert!(revert
             .content
             .contains("File is not loaded in XFileStorage"));
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "hello world\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "hello world\n"
+        );
     }
 }

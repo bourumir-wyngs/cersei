@@ -1,9 +1,13 @@
 //! Npm tool: run npm commands.
 
 use super::*;
-use crate::network_policy::{shell_command, NetworkAccess, NetworkDecision};
+use crate::network_policy::{
+    firejailed_shell_command_with_extra_firejail_args, NetworkAccess, NetworkDecision,
+};
+use crate::shell_sandbox::{
+    home_entries_and_workspace_firejail_args, resolve_directory_in_workspace,
+};
 use serde::Deserialize;
-use std::path::PathBuf;
 use std::process::Stdio;
 
 pub struct NpmTool;
@@ -72,28 +76,14 @@ impl Tool for NpmTool {
             state.cwd.clone().unwrap_or_else(|| ctx.working_dir.clone())
         };
 
-        let cwd = if let Some(dir) = input.directory {
-            let candidate = PathBuf::from(&base_cwd).join(&dir);
-            let canonical_root = match ctx.working_dir.canonicalize() {
-                Ok(p) => p,
-                Err(e) => return ToolResult::error(format!("Cannot resolve working root: {}", e)),
-            };
-            let canonical_candidate = match candidate.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    return ToolResult::error(format!("Cannot resolve directory '{}': {}", dir, e))
-                }
-            };
-            if !canonical_candidate.starts_with(&canonical_root) {
-                return ToolResult::error(format!(
-                    "Directory '{}' is outside the allowed root '{}'",
-                    dir,
-                    canonical_root.display()
-                ));
-            }
-            canonical_candidate
-        } else {
-            base_cwd
+        let (cwd, workspace_root) = match resolve_directory_in_workspace(
+            &base_cwd,
+            input.directory.as_deref(),
+            &ctx.working_dir,
+            "npm",
+        ) {
+            Ok(paths) => paths,
+            Err(err) => return ToolResult::error(err),
         };
 
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
@@ -110,7 +100,10 @@ impl Tool for NpmTool {
             None => requested,
         };
 
-        let mut cmd = shell_command(&command, access);
+        let firejail_args =
+            home_entries_and_workspace_firejail_args(&workspace_root, &[".npm", ".npmrc"]);
+        let mut cmd =
+            firejailed_shell_command_with_extra_firejail_args(&command, access, &firejail_args);
         cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

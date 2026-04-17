@@ -1,7 +1,7 @@
 //! Read tool: session-scoped tagged file reads backed by XFileStorage.
 
 use super::*;
-use crate::xfile_storage::{XFile, XLine, ensure_loaded, resolve_xfile_path};
+use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, XFile, XLine};
 use regex::Regex;
 use serde::Deserialize;
 

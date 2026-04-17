@@ -13,6 +13,7 @@
 
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
+use std::ffi::OsString;
 use std::sync::Arc;
 use tokio::process::Command;
 
@@ -146,20 +147,49 @@ pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
         cmd.args(["-c", command]);
         return cmd;
     }
-    let net_flag = match access {
-        NetworkAccess::Local => "--net=sandbox",
-        _ => "--net=none",
-    };
+
+    firejail_shell_command(command, access, &[])
+}
+
+/// Build a shell command under Firejail when available, plus additional
+/// Firejail arguments for filesystem confinement or other restrictions.
+///
+/// Unlike [`shell_command`], `NetworkAccess::Full` still runs inside Firejail;
+/// it simply omits any `--net=` restriction.
+pub fn firejailed_shell_command_with_extra_firejail_args(
+    command: &str,
+    access: NetworkAccess,
+    extra_firejail_args: &[OsString],
+) -> Command {
+    if !*FIREJAIL_AVAILABLE {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", command]);
+        return cmd;
+    }
+
+    firejail_shell_command(command, access, extra_firejail_args)
+}
+
+fn firejail_shell_command(
+    command: &str,
+    access: NetworkAccess,
+    extra_firejail_args: &[OsString],
+) -> Command {
     let mut cmd = Command::new("firejail");
-    cmd.args([
-        "--quiet",
-        "--noprofile",
-        net_flag,
-        "--",
-        "sh",
-        "-c",
-        command,
-    ]);
+    cmd.args(["--quiet", "--noprofile"]);
+
+    match access {
+        NetworkAccess::Full => {}
+        NetworkAccess::Local => {
+            cmd.arg("--net=sandbox");
+        }
+        NetworkAccess::Blocked => {
+            cmd.arg("--net=none");
+        }
+    }
+
+    cmd.args(extra_firejail_args);
+    cmd.args(["--", "sh", "-c", command]);
     cmd
 }
 
