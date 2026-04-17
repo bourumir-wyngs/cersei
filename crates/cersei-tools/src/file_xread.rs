@@ -1,7 +1,8 @@
 //! Read tool: session-scoped tagged file reads backed by XFileStorage.
 
 use super::*;
-use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, XFile, XLine};
+use crate::xfile_storage::{XFile, XLine, ensure_loaded, resolve_xfile_path};
+use regex::Regex;
 use serde::Deserialize;
 
 pub struct XReadTool;
@@ -13,6 +14,15 @@ struct ReadSelection<'a> {
     lines: Vec<&'a XLine>,
     remaining_lines: usize,
     next_tag: Option<&'a str>,
+}
+
+struct SearchChunk<'a> {
+    lines: Vec<&'a XLine>,
+}
+
+enum ReadOutputLine<'a> {
+    Content(&'a XLine),
+    Separator,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,6 +38,11 @@ pub struct XReadRequest {
     pub after: Option<usize>,
     #[serde(default)]
     pub length: Option<usize>,
+    /// Optional Rust `regex` pattern. When set and non-empty, Read first selects
+    /// lines using the normal range/windowing rules (ignoring `length`), then
+    /// filters the selection to matching lines plus `before`/`after` context.
+    #[serde(default)]
+    pub search: Option<String>,
 }
 
 #[async_trait]
@@ -78,6 +93,10 @@ impl Tool for XReadTool {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Optional absolute limit on the number of lines to return. The read starts at the calculated position (based on start_tag/before and end_tag/after) and stops when this many lines have been returned."
+                },
+                "search": {
+                    "type": "string",
+                    "description": "Optional Rust `regex` pattern. If set and non-empty, Read will first compute the normal selection (ignoring `length`), then include only matching lines plus `before`/`after` context, separating match groups with `---------------`. Finally, `length` is applied to the resulting output."
                 }
             },
             "required": ["file_path"]
@@ -91,12 +110,20 @@ impl Tool for XReadTool {
         };
         let before = req.before.filter(|count| *count > 0);
         let after = req.after.filter(|count| *count > 0);
+        let search = req
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
-        // Validate parameters
-        if req.end_tag.is_some() && req.length.is_some() {
+        if search.is_none() && req.end_tag.is_some() && req.length.is_some() {
             return ToolResult::error("Read accepts either `end_tag` or `length`, not both.");
         }
-        if req.start_tag.is_none()
+        if search.is_some() && req.start_tag.is_none() && req.end_tag.is_some() {
+            return ToolResult::error("Read requires `start_tag` when `end_tag` is provided.");
+        }
+        if search.is_none()
+            && req.start_tag.is_none()
             && (req.end_tag.is_some()
                 || req.length.is_some()
                 || before.is_some()
@@ -119,35 +146,100 @@ impl Tool for XReadTool {
             req.end_tag.as_deref(),
             before,
             after,
-            req.length,
+            if search.is_some() { None } else { req.length },
         ) {
             Ok(lines) => lines,
             Err(err) => return ToolResult::error(err),
         };
 
-        let mut content = selected
-            .lines
-            .iter()
-            .map(|line| format!("{:>6}\t{}", line.tag, line.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if let Some(next_tag) = selected.next_tag {
-            if !content.is_empty() {
-                content.push_str("\n\n");
+        let (content, selected_count) = if let Some(pattern) = search {
+            let regex = match Regex::new(pattern) {
+                Ok(regex) => regex,
+                Err(err) => return ToolResult::error(format!("Invalid regex: {}", err)),
+            };
+
+            let mut output_lines = render_search_lines(
+                &selected.lines,
+                &regex,
+                before.unwrap_or(0),
+                after.unwrap_or(0),
+            );
+
+            if output_lines.is_empty() {
+                ("No matches found.".to_string(), 0)
+            } else {
+                if let Some(limit) = req.length {
+                    if output_lines.len() > limit {
+                        output_lines.truncate(limit);
+                    }
+                }
+
+                let selected_count = output_lines
+                    .iter()
+                    .filter(|line| matches!(line, ReadOutputLine::Content(_)))
+                    .count();
+
+                (render_output_lines(&output_lines), selected_count)
             }
-            content.push_str(&format!(
-                "File truncated, {} lines remaining, next line tag {}",
-                selected.remaining_lines, next_tag
-            ));
-        }
+        } else {
+            let mut content = render_xlines(&selected.lines);
+            if let Some(next_tag) = selected.next_tag {
+                if !content.is_empty() {
+                    content.push_str("\n\n");
+                }
+                content.push_str(&format!(
+                    "File truncated, {} lines remaining, next line tag {}",
+                    selected.remaining_lines, next_tag
+                ));
+            }
+            (content, selected.lines.len())
+        };
 
         ToolResult::success(content).with_metadata(serde_json::json!({
             "file_path": head.file.path.display().to_string(),
             "current_version": head.current_version,
             "line_count": head.file.content.len(),
-            "selected_count": selected.lines.len(),
+            "selected_count": selected_count,
         }))
     }
+}
+
+fn render_xlines(lines: &[&XLine]) -> String {
+    lines
+        .iter()
+        .map(|line| format!("{:>6}\t{}", line.tag, line.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_search_lines<'a>(
+    selected_lines: &[&'a XLine],
+    regex: &Regex,
+    before: usize,
+    after: usize,
+) -> Vec<ReadOutputLine<'a>> {
+    let chunks = search_selected_lines(selected_lines, regex, before, after);
+    let mut output_lines = Vec::new();
+
+    for (idx, chunk) in chunks.iter().enumerate() {
+        if idx > 0 {
+            output_lines.push(ReadOutputLine::Separator);
+        }
+        output_lines.extend(chunk.lines.iter().copied().map(ReadOutputLine::Content));
+    }
+
+    output_lines
+}
+
+fn render_output_lines(lines: &[ReadOutputLine<'_>]) -> String {
+    lines
+        .iter()
+        .map(|line| match line {
+            ReadOutputLine::Content(line) => format!("{:>6}\t{}", line.tag, line.content),
+            ReadOutputLine::Separator => "---------------".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn select_lines<'a>(
@@ -164,7 +256,11 @@ fn select_lines<'a>(
             .iter()
             .position(|line| line.tag == start_tag)
             .ok_or_else(|| {
-                let first_tag = file.content.first().map(|line| line.tag.as_str()).unwrap_or("<empty file>");
+                let first_tag = file
+                    .content
+                    .first()
+                    .map(|line| line.tag.as_str())
+                    .unwrap_or("<empty file>");
                 format!(
                     "Unknown start_tag '{}' in {}. Tags are globally unique, this file starts from {}",
                     start_tag,
@@ -227,6 +323,36 @@ fn select_lines<'a>(
     }
 }
 
+fn search_selected_lines<'a>(
+    selected_lines: &[&'a XLine],
+    regex: &Regex,
+    before: usize,
+    after: usize,
+) -> Vec<SearchChunk<'a>> {
+    let match_indices: Vec<usize> = selected_lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| regex.is_match(&line.content).then_some(idx))
+        .collect();
+
+    if match_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let last_idx = selected_lines.len().saturating_sub(1);
+    let mut chunks = Vec::new();
+
+    for &match_idx in &match_indices {
+        let start = match_idx.saturating_sub(before);
+        let end = match_idx.saturating_add(after).min(last_idx);
+        chunks.push(SearchChunk {
+            lines: selected_lines[start..=end].to_vec(),
+        });
+    }
+
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +379,7 @@ mod tests {
         let tool = XReadTool;
         let schema = tool.input_schema();
 
+        assert_eq!(schema["properties"]["search"]["type"], "string");
         assert_eq!(schema["properties"]["start_tag"]["type"], "string");
         assert_eq!(schema["properties"]["end_tag"]["type"], "string");
         assert_eq!(schema["properties"]["before"]["minimum"], 0);
@@ -268,6 +395,220 @@ mod tests {
             .collect();
 
         assert!(names.iter().any(|name| name == "Read"));
+    }
+
+    #[tokio::test]
+    async fn xread_search_filters_lines_without_requiring_start_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let head = store_written_text(&session_id, &path, "zero\nfoo one\nctx a\nfoo two\nend\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "search": "foo",
+                    "before": 1,
+                    "after": 1
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("\tzero"));
+        assert!(result.content.contains("\tfoo one"));
+        assert!(result.content.contains("\tctx a"));
+        assert!(result.content.contains("---------------"));
+        assert!(result.content.contains("\tfoo two"));
+        assert!(result.content.contains("\tend"));
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 6);
+    }
+
+    #[tokio::test]
+    async fn xread_search_applies_length_to_final_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-limit-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let head = store_written_text(&session_id, &path, "zero\nfoo one\nctx a\nfoo two\nend\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "search": "foo",
+                    "before": 1,
+                    "after": 1,
+                    "length": 2
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content.lines().count(), 2);
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn xread_search_allows_end_tag_and_length_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-range-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let head = store_written_text(&session_id, &path, "zero\nfoo\nskip\nbar\nend\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "start_tag": head.file.content[0].tag,
+                    "end_tag": head.file.content[3].tag,
+                    "search": "foo|bar",
+                    "length": 3
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("\tfoo"));
+        assert!(result.content.contains("---------------"));
+        assert!(result.content.contains("\tbar"));
+        assert_eq!(result.content.lines().count(), 3);
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn xread_search_reports_no_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-empty-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let head = store_written_text(&session_id, &path, "zero\none\ntwo\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "search": "foo"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content, "No matches found.");
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn xread_search_rejects_invalid_regex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-invalid-regex-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let head = store_written_text(&session_id, &path, "zero\none\ntwo\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "search": "("
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.starts_with("Invalid regex:"));
+    }
+
+    #[tokio::test]
+    async fn xread_search_requires_start_tag_when_end_tag_is_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-end-tag-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": "missing.txt",
+                    "end_tag": "tag:2",
+                    "search": "foo"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            "Read requires `start_tag` when `end_tag` is provided."
+        );
+    }
+
+    #[tokio::test]
+    async fn xread_search_respects_selected_tag_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-range-bounds-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let head = store_written_text(
+            &session_id,
+            &path,
+            "foo outside before\ninside one\ninside two\nfoo outside after\n",
+        );
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "start_tag": head.file.content[1].tag,
+                    "end_tag": head.file.content[2].tag,
+                    "search": "foo"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content, "No matches found.");
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 0);
     }
 
     #[tokio::test]
@@ -326,6 +667,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xread_rejects_unknown_start_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-test-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+        let path = tmp.path().join("unknown-start.txt");
+        let head = store_written_text(&session_id, &path, "one\ntwo\nthree\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "start_tag": "tag:missing"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            format!(
+                "Unknown start_tag 'tag:missing' in {}. Tags are globally unique, this file starts from {}",
+                path.display(),
+                head.file.content[0].tag
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn xread_requires_start_tag_when_length_is_given() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-test-{}", Uuid::new_v4());
@@ -346,6 +720,36 @@ mod tests {
         assert_eq!(
             result.content,
             "Read requires `start_tag` when `end_tag`, `length`, `before`, or `after` is provided."
+        );
+    }
+
+    #[tokio::test]
+    async fn xread_rejects_unknown_end_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-test-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+        let path = tmp.path().join("unknown-end.txt");
+        let head = store_written_text(&session_id, &path, "one\ntwo\nthree\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "start_tag": head.file.content[0].tag,
+                    "end_tag": "tag:missing"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            format!("Unknown end_tag 'tag:missing' in {}", path.display())
         );
     }
 
@@ -425,7 +829,7 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "file_path": path.display().to_string(),
-                    "start_tag": head.file.content[3].tag,  // four
+                    "start_tag": head.file.content[3].tag,
                     "before": 2
                 }),
                 &test_ctx(tmp.path(), &session_id),
@@ -457,7 +861,7 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "file_path": path.display().to_string(),
-                    "start_tag": head.file.content[1].tag,  // two
+                    "start_tag": head.file.content[1].tag,
                     "after": 2
                 }),
                 &test_ctx(tmp.path(), &session_id),
@@ -493,8 +897,8 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "file_path": path.display().to_string(),
-                    "start_tag": head.file.content[3].tag,  // four
-                    "end_tag": head.file.content[4].tag,    // five
+                    "start_tag": head.file.content[3].tag,
+                    "end_tag": head.file.content[4].tag,
                     "before": 1,
                     "after": 1
                 }),
@@ -529,7 +933,7 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "file_path": path.display().to_string(),
-                    "start_tag": head.file.content[1].tag,  // two
+                    "start_tag": head.file.content[1].tag,
                     "before": 10
                 }),
                 &test_ctx(tmp.path(), &session_id),
@@ -559,7 +963,7 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "file_path": path.display().to_string(),
-                    "start_tag": head.file.content[1].tag,  // two
+                    "start_tag": head.file.content[1].tag,
                     "after": 10
                 }),
                 &test_ctx(tmp.path(), &session_id),
@@ -599,8 +1003,6 @@ mod tests {
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        // Without length, the bounded window would contain one, two, and three.
-        // With length=3, we still get the full calculated window.
         assert!(result.content.contains("\tone"));
         assert!(result.content.contains("\ttwo"));
         assert!(result.content.contains("\tthree"));

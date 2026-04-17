@@ -469,29 +469,43 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
         .unwrap_or("");
     let start_tag = input.get("start_tag").and_then(|v| v.as_str());
     let end_tag = input.get("end_tag").and_then(|v| v.as_str());
-    let before = input.get("before").and_then(|v| v.as_u64()).filter(|v| *v > 0);
-    let after = input.get("after").and_then(|v| v.as_u64()).filter(|v| *v > 0);
+    let before = input
+        .get("before")
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0);
+    let after = input
+        .get("after")
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0);
     let length = input.get("length").and_then(|v| v.as_u64());
+    let search = input
+        .get("search")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
 
-    match start_tag {
-        Some(start_tag) => {
-            let mut summary = match end_tag {
-                Some(end_tag) => format!("{file_path} {start_tag}..{end_tag}"),
-                None => format!("{file_path} from {start_tag}"),
-            };
-            if let Some(before) = before {
-                summary.push_str(&format!(" before {before}"));
-            }
-            if let Some(after) = after {
-                summary.push_str(&format!(" after {after}"));
-            }
-            if let Some(length) = length {
-                summary.push_str(&format!(" len {length}"));
-            }
-            summary
-        }
+    let mut summary = match start_tag {
+        Some(start_tag) => match end_tag {
+            Some(end_tag) => format!("{file_path} {start_tag}..{end_tag}"),
+            None => format!("{file_path} from {start_tag}"),
+        },
         None => file_path.to_string(),
+    };
+
+    if let Some(search) = search {
+        summary.push_str(&format!(" search /{}/", truncate(search, 40)));
     }
+    if let Some(before) = before {
+        summary.push_str(&format!(" before {before}"));
+    }
+    if let Some(after) = after {
+        summary.push_str(&format!(" after {after}"));
+    }
+    if let Some(length) = length {
+        summary.push_str(&format!(" len {length}"));
+    }
+
+    summary
 }
 
 fn write_tool_summary(input: &serde_json::Value) -> String {
@@ -592,6 +606,38 @@ mod tests {
             }),
         );
         assert_eq!(summary, "src/main.rs from tag:4 len 25");
+    }
+
+    #[test]
+    fn read_summary_includes_search_without_start_tag() {
+        let summary = tool_input_summary(
+            "Read",
+            &serde_json::json!({
+                "file_path": "src/main.rs",
+                "search": "foo.*bar",
+                "before": 1,
+                "after": 2,
+                "length": 10
+            }),
+        );
+        assert_eq!(
+            summary,
+            "src/main.rs search /foo.*bar/ before 1 after 2 len 10"
+        );
+    }
+
+    #[test]
+    fn read_summary_includes_search_for_tag_start() {
+        let summary = tool_input_summary(
+            "Read",
+            &serde_json::json!({
+                "file_path": "src/main.rs",
+                "start_tag": "tag:4",
+                "search": "todo",
+                "length": 25
+            }),
+        );
+        assert_eq!(summary, "src/main.rs from tag:4 search /todo/ len 25");
     }
 
     #[test]
