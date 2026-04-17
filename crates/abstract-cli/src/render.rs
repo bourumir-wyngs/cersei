@@ -368,9 +368,9 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(truncate_review_text)
             .unwrap_or_default(),
-        "Read" | "file_read" => read_tool_summary(input),
-        "Write" | "file_write" => write_tool_summary(input),
-        "Edit" | "file_edit" | "Sed" | "sed" => input
+        "Read" => read_tool_summary(input),
+        "Write" => write_tool_summary(input),
+        "Edit" | "Sed" | "sed" => input
             .get("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or("")
@@ -467,16 +467,31 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
         .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-    let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000);
-    let start_line = offset + 1;
-    let end_line = if limit == 0 {
-        start_line
-    } else {
-        start_line.saturating_add(limit.saturating_sub(1))
-    };
+    let start_tag = input.get("start_tag").and_then(|v| v.as_str());
+    let end_tag = input.get("end_tag").and_then(|v| v.as_str());
+    let before = input.get("before").and_then(|v| v.as_u64()).filter(|v| *v > 0);
+    let after = input.get("after").and_then(|v| v.as_u64()).filter(|v| *v > 0);
+    let length = input.get("length").and_then(|v| v.as_u64());
 
-    format!("{file_path} lines {start_line}-{end_line}")
+    match start_tag {
+        Some(start_tag) => {
+            let mut summary = match end_tag {
+                Some(end_tag) => format!("{file_path} {start_tag}..{end_tag}"),
+                None => format!("{file_path} from {start_tag}"),
+            };
+            if let Some(before) = before {
+                summary.push_str(&format!(" before {before}"));
+            }
+            if let Some(after) = after {
+                summary.push_str(&format!(" after {after}"));
+            }
+            if let Some(length) = length {
+                summary.push_str(&format!(" len {length}"));
+            }
+            summary
+        }
+        None => file_path.to_string(),
+    }
 }
 
 fn write_tool_summary(input: &serde_json::Value) -> String {
@@ -494,7 +509,7 @@ fn write_tool_summary(input: &serde_json::Value) -> String {
 }
 
 fn tool_input_console_body(name: &str, input: &serde_json::Value) -> Option<ToolConsoleBody> {
-    if matches!(name, "Write" | "write" | "file_write") {
+    if matches!(name, "Write" | "write") {
         return input
             .get("content")
             .and_then(|v| v.as_str())
@@ -515,7 +530,7 @@ fn tool_result_console_body(name: &str, result: &str) -> Option<ToolConsoleBody>
         });
     }
 
-    if matches!(name, "Edit" | "edit" | "file_edit") {
+    if matches!(name, "Edit" | "edit") {
         return extract_result_string_field(result, "diff").map(|diff| ToolConsoleBody {
             text: diff,
             kind: ToolConsoleBodyKind::Diff,
@@ -546,27 +561,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_summary_includes_default_requested_range() {
+    fn read_summary_defaults_to_file_path() {
         let summary = tool_input_summary("Read", &serde_json::json!({"file_path": "src/main.rs"}));
-        assert_eq!(summary, "src/main.rs lines 1-2000");
+        assert_eq!(summary, "src/main.rs");
     }
 
     #[test]
-    fn read_summary_includes_explicit_requested_range() {
+    fn read_summary_includes_tag_range_and_context() {
         let summary = tool_input_summary(
             "Read",
-            &serde_json::json!({"file_path": "src/main.rs", "offset": 10, "limit": 25}),
+            &serde_json::json!({
+                "file_path": "src/main.rs",
+                "start_tag": "tag:10",
+                "end_tag": "tag:25",
+                "before": 2,
+                "after": 3
+            }),
         );
-        assert_eq!(summary, "src/main.rs lines 11-35");
+        assert_eq!(summary, "src/main.rs tag:10..tag:25 before 2 after 3");
     }
 
     #[test]
-    fn read_summary_handles_zero_limit() {
+    fn read_summary_includes_length_for_tag_start() {
         let summary = tool_input_summary(
             "Read",
-            &serde_json::json!({"file_path": "src/main.rs", "offset": 4, "limit": 0}),
+            &serde_json::json!({
+                "file_path": "src/main.rs",
+                "start_tag": "tag:4",
+                "length": 25
+            }),
         );
-        assert_eq!(summary, "src/main.rs lines 5-5");
+        assert_eq!(summary, "src/main.rs from tag:4 len 25");
     }
 
     #[test]

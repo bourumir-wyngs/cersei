@@ -77,8 +77,8 @@ impl Tool for ToolSearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_read::FileReadTool;
-    use crate::file_write::FileWriteTool;
+    use crate::file_xread::XReadTool;
+    use crate::file_xwrite::XWriteTool;
     use crate::permissions::AllowAll;
     use std::sync::Arc;
 
@@ -96,7 +96,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_file() {
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool), Box::new(FileWriteTool)];
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(XReadTool), Box::new(XWriteTool)];
         let search = ToolSearchTool::new(&tools);
         let result = search
             .execute(serde_json::json!({"query": "file"}), &test_ctx())
@@ -108,7 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_no_match() {
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool)];
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(XReadTool)];
         let search = ToolSearchTool::new(&tools);
         let result = search
             .execute(serde_json::json!({"query": "xyz123"}), &test_ctx())

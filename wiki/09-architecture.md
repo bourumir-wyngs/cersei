@@ -32,11 +32,12 @@ src-cersei/
     │       ├── lib.rs            Tool trait, ToolContext, ToolResult, built-in sets
     │       ├── permissions.rs    PermissionPolicy trait + built-in policies
     │       ├── bash.rs           Bash tool (shell state persistence)
-    │       ├── file_read.rs      Read tool
-    │       ├── file_write.rs     Write tool
-    │       ├── file_edit.rs      Edit tool (string replacement)
+    │       ├── file_xread.rs     XFileStorage-backed Read tool
+    │       ├── file_xwrite.rs    XFileStorage-backed Write tool
+    │       ├── file_xedit.rs     XFileStorage-backed Edit tool
+    │       ├── file_xrevert.rs   XFileStorage-backed Revert tool
     │       ├── glob_tool.rs      Glob tool
-    │       └── grep_tool.rs      Grep tool (rg/grep)
+    │       └── file_xgrep.rs     XFileStorage-backed Grep tool
     │
     ├── cersei-tools-derive/      proc-macro crate
     │   └── src/lib.rs            #[derive(Tool)] implementation

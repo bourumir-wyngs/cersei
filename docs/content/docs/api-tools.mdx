@@ -147,16 +147,19 @@ Examples:
 
 ### Tool Catalog
 
-**Filesystem (6 tools)**
+**Filesystem (9 tools)**
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
-| `FileReadTool` | ReadOnly | Read files with optional line offset/limit. Returns `cat -n` format. |
-| `FileWriteTool` | Write | Create or overwrite files. Creates parent directories automatically. |
-| `FileEditTool` | Write | String replacement edits. Requires unique match in the file. |
+| `XReadTool` | ReadOnly | Read the latest XFileStorage-backed file revision, optionally by tag range. |
+| `XWriteTool` | Write | Replace a file through XFileStorage, assign fresh line tags, and flush to disk. |
+| `XEditTool` | Write | Apply tag-addressed line edits to the latest XFileStorage revision. |
+| `XRevertTool` | None | Restore the previous XFileStorage revision for a tracked file. |
 | `GlobTool` | ReadOnly | Pattern matching across directories. Returns matching paths sorted by mtime. |
-| `GrepTool` | ReadOnly | Regex search using `rg` (ripgrep) with fallback to system `grep`. |
+| `XGrepTool` | ReadOnly | Regex search over XFileStorage-backed file content, returning stable line tags. |
+| `ListDirectoryTool` | ReadOnly | List directory contents with metadata, optionally recursively. |
 | `NotebookEditTool` | Write | Edit Jupyter notebook cells by index. |
+| `FileHistoryTool` | Write | Inspect retained XFileStorage revisions, diffs, and restores for tracked files. |
 
 **Shell (2 tools)**
 

@@ -9,14 +9,12 @@ pub mod cargo_tool;
 pub mod cas;
 pub mod config_tool;
 pub mod cron;
-pub mod file_edit;
 pub mod file_history;
 pub mod file_history_tool;
-pub mod file_read;
-pub mod file_write;
 pub mod file_xedit;
 pub mod file_xgrep;
 pub mod file_xread;
+pub mod file_xrevert;
 pub mod file_xwrite;
 pub mod git_tool;
 pub mod git_utils;
@@ -411,7 +409,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xread::XReadTool),
         Box::new(file_xwrite::XWriteTool),
         Box::new(file_xedit::XEditTool),
-        Box::new(file_edit::RevertTool),
+        Box::new(file_xrevert::XRevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(file_xgrep::XGrepTool),
         Box::new(list_directory::ListDirectoryTool),
@@ -428,7 +426,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xread::XReadTool),
         Box::new(file_xwrite::XWriteTool),
         Box::new(file_xedit::XEditTool),
-        Box::new(file_edit::RevertTool),
+        Box::new(file_xrevert::XRevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(file_xgrep::XGrepTool),
         Box::new(list_directory::ListDirectoryTool),
