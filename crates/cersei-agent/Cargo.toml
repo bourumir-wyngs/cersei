@@ -27,3 +27,4 @@ parking_lot = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 tempfile = { workspace = true }
+dirs = { workspace = true }

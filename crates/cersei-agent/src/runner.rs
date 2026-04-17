@@ -11,6 +11,8 @@ use cersei_tools::xfile_storage::{
 };
 use cersei_tools::{ToolContext, ToolResult};
 use cersei_types::*;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -23,6 +25,37 @@ fn log_turn_handoff_to_human(reason: &str, summary_missing: bool, summary_prompt
         "[agent handoff] time={timestamp} reason={reason} summary_missing={summary_missing} summary_prompt_sent={summary_prompt_sent}"
     );
 }
+fn append_tool_usage_log(tool_id: &str, tool_name: &str, tool_input: &serde_json::Value) {
+    let Some(home_dir) = dirs::home_dir() else {
+        return;
+    };
+    let log_dir = home_dir.join(".abstract");
+    let log_path = log_dir.join("tools.log");
+
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+
+    let entry = serde_json::json!({
+        "timestamp": chrono::Local::now().to_rfc3339(),
+        "tool_id": tool_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    });
+
+    let Ok(serialized) = serde_json::to_string(&entry) else {
+        return;
+    };
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = writeln!(file, "{serialized}");
+    }
+}
+
 
 fn assistant_message_has_progress_summary(message: &Message) -> bool {
     let text = message.get_all_text();
@@ -523,6 +556,7 @@ pub async fn run_agent_streaming(
                         input: tool_input.clone(),
                     });
 
+                    append_tool_usage_log(&tool_id, &tool_name, &tool_input);
                     let start = Instant::now();
 
                     // Find the tool

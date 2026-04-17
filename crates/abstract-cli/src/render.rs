@@ -469,14 +469,8 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
         .unwrap_or("");
     let start_tag = input.get("start_tag").and_then(|v| v.as_str());
     let end_tag = input.get("end_tag").and_then(|v| v.as_str());
-    let before = input
-        .get("before")
-        .and_then(|v| v.as_u64())
-        .filter(|v| *v > 0);
-    let after = input
-        .get("after")
-        .and_then(|v| v.as_u64())
-        .filter(|v| *v > 0);
+    let before = input.get("before").and_then(|v| v.as_u64()).unwrap_or(0);
+    let after = input.get("after").and_then(|v| v.as_u64()).unwrap_or(0);
     let length = input.get("length").and_then(|v| v.as_u64());
     let search = input
         .get("search")
@@ -484,22 +478,16 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty());
 
-    let mut summary = match start_tag {
-        Some(start_tag) => match end_tag {
-            Some(end_tag) => format!("{file_path} {start_tag}..{end_tag}"),
-            None => format!("{file_path} from {start_tag}"),
-        },
-        None => file_path.to_string(),
+    let tag_summary = match (start_tag, end_tag) {
+        (Some(start_tag), Some(end_tag)) => format!("{start_tag}-{end_tag}"),
+        (Some(start_tag), None) => format!("{start_tag}-Tag"),
+        (None, _) => "None-Tag".to_string(),
     };
+
+    let mut summary = format!("{file_path} {tag_summary} before={before} after={after}");
 
     if let Some(search) = search {
         summary.push_str(&format!(" search /{}/", truncate(search, 40)));
-    }
-    if let Some(before) = before {
-        summary.push_str(&format!(" before {before}"));
-    }
-    if let Some(after) = after {
-        summary.push_str(&format!(" after {after}"));
     }
     if let Some(length) = length {
         summary.push_str(&format!(" len {length}"));
@@ -577,7 +565,7 @@ mod tests {
     #[test]
     fn read_summary_defaults_to_file_path() {
         let summary = tool_input_summary("Read", &serde_json::json!({"file_path": "src/main.rs"}));
-        assert_eq!(summary, "src/main.rs");
+        assert_eq!(summary, "src/main.rs None-Tag before=0 after=0");
     }
 
     #[test]
@@ -592,7 +580,7 @@ mod tests {
                 "after": 3
             }),
         );
-        assert_eq!(summary, "src/main.rs tag:10..tag:25 before 2 after 3");
+        assert_eq!(summary, "src/main.rs tag:10-tag:25 before=2 after=3");
     }
 
     #[test]
@@ -605,7 +593,7 @@ mod tests {
                 "length": 25
             }),
         );
-        assert_eq!(summary, "src/main.rs from tag:4 len 25");
+        assert_eq!(summary, "src/main.rs tag:4-Tag before=0 after=0 len 25");
     }
 
     #[test]
@@ -622,7 +610,7 @@ mod tests {
         );
         assert_eq!(
             summary,
-            "src/main.rs search /foo.*bar/ before 1 after 2 len 10"
+            "src/main.rs None-Tag before=1 after=2 search /foo.*bar/ len 10"
         );
     }
 
@@ -637,9 +625,8 @@ mod tests {
                 "length": 25
             }),
         );
-        assert_eq!(summary, "src/main.rs from tag:4 search /todo/ len 25");
+        assert_eq!(summary, "src/main.rs tag:4-Tag before=0 after=0 search /todo/ len 25");
     }
-
     #[test]
     fn write_summary_includes_char_count() {
         let summary = tool_input_summary(
