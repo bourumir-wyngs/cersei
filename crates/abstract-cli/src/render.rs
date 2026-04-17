@@ -481,7 +481,8 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
     let tag_summary = match (start_tag, end_tag) {
         (Some(start_tag), Some(end_tag)) => format!("{start_tag}-{end_tag}"),
         (Some(start_tag), None) => format!("{start_tag}-Tag"),
-        (None, _) => "None-Tag".to_string(),
+        (None, Some(end_tag)) => format!("BOF-{end_tag}"),
+        (None, None) => "BOF-Tag".to_string(),
     };
 
     let mut summary = format!("{file_path} {tag_summary} before={before} after={after}");
@@ -565,7 +566,7 @@ mod tests {
     #[test]
     fn read_summary_defaults_to_file_path() {
         let summary = tool_input_summary("Read", &serde_json::json!({"file_path": "src/main.rs"}));
-        assert_eq!(summary, "src/main.rs None-Tag before=0 after=0");
+        assert_eq!(summary, "src/main.rs BOF-Tag before=0 after=0");
     }
 
     #[test]
@@ -610,7 +611,7 @@ mod tests {
         );
         assert_eq!(
             summary,
-            "src/main.rs None-Tag before=1 after=2 search /foo.*bar/ len 10"
+            "src/main.rs BOF-Tag before=1 after=2 search /foo.*bar/ len 10"
         );
     }
 
@@ -625,7 +626,10 @@ mod tests {
                 "length": 25
             }),
         );
-        assert_eq!(summary, "src/main.rs tag:4-Tag before=0 after=0 search /todo/ len 25");
+        assert_eq!(
+            summary,
+            "src/main.rs tag:4-Tag before=0 after=0 search /todo/ len 25"
+        );
     }
     #[test]
     fn write_summary_includes_char_count() {
