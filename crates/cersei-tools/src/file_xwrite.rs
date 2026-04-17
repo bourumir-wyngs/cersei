@@ -1,7 +1,9 @@
 //! Write tool: session-scoped tagged writes backed by XFileStorage.
 
 use super::*;
-use crate::xfile_storage::{record_disk_state, resolve_xfile_path, store_written_text};
+use crate::xfile_storage::{
+    ensure_loaded, record_disk_state, resolve_xfile_path, store_written_text, sync_if_disk_changed,
+};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -34,7 +36,7 @@ impl Tool for XWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write a full file through session-scoped XFileStorage. Write replaces the file content, assigns fresh unique tags to every stored line, pushes a new XFileStorage revision, and flushes the rendered file to disk. Non-empty files are normalized to end with a trailing newline. Metadata includes `current_version`, `revision_count`, and `line_count`."
+        "Write a full file through session-scoped XFileStorage. If the target file already exists, Write first loads the current disk contents into XFileStorage so the overwrite remains recoverable. It then replaces the file content, assigns fresh unique tags to every stored line, pushes a new XFileStorage revision, and flushes the rendered file to disk. Non-empty files are normalized to end with a trailing newline. Metadata includes `current_version`, `revision_count`, and `line_count`."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -74,6 +76,9 @@ impl Tool for XWriteTool {
 
         let path = resolve_xfile_path(ctx, &req.file_path);
         if let Err(err) = prepare_parent_dirs(&path, req.create_parents.unwrap_or(true)).await {
+            return ToolResult::error(err);
+        }
+        if let Err(err) = track_existing_file_before_write(&ctx.session_id, &path).await {
             return ToolResult::error(err);
         }
 
@@ -121,11 +126,26 @@ async fn prepare_parent_dirs(path: &Path, create_parents: bool) -> std::result::
     Ok(())
 }
 
+async fn track_existing_file_before_write(
+    session_id: &str,
+    path: &Path,
+) -> std::result::Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    ensure_loaded(session_id, path).await?;
+    sync_if_disk_changed(session_id, path).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::permissions::AllowAll;
-    use crate::xfile_storage::{clear_session_xfile_storage, try_get_head};
+    use crate::xfile_storage::{
+        clear_session_xfile_storage, list_revisions, render_file, try_get_head,
+    };
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -197,6 +217,73 @@ mod tests {
         let head = try_get_head(&session_id, &path).unwrap();
         assert_eq!(head.revision_count, 2);
         assert_eq!(head.rendered_content, disk);
+    }
+
+    #[tokio::test]
+    async fn xwrite_tracks_existing_file_before_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xwrite-test-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+        let path = tmp.path().join("file.txt");
+        tokio::fs::write(&path, "original\n").await.unwrap();
+        let tool = XWriteTool;
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "content": "updated\n"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+
+        let revisions = list_revisions(&session_id, &path).unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(render_file(&revisions[0].file), "original\n");
+        assert_eq!(render_file(&revisions[1].file), "updated\n");
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "updated\n");
+    }
+
+    #[tokio::test]
+    async fn xwrite_syncs_external_disk_change_before_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xwrite-test-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+        let path = tmp.path().join("file.txt");
+        let tool = XWriteTool;
+
+        let first = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "content": "first\n"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+        assert!(!first.is_error, "{}", first.content);
+
+        tokio::fs::write(&path, "external\n").await.unwrap();
+
+        let second = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "content": "final\n"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+        assert!(!second.is_error, "{}", second.content);
+
+        let revisions = list_revisions(&session_id, &path).unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(render_file(&revisions[0].file), "first\n");
+        assert_eq!(render_file(&revisions[1].file), "external\n");
+        assert_eq!(render_file(&revisions[2].file), "final\n");
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "final\n");
     }
 
     #[tokio::test]
