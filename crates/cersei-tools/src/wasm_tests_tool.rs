@@ -4,6 +4,7 @@ use super::*;
 use crate::network_policy::{
     firejailed_shell_command_with_extra_firejail_args, NetworkAccess, NetworkDecision,
 };
+use crate::permissions::{PermissionDecision, PermissionRequest};
 use crate::shell_sandbox::{
     home_entries_and_workspace_firejail_args, read_only_workspace_firejail_args,
     resolve_directory_in_workspace,
@@ -16,7 +17,6 @@ use toml_edit::{DocumentMut, Item};
 
 pub struct WasmTestsTool;
 
-const CONFIGURE_PROMPT: &str = "Configure this project to run wasm32-wasip1 tests?";
 const RUN_PROMPT: &str = "Run wasm_tests (no fs after building and no network, fully sandboxed). Separate run in two parts: build the test binary (sandbox restrictions like for Cargo tool) and run the test binary (combine wasm32-wasip1 runner with firejail to suppress all network and all filesystem except the binary itself)";
 
 #[derive(Debug, Deserialize)]
@@ -59,24 +59,63 @@ fn wasm_test_config_path(project_root: &Path) -> PathBuf {
     project_root.join(".cargo/config.toml")
 }
 
-fn approval_result(prompt: &str, metadata_kind: &str, project_root: &Path) -> ToolResult {
-    ToolResult::success(prompt).with_metadata(serde_json::json!({
-        "approval": "required",
-        "kind": metadata_kind,
-        "project_root": project_root,
-        "prompt": prompt,
-    }))
+fn configure_project(project_root: &Path) -> std::result::Result<PathBuf, String> {
+    let cargo_dir = project_root.join(".cargo");
+    fs::create_dir_all(&cargo_dir)
+        .map_err(|e| format!("Failed to create '{}': {}", cargo_dir.display(), e))?;
+    let config_path = cargo_dir.join("config.toml");
+    let existing = fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = existing.parse::<DocumentMut>().unwrap_or_default();
+    doc["target"]["wasm32-wasip1"]["runner"] = toml_edit::value("wasm_tests");
+    fs::write(&config_path, doc.to_string())
+        .map_err(|e| format!("Failed to write '{}': {}", config_path.display(), e))?;
+    Ok(config_path)
 }
 
 fn shell_single_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\"'\"'"))
 }
 
+async fn ensure_configure_permission(
+    project_root: &Path,
+    ctx: &ToolContext,
+) -> std::result::Result<(), ToolResult> {
+    let config_path = wasm_test_config_path(project_root);
+    let command = format!(
+        "configure wasm32-wasip1 runner in {}",
+        config_path.display()
+    );
+    let request = PermissionRequest {
+        tool_name: "wasm_tests".into(),
+        tool_input: serde_json::json!({
+            "command": command,
+            "project_root": project_root.display().to_string(),
+            "config_path": config_path.display().to_string(),
+        }),
+        permission_level: PermissionLevel::Write,
+        description: format!("Configure wasm_tests runner at {}", config_path.display()),
+        id: format!("wasm-tests-configure-{}", uuid::Uuid::new_v4()),
+        working_dir: ctx.working_dir.clone(),
+    };
+
+    match ctx.permissions.check(&request).await {
+        PermissionDecision::Allow
+        | PermissionDecision::AllowOnce
+        | PermissionDecision::AllowForSession => Ok(()),
+        PermissionDecision::Deny(reason) => {
+            Err(ToolResult::error(format!("Permission denied: {}", reason)))
+        }
+    }
+}
+
 fn resolve_artifact_path(
     project_root: &Path,
     artifact: Option<&str>,
 ) -> std::result::Result<Option<PathBuf>, ToolResult> {
-    let Some(artifact) = artifact.map(str::trim).filter(|artifact| !artifact.is_empty()) else {
+    let Some(artifact) = artifact
+        .map(str::trim)
+        .filter(|artifact| !artifact.is_empty())
+    else {
         return Ok(None);
     };
 
@@ -152,11 +191,8 @@ async fn execute_shell_command(
     firejail_args: &[std::ffi::OsString],
     timeout_ms: u64,
 ) -> ToolResult {
-    let mut cmd = firejailed_shell_command_with_extra_firejail_args(
-        command,
-        network_access,
-        firejail_args,
-    );
+    let mut cmd =
+        firejailed_shell_command_with_extra_firejail_args(command, network_access, firejail_args);
     cmd.current_dir(current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -273,16 +309,19 @@ impl Tool for WasmTestsTool {
             return ToolResult::error(err);
         }
 
+        let mut config_note = None;
         if !project_has_wasm_test_config(&project_root) {
-            return approval_result(CONFIGURE_PROMPT, "configure", &project_root).with_metadata(
-                serde_json::json!({
-                    "approval": "required",
-                    "kind": "configure",
-                    "project_root": project_root,
-                    "config_path": wasm_test_config_path(&project_root),
-                    "prompt": CONFIGURE_PROMPT,
-                }),
-            );
+            if let Err(err) = ensure_configure_permission(&project_root, ctx).await {
+                return err;
+            }
+            let config_path = match configure_project(&project_root) {
+                Ok(path) => path,
+                Err(err) => return ToolResult::error(err),
+            };
+            config_note = Some(format!(
+                "Configured wasm32-wasip1 runner at {}",
+                config_path.display()
+            ));
         }
 
         if let Some(ref policy) = ctx.network_policy {
@@ -301,10 +340,11 @@ impl Tool for WasmTestsTool {
         let args = input.args.unwrap_or_default();
         let test_name = input.test_name.as_deref();
 
-        let explicit_artifact = match resolve_artifact_path(&project_root, input.artifact.as_deref()) {
-            Ok(path) => path,
-            Err(err) => return err,
-        };
+        let explicit_artifact =
+            match resolve_artifact_path(&project_root, input.artifact.as_deref()) {
+                Ok(path) => path,
+                Err(err) => return err,
+            };
 
         let build_output = if let Some(artifact) = explicit_artifact.as_ref() {
             ToolResult::success(format!(
@@ -374,7 +414,8 @@ impl Tool for WasmTestsTool {
         };
         let artifact_relative_owned = artifact_relative.to_string_lossy().to_string();
         let writable_entries = vec![artifact_relative_owned.as_str()];
-        let run_firejail_args = read_only_workspace_firejail_args(&workspace_root, &writable_entries);
+        let run_firejail_args =
+            read_only_workspace_firejail_args(&workspace_root, &writable_entries);
         let run_command = run_command(&artifact_path, test_name, &args);
         let run_output = execute_shell_command(
             &run_command,
@@ -392,6 +433,11 @@ impl Tool for WasmTestsTool {
         let build_text = build_output.content.trim();
         let run_text = run_output.content.trim();
         let mut content = String::new();
+        if let Some(note) = config_note.as_deref() {
+            content.push_str("Configuration:\n");
+            content.push_str(note);
+            content.push_str("\n\n");
+        }
         content.push_str("Build:\n");
         content.push_str(if build_text.is_empty() {
             "(build completed with no output)"
@@ -414,5 +460,115 @@ impl Tool for WasmTestsTool {
                 "run_filesystem": "workspace read-only with artifact writable"
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permissions::PermissionPolicy;
+    use parking_lot::Mutex;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct RecordingPermissionPolicy {
+        decision: Mutex<PermissionDecision>,
+        requests: Mutex<Vec<PermissionRequest>>,
+    }
+
+    impl RecordingPermissionPolicy {
+        fn new(decision: PermissionDecision) -> Self {
+            Self {
+                decision: Mutex::new(decision),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().len()
+        }
+
+        fn requests(&self) -> Vec<PermissionRequest> {
+            self.requests.lock().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PermissionPolicy for RecordingPermissionPolicy {
+        async fn check(&self, request: &PermissionRequest) -> PermissionDecision {
+            self.requests.lock().push(request.clone());
+            self.decision.lock().clone()
+        }
+    }
+
+    fn test_ctx(root: &Path, policy: Arc<dyn PermissionPolicy>) -> ToolContext {
+        ToolContext {
+            working_dir: root.to_path_buf(),
+            session_id: format!("wasm-tests-{}", uuid::Uuid::new_v4()),
+            permissions: policy,
+            ..ToolContext::default()
+        }
+    }
+
+    fn init_project(root: &Path) {
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"wasm-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn meaning() -> u32 { 42 }\n").unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_config_asks_operator_permission_before_writing() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_project(workspace.path());
+        let policy = Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Deny(
+            "User denied".into(),
+        )));
+        let ctx = test_ctx(workspace.path(), policy.clone());
+        let tool = WasmTestsTool;
+
+        let result = tool
+            .execute(json!({ "artifact": "missing.wasm" }), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "Permission denied: User denied");
+        assert!(result.metadata.is_none());
+        assert_eq!(policy.request_count(), 1);
+
+        let requests = policy.requests();
+        assert_eq!(requests[0].tool_name, "wasm_tests");
+        assert_eq!(requests[0].permission_level, PermissionLevel::Write);
+        assert!(requests[0]
+            .description
+            .contains("Configure wasm_tests runner"));
+        assert!(!wasm_test_config_path(workspace.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn allowed_config_write_updates_workspace_before_continuing() {
+        let workspace = tempfile::tempdir().unwrap();
+        init_project(workspace.path());
+        let policy = Arc::new(RecordingPermissionPolicy::new(PermissionDecision::Allow));
+        let ctx = test_ctx(workspace.path(), policy.clone());
+        let tool = WasmTestsTool;
+
+        let result = tool
+            .execute(json!({ "artifact": "missing.wasm" }), &ctx)
+            .await;
+
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .contains("Artifact 'missing.wasm' does not exist"));
+        assert_eq!(policy.request_count(), 1);
+
+        let config_path = wasm_test_config_path(workspace.path());
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        assert!(config.contains("wasm32-wasip1"));
+        assert!(config.contains("runner = \"wasm_tests\""));
     }
 }
