@@ -17,7 +17,19 @@ pub fn portable_home_dir() -> Option<PathBuf> {
 }
 
 fn whitelist_arg(path: &Path) -> OsString {
-    let mut arg = OsString::from("--whitelist=");
+    prefixed_path_arg("--whitelist=", path)
+}
+
+fn read_only_arg(path: &Path) -> OsString {
+    prefixed_path_arg("--read-only=", path)
+}
+
+fn read_write_arg(path: &Path) -> OsString {
+    prefixed_path_arg("--read-write=", path)
+}
+
+fn prefixed_path_arg(prefix: &str, path: &Path) -> OsString {
+    let mut arg = OsString::from(prefix);
     arg.push(path);
     arg
 }
@@ -48,6 +60,19 @@ pub fn home_entries_and_workspace_firejail_args(
         portable_home_dir().as_deref(),
         home_entries,
     )
+}
+
+pub fn read_only_workspace_firejail_args(
+    workspace_root: &Path,
+    writable_entries: &[&str],
+) -> Vec<OsString> {
+    let mut args = Vec::with_capacity(writable_entries.len() + 2);
+    args.push(whitelist_arg(workspace_root));
+    args.push(read_only_arg(workspace_root));
+    for entry in writable_entries {
+        args.push(read_write_arg(&workspace_root.join(entry)));
+    }
+    args
 }
 
 pub fn resolve_directory_in_workspace(
@@ -95,7 +120,8 @@ pub fn resolve_directory_in_workspace(
 #[cfg(test)]
 mod tests {
     use super::{
-        home_entries_and_workspace_firejail_args_from_home, resolve_directory_in_workspace,
+        home_entries_and_workspace_firejail_args_from_home, read_only_workspace_firejail_args,
+        resolve_directory_in_workspace,
     };
     use tempfile::tempdir;
 
@@ -138,5 +164,33 @@ mod tests {
         let err = resolve_directory_in_workspace(outside.path(), None, workspace.path(), "cargo")
             .unwrap_err();
         assert!(err.contains("outside the allowed root"));
+    }
+
+    #[test]
+    fn read_only_workspace_args_allow_only_cache_writes() {
+        let workspace = tempdir().unwrap();
+        let args = read_only_workspace_firejail_args(workspace.path(), &[".pytest_cache"]);
+
+        let rendered: Vec<String> = args
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(rendered.len(), 3);
+        assert_eq!(
+            rendered[0],
+            format!("--whitelist={}", workspace.path().display())
+        );
+        assert_eq!(
+            rendered[1],
+            format!("--read-only={}", workspace.path().display())
+        );
+        assert_eq!(
+            rendered[2],
+            format!(
+                "--read-write={}",
+                workspace.path().join(".pytest_cache").display()
+            )
+        );
     }
 }

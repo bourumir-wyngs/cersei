@@ -31,6 +31,7 @@ pub mod plan_mode;
 pub mod postgres_tool;
 pub mod powershell;
 pub mod process_tool;
+pub mod pytest_tool;
 pub mod remote_trigger;
 pub mod send_message;
 mod shell_sandbox;
@@ -448,12 +449,13 @@ pub fn shell() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Package manager tools: Npm, Cargo.
+/// Package manager and test runner tools: Npm, Npx, Cargo, Pytest.
 pub fn package_managers() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(npm_tool::NpmTool),
         Box::new(npx_tool::NpxTool),
         Box::new(cargo_tool::CargoTool),
+        Box::new(pytest_tool::PytestTool),
     ]
 }
 

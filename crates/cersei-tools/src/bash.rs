@@ -21,6 +21,7 @@ fn tool_override_for_command(command: &str) -> Option<(&str, &'static str)> {
         "npm" | "yarn" | "pnpm" => Some("Npm"),
         "npx" => Some("Npx"),
         "cargo" => Some("Cargo"),
+        "pytest" => Some("Pytest"),
         "git" => Some("Git"),
         "mysql" => Some("MySql"),
         "psql" => Some("PostgreSql"),
@@ -229,6 +230,16 @@ mod tests {
         let result = tool.preflight(&json!({"command": "echo hello"}), &ToolContext::default());
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn preflight_rejects_pytest_before_execution() {
+        let tool = BashTool;
+        let result = tool.preflight(&json!({"command": "pytest -q"}), &ToolContext::default());
+
+        let result = result.expect("expected preflight rejection");
+        assert!(result.is_error);
+        assert!(result.content.contains("use Pytest"));
     }
 
     #[test]
