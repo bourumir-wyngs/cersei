@@ -12,6 +12,9 @@ fn tool_override_for_command(command: &str) -> Option<(&str, &'static str)> {
     let cmd_trim = command.trim();
     let cmd_base_full = cmd_trim.split_whitespace().next().unwrap_or("");
     let cmd_base = cmd_base_full.rsplit('/').next().unwrap_or(cmd_base_full);
+    if crate::web_tests_tool::is_supported_web_test_command(cmd_trim) {
+        return Some((cmd_base, "web_tests"));
+    }
     let tool_name = match cmd_base {
         "ls" | "tree" | "exa" | "lsd" => Some("ListDirectory"),
         "grep" | "rg" | "ag" => Some("Grep"),
@@ -240,6 +243,19 @@ mod tests {
         let result = result.expect("expected preflight rejection");
         assert!(result.is_error);
         assert!(result.content.contains("use Pytest"));
+    }
+
+    #[test]
+    fn preflight_rejects_web_tests_commands_before_execution() {
+        let tool = BashTool;
+        let result = tool.preflight(
+            &json!({"command": "npm run test:web"}),
+            &ToolContext::default(),
+        );
+
+        let result = result.expect("expected preflight rejection");
+        assert!(result.is_error);
+        assert!(result.content.contains("use web_tests"));
     }
 
     #[test]

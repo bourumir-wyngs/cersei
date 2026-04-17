@@ -38,6 +38,7 @@ pub struct CliPermissionPolicy {
 enum SessionPermissionScope {
     WriteWorkspace,
     Pytest,
+    WebTests,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -169,6 +170,7 @@ impl CliPermissionPolicy {
         match (request.permission_level, request.tool_name.as_str()) {
             (PermissionLevel::Write, _) => Some(SessionPermissionScope::WriteWorkspace),
             (PermissionLevel::Execute, "Pytest") => Some(SessionPermissionScope::Pytest),
+            (PermissionLevel::Execute, "web_tests") => Some(SessionPermissionScope::WebTests),
             _ => None,
         }
     }
@@ -342,6 +344,7 @@ impl SessionPermissionScope {
         match self {
             Self::WriteWorkspace => "Write workspace",
             Self::Pytest => "Pytest",
+            Self::WebTests => "Web tests",
         }
     }
 
@@ -351,6 +354,9 @@ impl SessionPermissionScope {
                 "Granting this allows all Write-risk tools for the rest of this session."
             }
             Self::Pytest => "Granting this allows all Pytest runs for the rest of this session.",
+            Self::WebTests => {
+                "Granting this allows all web_tests runs for the rest of this session."
+            }
         }
     }
 
@@ -358,24 +364,29 @@ impl SessionPermissionScope {
         match self {
             Self::WriteWorkspace => "User denied write workspace (session)",
             Self::Pytest => "User denied pytest (session)",
+            Self::WebTests => "User denied web_tests (session)",
         }
     }
 }
 
 fn permission_prompt_choices(scope: Option<SessionPermissionScope>) -> &'static str {
     match scope {
-        Some(SessionPermissionScope::WriteWorkspace | SessionPermissionScope::Pytest) => {
-            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
-        }
+        Some(
+            SessionPermissionScope::WriteWorkspace
+            | SessionPermissionScope::Pytest
+            | SessionPermissionScope::WebTests,
+        ) => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister ",
         None => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister ",
     }
 }
 
 fn valid_permission_chars(scope: Option<SessionPermissionScope>) -> &'static str {
     match scope {
-        Some(SessionPermissionScope::WriteWorkspace | SessionPermissionScope::Pytest) => {
-            "yYnNeErRxX"
-        }
+        Some(
+            SessionPermissionScope::WriteWorkspace
+            | SessionPermissionScope::Pytest
+            | SessionPermissionScope::WebTests,
+        ) => "yYnNeErRxX",
         None => "yYnNeErRsExX",
     }
 }
@@ -469,7 +480,15 @@ fn path_within(path: &Path, root: &Path) -> bool {
 fn permission_preview(request: &PermissionRequest, command_line: &str) -> Option<String> {
     let direct_command = matches!(
         request.tool_name.as_str(),
-        "Bash" | "bash" | "Process" | "PowerShell" | "Cargo" | "Npm" | "Npx" | "Pytest"
+        "Bash"
+            | "bash"
+            | "Process"
+            | "PowerShell"
+            | "Cargo"
+            | "Npm"
+            | "Npx"
+            | "Pytest"
+            | "web_tests"
     );
 
     if direct_command {
@@ -636,6 +655,13 @@ mod tests {
         assert_eq!(
             command_line_from_request(&make_request("Pytest", json!({}))),
             "pytest"
+        );
+        assert_eq!(
+            command_line_from_request(&make_request(
+                "web_tests",
+                json!({ "command": "npm run test:web" })
+            )),
+            "npm run test:web"
         );
     }
 
@@ -933,6 +959,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn web_tests_requests_use_web_tests_session_scope() {
+        let request = make_request_with_level(
+            "web_tests",
+            json!({ "command": "npm run test:web" }),
+            PermissionLevel::Execute,
+        );
+
+        assert_eq!(
+            CliPermissionPolicy::session_scope_for_request(&request),
+            Some(SessionPermissionScope::WebTests)
+        );
+        assert_eq!(
+            CliPermissionPolicy::session_scope_for_request(&request)
+                .map(SessionPermissionScope::label),
+            Some("Web tests")
+        );
+        assert_eq!(
+            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
+            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
+        );
+    }
+
     #[tokio::test]
     async fn session_write_scope_allows_other_write_tools() {
         let policy = CliPermissionPolicy::new(&Theme::dark());
@@ -981,6 +1030,32 @@ mod tests {
         ));
         assert!(matches!(
             policy.check(&integration_request).await,
+            PermissionDecision::Allow
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_web_tests_scope_allows_other_web_tests_commands() {
+        let policy = CliPermissionPolicy::new(&Theme::dark());
+        policy.allow_scope_for_session(SessionPermissionScope::WebTests);
+
+        let test_request = make_request_with_level(
+            "web_tests",
+            json!({ "command": "npm run test:frontend" }),
+            PermissionLevel::Execute,
+        );
+        let lint_request = make_request_with_level(
+            "web_tests",
+            json!({ "command": "npx --yes eslint src/app.tsx" }),
+            PermissionLevel::Execute,
+        );
+
+        assert!(matches!(
+            policy.check(&test_request).await,
+            PermissionDecision::Allow
+        ));
+        assert!(matches!(
+            policy.check(&lint_request).await,
             PermissionDecision::Allow
         ));
     }

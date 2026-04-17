@@ -45,6 +45,7 @@ pub mod todo_write;
 pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
+pub mod web_tests_tool;
 pub mod worktree;
 pub mod xfile_storage;
 pub mod xfile_sync;
@@ -128,6 +129,7 @@ pub enum PermissionLevel {
 pub enum ToolCategory {
     FileSystem,
     Shell,
+    Testing,
     Web,
     Memory,
     Orchestration,
@@ -371,6 +373,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     tools.extend(default_filesystem());
     tools.extend(shell());
     tools.extend(package_managers());
+    tools.extend(testing());
     tools.extend(web());
     tools.extend(data());
     tools.extend(vcs());
@@ -392,6 +395,7 @@ pub fn coding() -> Vec<Box<dyn Tool>> {
     tools.extend(default_filesystem());
     tools.extend(shell());
     tools.extend(package_managers());
+    tools.extend(testing());
     tools.extend(web());
     tools.extend(data());
     tools.extend(vcs());
@@ -449,13 +453,20 @@ pub fn shell() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Package manager and test runner tools: Npm, Npx, Cargo, Pytest.
+/// Package manager tools: Npm, Npx, Cargo.
 pub fn package_managers() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(npm_tool::NpmTool),
         Box::new(npx_tool::NpxTool),
         Box::new(cargo_tool::CargoTool),
+    ]
+}
+
+/// Testing tools: Pytest, web_tests.
+pub fn testing() -> Vec<Box<dyn Tool>> {
+    vec![
         Box::new(pytest_tool::PytestTool),
+        Box::new(web_tests_tool::WebTestsTool),
     ]
 }
 

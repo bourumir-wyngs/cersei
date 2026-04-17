@@ -57,6 +57,12 @@ impl Tool for NpxTool {
         })
     }
 
+    fn preflight(&self, input: &Value, _ctx: &ToolContext) -> Option<ToolResult> {
+        let args = input.get("args")?.as_str()?;
+        let command = format!("npx --yes {}", args);
+        crate::web_tests_tool::redirect_to_web_tests_error("Npx", &command).map(ToolResult::error)
+    }
+
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
         struct Input {
@@ -143,5 +149,24 @@ impl Tool for NpxTool {
             Ok(Err(e)) => ToolResult::error(format!("Failed to execute npx: {}", e)),
             Err(_) => ToolResult::error(format!("npx timed out after {}ms", timeout_ms)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn preflight_rejects_web_test_commands() {
+        let tool = NpxTool;
+        let result = tool.preflight(
+            &json!({"args": "playwright test smoke.spec.ts"}),
+            &ToolContext::default(),
+        );
+
+        let result = result.expect("expected preflight rejection");
+        assert!(result.is_error);
+        assert!(result.content.contains("use web_tests"));
     }
 }

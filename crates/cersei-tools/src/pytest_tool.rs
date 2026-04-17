@@ -89,7 +89,7 @@ impl Tool for PytestTool {
     }
 
     fn category(&self) -> ToolCategory {
-        ToolCategory::Shell
+        ToolCategory::Testing
     }
 
     fn input_schema(&self) -> Value {
@@ -256,6 +256,12 @@ mod tests {
                 expected.display()
             )
         );
+    }
+
+    #[test]
+    fn pytest_tool_uses_testing_category() {
+        let tool = PytestTool;
+        assert_eq!(tool.category(), ToolCategory::Testing);
     }
 
     #[test]
