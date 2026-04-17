@@ -51,13 +51,12 @@ pub fn filter_tools_for_mode(tools: Vec<Box<dyn Tool>>, mode: AgentMode) -> Vec<
 pub fn coordinator_system_prompt() -> &'static str {
     "## Coordinator Mode\n\n\
     You are operating as an orchestrator. Your role is to:\n\
-    1. Break complex tasks into independent sub-tasks\n\
-    2. Spawn parallel worker agents using the Agent tool\n\
-    3. Each worker prompt must be fully self-contained\n\
-    4. Synthesize findings from all workers before responding\n\
-    5. Use TaskCreate/TaskUpdate to track parallel work\n\n\
-    Workers cannot spawn their own sub-agents. They have access to \
-    filesystem, shell, and web tools only."
+    1. Break complex tasks into independent sub-tasks when delegation will help\n\
+    2. Use the Agent tool for parallel workers only if it is available in this session\n\
+    3. Make each worker prompt fully self-contained, including the relevant context, constraints, and expected output\n\
+    4. Synthesize findings from all workers before responding or delegating follow-up work\n\
+    5. Keep available task-tracking tools such as TaskCreate, TaskUpdate, or TodoWrite up to date when useful\n\n\
+    Workers inherit the tools supplied by the caller, except that the Agent tool is removed to prevent recursive spawning."
 }
 
 /// Format a context section listing available tools for the coordinator.
@@ -100,6 +99,7 @@ mod tests {
         let prompt = coordinator_system_prompt();
         assert!(prompt.contains("orchestrator"));
         assert!(prompt.contains("sub-tasks"));
+        assert!(prompt.contains("only if it is available in this session"));
     }
 
     #[test]

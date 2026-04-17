@@ -14,6 +14,7 @@ pub mod file_history_tool;
 pub mod file_xedit;
 pub mod file_xgrep;
 pub mod file_xread;
+pub mod file_xmultiread;
 pub mod file_xrevert;
 pub mod file_xwrite;
 pub mod git_tool;
@@ -414,6 +415,7 @@ pub fn data() -> Vec<Box<dyn Tool>> {
 pub fn filesystem() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(file_xread::XReadTool),
+        Box::new(file_xmultiread::XMultiReadTool),
         Box::new(file_xwrite::XWriteTool),
         Box::new(file_xedit::XEditTool),
         Box::new(file_xrevert::XRevertTool),
@@ -432,6 +434,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
 fn default_filesystem() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(file_xread::XReadTool),
+        Box::new(file_xmultiread::XMultiReadTool),
         Box::new(file_xwrite::XWriteTool),
         Box::new(file_xedit::XEditTool),
         Box::new(file_xrevert::XRevertTool),

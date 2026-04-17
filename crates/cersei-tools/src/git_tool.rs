@@ -700,17 +700,21 @@ fn cmd_diff_worktree(
         .head_id()
         .map_err(|e| format!("cannot resolve HEAD: {e}"))?
         .detach();
-
-    let head_tree_id = repo
+    let head_blobs = match repo
         .find_object(head_oid)
-        .map_err(|e| e.to_string())?
-        .peel_to_commit()
-        .map_err(|e| e.to_string())?
-        .tree_id()
-        .map_err(|e| e.to_string())?
-        .detach();
-
-    let head_blobs = tree_blobs(repo, head_tree_id)?;
+        .map_err(|e| e.to_string())
+        .and_then(|object| object.peel_to_commit().map_err(|e| e.to_string()))
+        .and_then(|commit| commit.tree_id().map_err(|e| e.to_string()))
+    {
+        Ok(tree_id) => tree_blobs(repo, tree_id.detach())?,
+        Err(err) => {
+            // Some repositories can have a resolvable HEAD reference while objects needed to peel
+            // it are unavailable locally. Keep diff_worktree best-effort instead of failing.
+            return Ok(format!(
+                "(working tree diff unavailable: cannot inspect HEAD tree: {err})"
+            ));
+        }
+    };
 
     // Build a set of HEAD paths for fast lookup in pass 1.5.
     let head_path_set: HashSet<gix::bstr::BString> =
@@ -737,11 +741,17 @@ fn cmd_diff_worktree(
 
         let disk_content =
             std::fs::read(&disk_path).map_err(|e| format!("cannot read {rel}: {e}"))?;
-        let head_content = repo
-            .find_object(*head_oid)
-            .map_err(|e| e.to_string())?
-            .data
-            .to_vec();
+        let head_content = match repo.find_object(*head_oid) {
+            Ok(object) => object.data.to_vec(),
+            Err(err) => {
+                // The worktree may momentarily reference objects unavailable in the local
+                // object database (for example in partial/shallow setups or unusual local
+                // repository states). Treat such entries as unreadable instead of failing the
+                // whole command so diff_worktree remains best-effort and non-panicking.
+                output.push_str(&format!("!  {rel}  [cannot read HEAD blob: {err}]\n"));
+                continue;
+            }
+        };
 
         if disk_content != head_content {
             if summary_only {
@@ -780,11 +790,13 @@ fn cmd_diff_worktree(
             if summary_only {
                 output.push_str(&format!("A  {rel}\n"));
             } else {
-                let blob_data = repo
-                    .find_object(entry.id)
-                    .map_err(|e| e.to_string())?
-                    .data
-                    .to_vec();
+                let blob_data = match repo.find_object(entry.id) {
+                    Ok(object) => object.data.to_vec(),
+                    Err(err) => {
+                        output.push_str(&format!("!  {rel}  [cannot read index blob: {err}]\n"));
+                        continue;
+                    }
+                };
                 let patch = unified_diff_add(&rel, &blob_data);
                 total_lines += patch.lines().count();
                 output.push_str(&patch);

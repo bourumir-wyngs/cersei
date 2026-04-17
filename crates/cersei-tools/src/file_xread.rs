@@ -25,7 +25,7 @@ enum ReadOutputLine<'a> {
     Separator,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct XReadRequest {
     pub file_path: String,
     #[serde(default)]

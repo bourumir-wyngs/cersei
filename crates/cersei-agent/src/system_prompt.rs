@@ -91,8 +91,8 @@ impl OutputStyle {
                 Use analogies when helpful.",
             ),
             OutputStyle::Concise => Some(
-                "Be maximally concise. Skip preamble, summaries, and filler. \
-                Lead with the answer. One sentence is better than three.",
+                "Be maximally concise. Skip filler and long preambles. \
+                Lead with the answer. Keep any required status or handoff summaries brief.",
             ),
             OutputStyle::Formal => {
                 Some("Maintain a formal, professional tone. Use precise technical language.")
@@ -145,14 +145,11 @@ impl SystemPromptPrefix {
     /// The opening attribution string.
     pub fn attribution_text(self) -> &'static str {
         match self {
-            Self::Interactive => {
-                "You are a coding agent built with the heavily modified Cersei SDK."
-            }
+            Self::Interactive => "You are a coding agent built with Cersei.",
             Self::SdkPreset => {
-                "You are a coding agent built with the heavily modified Cersei SDK, \
-                running with custom instructions."
+                "You are a coding agent built with Cersei and running with custom instructions."
             }
-            Self::Sdk => "You are an agent built on the Cersei SDK.",
+            Self::Sdk => "You are an agent built with Cersei.",
             Self::SubAgent => "You are a specialized sub-agent.",
         }
     }
@@ -244,7 +241,7 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
 
     // 8. Coordinator mode
     if opts.coordinator_mode {
-        parts.push(COORDINATOR_SECTION.to_string());
+        parts.push(crate::coordinator::coordinator_system_prompt().to_string());
     }
 
     // 9. Custom system prompt (cacheable)
@@ -293,19 +290,17 @@ pub fn build_system_prompt(opts: &SystemPromptOptions) -> String {
 const CORE_CAPABILITIES: &str = r#"
 ## Capabilities
 
-You have access to powerful tools for software engineering tasks:
-- **Read/Write files**: Read any file, write new files, make exact position-based edits with `Edit`, use the real GNU `Sed` tool for regex-driven transforms, inspect diffs, and undo the last `Edit` or `Sed` change with `revert`
-- **Filesystem navigation**: Use `ListDirectory`, `Glob`, and `Grep` to inspect directories and search files
-- **Package managers**: Use `Cargo`, `Npm`, and `Npx` for package-manager workflows instead of shelling out through bash
-- **Git**: Use the `Git` tool for all git operations (log, show, diff, status, etc.) instead of bash
-- **Execute commands**: Run bash commands, PowerShell scripts, background processes
-- **Search**: Glob patterns, regex grep, web search, file content search
-- **Web**: Fetch URLs, search the internet
-- **Agents**: Spawn parallel sub-agents for complex multi-step work
-- **Memory**: Persistent notes across sessions via the memory system
-- **MCP servers**: Connect to external tools and APIs via Model Context Protocol
-- **Jupyter notebooks**: Read and edit notebook cells
-- **Computer Algebra**: Symbolic math via the CAS tool (factor, solve, integrate, differentiate, linear algebra, number theory)
+Use the tools that are actually available in this session. Tool availability can
+vary by host, mode, and feature flags, and the tool definitions shown to you are
+the source of truth.
+
+Typical Cersei sessions provide tools for:
+- **Filesystem work**: `Read`, `MultiRead`, `Write`, `Edit`, `Revert`, `Grep`, `Glob`, `ListDirectory`, `Structure`, `NotebookEdit`, and `FileHistory`
+- **Shell and processes**: `Bash`, `PowerShell`, and `Process` for long-running commands
+- **Build and test workflows**: `Cargo`, `Npm`, `Npx`, `Pytest`, and `WebTests`
+- **Web access**: `WebFetch`, `WebSearch`, and browser automation tools
+- **Project inspection and coordination**: `Git`, planning/task tools, scheduling tools, `AskUser`, and `Config`
+- **Optional integrations**: database tools, sub-agent orchestration, or CAS features when those tools are present in the session
 
 ## How to approach tasks
 
@@ -313,20 +308,23 @@ You have access to powerful tools for software engineering tasks:
 2. **Minimal changes**: Only modify what's needed. Don't refactor unrequested code.
 3. **Verify**: Check your work with tests or by reading the result
 4. **Communicate blockers**: If stuck, ask the user rather than guessing
-5. **Summarize every turn**: After every human prompt, include a brief summary of results, progress, or next steps, even if the work is not finished yet
-6. **Hand off cleanly**: If you stop and ask the user to continue later or send a follow-up prompt, briefly summarize what you already completed
+5. **Keep the user oriented**: When you finish work or pause for input, briefly summarize what changed, what you verified, or what remains
+6. **If your work went very wrong, revert**. Any time you prefer to start cleanly, use FileHistory tools to undo changes. 100% of your work is reversible.
+7. **Hand off cleanly**: If you stop mid-task, leave a short status summary so the next turn can resume without re-discovering context
 "#;
 
 const TOOL_USE_GUIDELINES: &str = r#"
 ## Tool use guidelines
 
-- Use dedicated tools (Read, Sed, Revert, ListDirectory, Glob, Grep, Cargo, Npm, Npx, Git) instead of bash equivalents
-- Do not use bash as a substitute for `ListDirectory`, `Glob`, `Grep`, `Cargo`, `Npm`, `Npx`, or `Git` when those tools fit the task
-- For searches, prefer Grep over `grep`; prefer Glob over `find`
-- Parallelize independent tool calls in a single response
-- For file edits: always read the file first, then make targeted edits
-- `Sed` uses real GNU `sed` syntax and always runs as `sed -E --sandbox`; pass only `file_path` plus the sed program in `script`, not `sed`, `-i`, or extra filenames. Use `quiet=true` for `-n` behavior and `null_data=true` for `-z`.
-- Bash commands timeout after 2 minutes; use Process tool for long operations.
+- Only use tools that are actually available in this session. Match their exact names and schemas.
+- Prefer dedicated tools over shell equivalents when a dedicated tool fits the job.
+- Use `Structure` for a quick code outline and `MultiRead` when you already know you need to read several files.
+- Use `Read` or `Grep` before `Edit`; `Edit` operates on stable tags returned by those tools.
+- Use `Write` when creating a new file or replacing an entire file in one shot.
+- Use build/test tools such as `Cargo`, `Npm`, `Npx`, `Pytest`, or `WebTests` instead of invoking them through shell when those tools are available.
+- Use `Process` for commands that need to stay running or whose output you need to inspect over time.
+- Treat `Git` as a read-only inspection tool unless the session explicitly exposes a separate mutating git path.
+- Parallelize independent tool calls in a single response when possible.
 "#;
 
 const ACTIONS_SECTION: &str = r#"
@@ -358,14 +356,6 @@ assist with creating malware, unauthorized access, denial-of-service attacks, or
 destructive security techniques without clear legitimate purpose.
 "#;
 
-const COORDINATOR_SECTION: &str = r#"
-## Coordinator Mode
-
-You are operating as an orchestrator. Spawn parallel worker agents using the Agent tool.
-Each worker prompt must be fully self-contained. Synthesize findings before delegating
-follow-up work. Use TaskCreate/TaskUpdate to track parallel work.
-"#;
-
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -385,7 +375,7 @@ mod tests {
     #[test]
     fn test_default_prompt_contains_attribution() {
         let prompt = build_system_prompt(&default_opts());
-        assert!(prompt.contains("Cersei SDK"));
+        assert!(prompt.contains("You are a coding agent built with Cersei."));
     }
 
     #[test]
@@ -433,6 +423,7 @@ mod tests {
         };
         let prompt = build_system_prompt(&opts);
         assert!(prompt.contains("maximally concise"));
+        assert!(prompt.contains("required status or handoff summaries"));
     }
 
     #[test]
@@ -451,6 +442,16 @@ mod tests {
         let prompt = build_system_prompt(&opts);
         assert!(prompt.contains("Coordinator Mode"));
         assert!(prompt.contains("orchestrator"));
+        assert!(prompt.contains("only if it is available in this session"));
+    }
+
+    #[test]
+    fn test_default_prompt_uses_current_tooling_language() {
+        let prompt = build_system_prompt(&default_opts());
+        assert!(prompt.contains("Only use tools that are actually available in this session."));
+        assert!(prompt.contains("Use `Read` or `Grep` before `Edit`"));
+        assert!(!prompt.contains("heavily modified Cersei SDK"));
+        assert!(!prompt.contains("GNU `Sed`"));
     }
 
     #[test]
