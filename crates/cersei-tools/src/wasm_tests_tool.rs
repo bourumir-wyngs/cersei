@@ -17,7 +17,7 @@ use toml_edit::{DocumentMut, Item};
 
 pub struct WasmTestsTool;
 
-const RUN_PROMPT: &str = "Run wasm_tests (no fs after building and no network, fully sandboxed). Separate run in two parts: build the test binary (sandbox restrictions like for Cargo tool) and run the test binary (combine wasm32-wasip1 runner with firejail to suppress all network and all filesystem except the binary itself)";
+const BUILD_PROMPT: &str = "Build wasm_tests artifacts (Cargo-like sandbox with network allowed during build only). This permission is remembered for all future wasm_tests builds in the session.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,7 +66,7 @@ fn configure_project(project_root: &Path) -> std::result::Result<PathBuf, String
     let config_path = cargo_dir.join("config.toml");
     let existing = fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc = existing.parse::<DocumentMut>().unwrap_or_default();
-    doc["target"]["wasm32-wasip1"]["runner"] = toml_edit::value("wasm_tests");
+    doc["target"]["wasm32-wasip1"]["runner"] = toml_edit::value("wasm_test");
     fs::write(&config_path, doc.to_string())
         .map_err(|e| format!("Failed to write '{}': {}", config_path.display(), e))?;
     Ok(config_path)
@@ -110,6 +110,7 @@ async fn ensure_configure_permission(
 
 fn resolve_artifact_path(
     project_root: &Path,
+    workspace_root: &Path,
     artifact: Option<&str>,
 ) -> std::result::Result<Option<PathBuf>, ToolResult> {
     let Some(artifact) = artifact
@@ -119,19 +120,26 @@ fn resolve_artifact_path(
         return Ok(None);
     };
 
-    let candidate = project_root.join(artifact);
-    if !candidate.exists() {
-        return Err(ToolResult::error(format!(
-            "Artifact '{}' does not exist under '{}'",
-            artifact,
-            project_root.display()
-        )));
-    }
+    let project_candidate = project_root.join(artifact);
+    let workspace_candidate = workspace_root.join(artifact);
 
-    let canonical_project_root = project_root.canonicalize().map_err(|e| {
-        ToolResult::error(format!(
-            "Cannot resolve project root '{}': {}",
+    let candidate = if project_candidate.exists() {
+        project_candidate
+    } else if workspace_candidate.exists() {
+        workspace_candidate
+    } else {
+        return Err(ToolResult::error(format!(
+            "Artifact '{}' does not exist under '{}' or workspace root '{}'",
+            artifact,
             project_root.display(),
+            workspace_root.display()
+        )));
+    };
+
+    let canonical_workspace_root = workspace_root.canonicalize().map_err(|e| {
+        ToolResult::error(format!(
+            "Cannot resolve workspace root '{}': {}",
+            workspace_root.display(),
             e
         ))
     })?;
@@ -143,11 +151,11 @@ fn resolve_artifact_path(
         ))
     })?;
 
-    if !canonical_artifact.starts_with(&canonical_project_root) {
+    if !canonical_artifact.starts_with(&canonical_workspace_root) {
         return Err(ToolResult::error(format!(
-            "Artifact '{}' resolves outside project root '{}'",
+            "Artifact '{}' resolves outside workspace root '{}'",
             artifact,
-            project_root.display()
+            workspace_root.display()
         )));
     }
 
@@ -161,15 +169,114 @@ fn resolve_artifact_path(
     Ok(Some(canonical_artifact))
 }
 
-fn build_command(test_name: Option<&str>) -> String {
-    match test_name.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(test_name) => format!("cargo test --target wasm32-wasip1 {} --no-run", test_name),
-        None => "cargo test --target wasm32-wasip1 --no-run".to_string(),
+fn build_command(package: Option<&str>, test_name: Option<&str>) -> String {
+    let mut parts = vec![
+        "cargo".to_string(),
+        "test".to_string(),
+        "--target".to_string(),
+        "wasm32-wasip1".to_string(),
+    ];
+
+    if let Some(package) = package.map(str::trim).filter(|name| !name.is_empty()) {
+        parts.push("-p".to_string());
+        parts.push(package.to_string());
     }
+
+    if let Some(test_name) = test_name.map(str::trim).filter(|name| !name.is_empty()) {
+        parts.push(test_name.to_string());
+    }
+
+    parts.push("--no-run".to_string());
+    parts.push("--message-format=json-render-diagnostics".to_string());
+    parts.push("--color".to_string());
+    parts.push("never".to_string());
+
+    parts
+        .into_iter()
+        .map(|part| shell_single_quote(&part))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-fn run_command(artifact: &Path, test_name: Option<&str>, args: &[String]) -> String {
-    let mut command = shell_single_quote(&artifact.display().to_string());
+fn helper_build_command() -> String {
+    ["cargo", "build", "-p", "wasm_test", "--color", "never"]
+        .into_iter()
+        .map(shell_single_quote)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn helper_runner_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("target/debug/wasm_test")
+}
+
+fn find_package_for_project_root(project_root: &Path) -> Option<String> {
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .current_dir(project_root)
+        .no_deps()
+        .exec()
+        .ok()?;
+
+    let root_manifest = project_root.join("Cargo.toml").canonicalize().ok()?;
+
+    metadata
+        .packages
+        .into_iter()
+        .find(|package| package.manifest_path.as_std_path() == root_manifest)
+        .map(|package| package.name)
+}
+
+fn infer_package(project_root: &Path, workspace_root: &Path) -> Option<String> {
+    if project_root != workspace_root {
+        return find_package_for_project_root(project_root);
+    }
+
+    find_package_for_project_root(&workspace_root.join("crates/wasm_tests"))
+}
+
+fn parse_artifacts(build_output: &str) -> Vec<PathBuf> {
+    let mut artifacts = Vec::new();
+    for line in build_output.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+
+        if message.pointer("/target/test").and_then(serde_json::Value::as_bool) != Some(true) {
+            continue;
+        }
+
+        let Some(executable) = message.get("executable").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+
+        if executable.ends_with(".wasm") {
+            artifacts.push(PathBuf::from(executable));
+        }
+    }
+
+    artifacts.sort();
+    artifacts.dedup();
+    artifacts
+}
+
+fn run_command(
+    workspace_root: &Path,
+    project_root: &Path,
+    artifact: &Path,
+    test_name: Option<&str>,
+    args: &[String],
+) -> String {
+    let runner = helper_runner_path(workspace_root);
+    let mut command = format!(
+        "{} run-artifact {} {}",
+        shell_single_quote(&runner.display().to_string()),
+        shell_single_quote(&project_root.display().to_string()),
+        shell_single_quote(&artifact.display().to_string())
+    );
 
     if let Some(test_name) = test_name.map(str::trim).filter(|name| !name.is_empty()) {
         command.push(' ');
@@ -239,7 +346,7 @@ impl Tool for WasmTestsTool {
     }
 
     fn description(&self) -> &str {
-        "Can safely run Rust tests that are wasm32-wasip1 compatible (no filesystem, no network)."
+        "Can safely run Rust tests that are wasm32-wasip1 compatible (no filesystem, no network). Build network permission, when needed, is asked at most once per session."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -324,41 +431,75 @@ impl Tool for WasmTestsTool {
             ));
         }
 
-        if let Some(ref policy) = ctx.network_policy {
-            match policy
-                .check(self.name(), RUN_PROMPT, NetworkAccess::Blocked)
-                .await
-            {
-                NetworkDecision::Allow(_) => {}
-                NetworkDecision::Deny(reason) => {
-                    return ToolResult::error(format!("Permission denied: {}", reason));
-                }
-            }
-        }
 
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
         let args = input.args.unwrap_or_default();
         let test_name = input.test_name.as_deref();
+        let inferred_package = infer_package(&project_root, &workspace_root);
 
         let explicit_artifact =
-            match resolve_artifact_path(&project_root, input.artifact.as_deref()) {
+            match resolve_artifact_path(&project_root, &workspace_root, input.artifact.as_deref()) {
                 Ok(path) => path,
                 Err(err) => return err,
             };
+        let helper_runner = helper_runner_path(&workspace_root);
+        let needs_helper_build = !helper_runner.is_file();
+        let needs_wasm_build = explicit_artifact.is_none();
+        let needs_any_build = needs_helper_build || needs_wasm_build;
+
+        if let Some(ref policy) = ctx.network_policy {
+            if needs_any_build {
+                match policy
+                    .check(self.name(), BUILD_PROMPT, NetworkAccess::Full)
+                    .await
+                {
+                    NetworkDecision::Allow(_) => {}
+                    NetworkDecision::Deny(reason) => {
+                        return ToolResult::error(format!("Permission denied: {}", reason));
+                    }
+                }
+            }
+        }
+
+        let build_firejail_args =
+            home_entries_and_workspace_firejail_args(&workspace_root, &[".cargo", ".rustup"]);
+
+        let _helper_build_output = if needs_helper_build {
+            let result = execute_shell_command(
+                &helper_build_command(),
+                &workspace_root,
+                NetworkAccess::Full,
+                &build_firejail_args,
+                timeout_ms,
+            )
+            .await;
+
+            if result.is_error {
+                return ToolResult::error(format!(
+                    "Failed to build wasm_test helper runner at {}:\n{}",
+                    helper_runner.display(),
+                    result.content
+                ));
+            }
+            result
+        } else {
+            ToolResult::success(format!(
+                "Skipping helper build because runner already exists: {}",
+                helper_runner.display()
+            ))
+        };
 
         let build_output = if let Some(artifact) = explicit_artifact.as_ref() {
             ToolResult::success(format!(
-                "Skipping build because explicit artifact was provided: {}",
+                "Skipping wasm artifact build because explicit artifact was provided: {}",
                 artifact.display()
             ))
         } else {
-            let build_firejail_args =
-                home_entries_and_workspace_firejail_args(&workspace_root, &[".cargo", ".rustup"]);
-            let build_command = build_command(test_name);
+            let build_command = build_command(inferred_package.as_deref(), test_name);
             let result = execute_shell_command(
                 &build_command,
                 &project_root,
-                NetworkAccess::Blocked,
+                NetworkAccess::Full,
                 &build_firejail_args,
                 timeout_ms,
             )
@@ -370,56 +511,106 @@ impl Tool for WasmTestsTool {
             result
         };
 
-        let config = wasm_tests::WasmTestConfig::new(&project_root);
-        let artifact_path = match explicit_artifact {
-            Some(path) => path,
-            None => match wasm_tests::discover_artifacts(&config) {
-                Ok(mut artifacts) => match artifacts.len() {
-                    0 => {
-                        return ToolResult::error(
-                            "No wasm test artifacts were discovered after building".to_string(),
-                        )
-                    }
-                    1 => artifacts.remove(0).path,
-                    count => {
-                        let listed = artifacts
-                            .into_iter()
-                            .map(|artifact| artifact.path.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        return ToolResult::error(format!(
-                            "Discovered {} wasm test artifacts; please specify 'artifact'.\n{}",
-                            count, listed
-                        ));
-                    }
-                },
-                Err(err) => {
-                    return ToolResult::error(format!(
-                        "Failed to discover wasm test artifacts: {}",
-                        err
-                    ))
-                }
-            },
+        let discovered_artifacts = match explicit_artifact.as_ref() {
+            Some(path) => vec![path.clone()],
+            None => parse_artifacts(&build_output.content),
         };
 
-        let artifact_relative = match artifact_path.strip_prefix(&workspace_root) {
-            Ok(path) => path,
-            Err(_) => {
-                return ToolResult::error(format!(
-                    "Artifact '{}' is outside workspace root '{}'",
-                    artifact_path.display(),
-                    workspace_root.display()
-                ))
+        if discovered_artifacts.is_empty() {
+            return ToolResult::error(
+                "No wasm test artifacts were discovered after building".to_string(),
+            );
+        }
+
+        let run_firejail_args = read_only_workspace_firejail_args(&workspace_root, &[]);
+
+        let selected_artifact = if let Some(artifact) = explicit_artifact {
+            artifact
+        } else if discovered_artifacts.len() == 1 {
+            discovered_artifacts[0].clone()
+        } else if let Some(test_name) = test_name.map(str::trim).filter(|name| !name.is_empty()) {
+            let mut matching_artifacts = Vec::new();
+
+            for artifact in &discovered_artifacts {
+                let list_args = vec!["--list".to_string()];
+                let list_command = run_command(
+                    &workspace_root,
+                    &project_root,
+                    artifact,
+                    None,
+                    &list_args,
+                );
+                let list_result = execute_shell_command(
+                    &list_command,
+                    &project_root,
+                    NetworkAccess::Blocked,
+                    &run_firejail_args,
+                    timeout_ms,
+                )
+                .await;
+
+                if list_result.is_error {
+                    return list_result;
+                }
+
+                if list_result
+                    .content
+                    .lines()
+                    .any(|line| line.trim() == format!("{test_name}: test"))
+                {
+                    matching_artifacts.push(artifact.clone());
+                }
             }
+
+            match matching_artifacts.len() {
+                0 => {
+                    return ToolResult::error(format!(
+                        "Discovered {} wasm test artifacts, but none contain test '{}'. Please specify 'artifact'.\n{}",
+                        discovered_artifacts.len(),
+                        test_name,
+                        discovered_artifacts
+                            .iter()
+                            .map(|artifact| artifact.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+                1 => matching_artifacts.remove(0),
+                _ => {
+                    return ToolResult::error(format!(
+                        "Test '{}' appears in multiple wasm test artifacts; please specify 'artifact'.\n{}",
+                        test_name,
+                        matching_artifacts
+                            .iter()
+                            .map(|artifact| artifact.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+            }
+        } else {
+            let artifacts = discovered_artifacts
+                .iter()
+                .map(|artifact| artifact.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            return ToolResult::error(format!(
+                "Discovered {} wasm test artifacts; please specify 'artifact'.\n{}",
+                discovered_artifacts.len(),
+                artifacts
+            ));
         };
-        let artifact_relative_owned = artifact_relative.to_string_lossy().to_string();
-        let writable_entries = vec![artifact_relative_owned.as_str()];
-        let run_firejail_args =
-            read_only_workspace_firejail_args(&workspace_root, &writable_entries);
-        let run_command = run_command(&artifact_path, test_name, &args);
+
+        let run_command = run_command(
+            &workspace_root,
+            &project_root,
+            &selected_artifact,
+            test_name,
+            &args,
+        );
         let run_output = execute_shell_command(
             &run_command,
-            artifact_path.parent().unwrap_or(project_root.as_path()),
+            selected_artifact.parent().unwrap_or(project_root.as_path()),
             NetworkAccess::Blocked,
             &run_firejail_args,
             timeout_ms,
@@ -452,12 +643,14 @@ impl Tool for WasmTestsTool {
         });
 
         ToolResult::success(content).with_metadata(serde_json::json!({
-            "artifact": artifact_path,
+            "artifact": selected_artifact,
             "project_root": project_root,
+            "package": inferred_package,
             "sandbox": {
-                "network": "blocked",
+                "build_network": "enabled",
+                "run_network": "blocked",
                 "build_filesystem": "workspace plus cargo/rustup home entries",
-                "run_filesystem": "workspace read-only with artifact writable"
+                "run_filesystem": "workspace read-only"
             }
         }))
     }
@@ -520,6 +713,24 @@ mod tests {
         std::fs::write(root.join("src/lib.rs"), "pub fn meaning() -> u32 { 42 }\n").unwrap();
     }
 
+
+    #[test]
+    fn build_command_targets_inferred_package_when_provided() {
+        let command = build_command(Some("wasm_tests"), Some("my_test"));
+        assert!(command.contains("'-p' 'wasm_tests'"));
+        assert!(command.contains("'my_test'"));
+        assert!(command.contains("'--target' 'wasm32-wasip1'"));
+    }
+
+    #[test]
+    fn parse_artifacts_collects_unique_wasm_test_binaries() {
+        let output = r#"{"reason":"compiler-artifact","target":{"test":true},"executable":"/tmp/a.wasm"}
+{"reason":"compiler-artifact","target":{"test":false},"executable":"/tmp/skip.wasm"}
+{"reason":"compiler-artifact","target":{"test":true},"executable":"/tmp/a.wasm"}
+{"reason":"compiler-artifact","target":{"test":true},"executable":"/tmp/b.wasm"}"#;
+        let artifacts = parse_artifacts(output);
+        assert_eq!(artifacts, vec![PathBuf::from("/tmp/a.wasm"), PathBuf::from("/tmp/b.wasm")]);
+    }
     #[tokio::test]
     async fn missing_config_asks_operator_permission_before_writing() {
         let workspace = tempfile::tempdir().unwrap();
@@ -569,6 +780,6 @@ mod tests {
         let config_path = wasm_test_config_path(workspace.path());
         let config = std::fs::read_to_string(&config_path).unwrap();
         assert!(config.contains("wasm32-wasip1"));
-        assert!(config.contains("runner = \"wasm_tests\""));
+        assert!(config.contains("runner = \"wasm_test\""));
     }
 }

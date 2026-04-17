@@ -32,6 +32,7 @@ members = [
     "crates/cersei-mcp",
     "crates/abstract-cli",
     "crates/wasm_tests",
+    "wasm_test",
 ]
 
 [workspace.package]
