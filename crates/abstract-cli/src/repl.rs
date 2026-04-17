@@ -167,141 +167,149 @@ pub async fn run_repl(
             continue;
         }
 
-        // Handle slash commands
-        if input.starts_with('/') {
+        let prompt = if input.starts_with('/') {
             let (cmd, args) = parse_command(&input);
             match cmd {
                 "exit" | "quit" | "q" => {
                     input_reader.save_history();
                     break;
                 }
-                _ => {
-                    match cmd_registry
-                        .execute(cmd, args, &repl_config, &current_session_id)
-                        .await
-                    {
-                        Ok(commands::CommandAction::None) => {}
-                        Ok(commands::CommandAction::ClearHistory) => {
-                            agent.clear_messages();
-                            is_first_turn = true;
-                        }
-                        Ok(commands::CommandAction::SaveSession { name }) => {
-                            let msgs = agent.messages();
-                            match crate::sessions::save_named(
-                                &repl_config,
-                                &name,
-                                &msgs,
-                                &current_session_id,
-                            ) {
-                                Ok(_) => {
-                                    exit_session_name = Some(name.clone());
-                                    eprintln!("\x1b[33m  Session saved as '{}'\x1b[0m", name);
-                                }
-                                Err(e) => eprintln!("\x1b[31m  Save failed: {e}\x1b[0m"),
+                _ => match cmd_registry
+                    .execute(cmd, args, &repl_config, &current_session_id)
+                    .await
+                {
+                    Ok(commands::CommandAction::None) => None,
+                    Ok(commands::CommandAction::RunPrompt { prompt }) => Some(prompt),
+                    Ok(commands::CommandAction::ClearHistory) => {
+                        agent.clear_messages();
+                        is_first_turn = true;
+                        None
+                    }
+                    Ok(commands::CommandAction::SaveSession { name }) => {
+                        let msgs = agent.messages();
+                        match crate::sessions::save_named(
+                            &repl_config,
+                            &name,
+                            &msgs,
+                            &current_session_id,
+                        ) {
+                            Ok(_) => {
+                                exit_session_name = Some(name.clone());
+                                eprintln!("\x1b[33m  Session saved as '{}'\x1b[0m", name);
                             }
+                            Err(e) => eprintln!("\x1b[31m  Save failed: {e}\x1b[0m"),
                         }
-                        Ok(commands::CommandAction::LoadSession {
-                            messages,
-                            session_id: loaded_id,
-                        }) => {
-                            match app::build_agent(
-                                &current_model,
-                                &repl_config,
-                                memory_manager,
-                                &loaded_id,
-                                signal_handle.token(),
-                                Some(messages),
-                                tool_extensions.clone(),
-                            ) {
-                                Ok((new_agent, resolved)) => {
-                                    let xfile_path = session_storage::xfile_storage_path(
-                                        &repl_config.working_dir,
-                                        &loaded_id,
+                        None
+                    }
+                    Ok(commands::CommandAction::LoadSession {
+                        messages,
+                        session_id: loaded_id,
+                    }) => {
+                        match app::build_agent(
+                            &current_model,
+                            &repl_config,
+                            memory_manager,
+                            &loaded_id,
+                            signal_handle.token(),
+                            Some(messages),
+                            tool_extensions.clone(),
+                        ) {
+                            Ok((new_agent, resolved)) => {
+                                let xfile_path = session_storage::xfile_storage_path(
+                                    &repl_config.working_dir,
+                                    &loaded_id,
+                                );
+                                if let Err(err) =
+                                    load_session_xfile_storage_from_path(&loaded_id, &xfile_path)
+                                {
+                                    eprintln!(
+                                        "\x1b[31m  XFileStorage restore failed: {err}\x1b[0m"
                                     );
-                                    if let Err(err) = load_session_xfile_storage_from_path(
-                                        &loaded_id,
-                                        &xfile_path,
-                                    ) {
-                                        eprintln!(
-                                            "\x1b[31m  XFileStorage restore failed: {err}\x1b[0m"
-                                        );
-                                    }
-                                    agent = new_agent;
-                                    current_model = if let Some((provider, _)) =
-                                        current_model.split_once('/')
-                                    {
+                                }
+                                agent = new_agent;
+                                current_model =
+                                    if let Some((provider, _)) = current_model.split_once('/') {
                                         format!("{provider}/{resolved}")
                                     } else {
                                         resolved.clone()
                                     };
-                                    repl_config.model = current_model.clone();
-                                    if let Some((provider, _)) = current_model.split_once('/') {
-                                        repl_config.provider = provider.to_string();
-                                    }
-                                    current_session_id = loaded_id.clone();
-                                    is_first_turn = true;
-                                    status = StatusLine::new(
-                                        theme,
-                                        &repl_config.model,
-                                        &current_session_id,
-                                        !json_mode,
-                                    );
+                                repl_config.model = current_model.clone();
+                                if let Some((provider, _)) = current_model.split_once('/') {
+                                    repl_config.provider = provider.to_string();
                                 }
-                                Err(e) => eprintln!("\x1b[31m  Resume failed: {e}\x1b[0m"),
+                                current_session_id = loaded_id.clone();
+                                is_first_turn = true;
+                                status = StatusLine::new(
+                                    theme,
+                                    &repl_config.model,
+                                    &current_session_id,
+                                    !json_mode,
+                                );
                             }
+                            Err(e) => eprintln!("\x1b[31m  Resume failed: {e}\x1b[0m"),
                         }
-                        Ok(commands::CommandAction::Compact) => {
-                            let before = agent.messages().len();
-                            let before_tokens = before * 500; // rough estimate for display
-                            eprintln!("\x1b[90m  Compacting {} messages...\x1b[0m", before);
-                            match agent.compact_now().await {
-                                Ok(result) => {
-                                    eprintln!(
-                                        "\x1b[90m  Compacted: {} → {} messages (~{} tokens freed)\x1b[0m",
-                                        result.messages_before,
-                                        result.messages_after,
-                                        result.tokens_freed_estimate,
-                                    );
-                                    let _ = before_tokens; // suppress warning
-                                }
-                                Err(e) => eprintln!("\x1b[31m  Compaction failed: {e}\x1b[0m"),
-                            }
-                        }
-                        Ok(commands::CommandAction::SwitchAgent { model }) => {
-                            let msgs = agent.messages();
-                            match app::build_agent(
-                                &model,
-                                &repl_config,
-                                memory_manager,
-                                &current_session_id,
-                                signal_handle.token(),
-                                Some(msgs),
-                                tool_extensions.clone(),
-                            ) {
-                                Ok((new_agent, resolved)) => {
-                                    agent = new_agent;
-                                    current_model =
-                                        if let Some((provider, _)) = model.split_once('/') {
-                                            format!("{provider}/{resolved}")
-                                        } else {
-                                            resolved.clone()
-                                        };
-                                    repl_config.model = current_model.clone();
-                                    if let Some((provider, _)) = current_model.split_once('/') {
-                                        repl_config.provider = provider.to_string();
-                                    }
-                                    status.set_model(&current_model);
-                                    renderer.model_switched(&current_model);
-                                }
-                                Err(e) => renderer.error(&format!("Switch failed: {e}")),
-                            }
-                        }
-                        Err(e) => eprintln!("\x1b[31mCommand error: {e}\x1b[0m"),
+                        None
                     }
-                    continue;
-                }
+                    Ok(commands::CommandAction::Compact) => {
+                        let before = agent.messages().len();
+                        let before_tokens = before * 500; // rough estimate for display
+                        eprintln!("\x1b[90m  Compacting {} messages...\x1b[0m", before);
+                        match agent.compact_now().await {
+                            Ok(result) => {
+                                eprintln!(
+                                    "\x1b[90m  Compacted: {} → {} messages (~{} tokens freed)\x1b[0m",
+                                    result.messages_before,
+                                    result.messages_after,
+                                    result.tokens_freed_estimate,
+                                );
+                                let _ = before_tokens; // suppress warning
+                            }
+                            Err(e) => eprintln!("\x1b[31m  Compaction failed: {e}\x1b[0m"),
+                        }
+                        None
+                    }
+                    Ok(commands::CommandAction::SwitchAgent { model }) => {
+                        let msgs = agent.messages();
+                        match app::build_agent(
+                            &model,
+                            &repl_config,
+                            memory_manager,
+                            &current_session_id,
+                            signal_handle.token(),
+                            Some(msgs),
+                            tool_extensions.clone(),
+                        ) {
+                            Ok((new_agent, resolved)) => {
+                                agent = new_agent;
+                                current_model = if let Some((provider, _)) = model.split_once('/') {
+                                    format!("{provider}/{resolved}")
+                                } else {
+                                    resolved.clone()
+                                };
+                                repl_config.model = current_model.clone();
+                                if let Some((provider, _)) = current_model.split_once('/') {
+                                    repl_config.provider = provider.to_string();
+                                }
+                                status.set_model(&current_model);
+                                renderer.model_switched(&current_model);
+                            }
+                            Err(e) => renderer.error(&format!("Switch failed: {e}")),
+                        }
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("\x1b[31mCommand error: {e}\x1b[0m");
+                        None
+                    }
+                },
             }
-        }
+        } else {
+            Some(input)
+        };
+
+        let Some(prompt) = prompt else {
+            continue;
+        };
 
         // Run agent with retry/recovery loop
         let mut should_retry = true;
@@ -311,7 +319,7 @@ pub async fn run_repl(
             running.store(true, Ordering::Relaxed);
             let result = run_agent_streaming(
                 &agent,
-                &input,
+                &prompt,
                 &mut renderer,
                 &mut status,
                 json_mode,
