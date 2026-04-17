@@ -100,7 +100,7 @@ impl Tool for PytestTool {
                     "type": "string",
                     "description": "Optional arguments to pass to pytest, e.g. \"-q\", \"tests/unit -k parser\". Omit to run plain pytest."
                 },
-                "directory": {
+                "workdir": {
                     "type": "string",
                     "description": "Optional subdirectory (relative to the working root) in which to run pytest. Must not escape the root directory."
                 },
@@ -114,9 +114,10 @@ impl Tool for PytestTool {
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Input {
             args: Option<String>,
-            directory: Option<String>,
+            workdir: Option<String>,
             timeout: Option<u64>,
         }
 
@@ -133,7 +134,11 @@ impl Tool for PytestTool {
 
         let (cwd, workspace_root) = match resolve_directory_in_workspace(
             &base_cwd,
-            input.directory.as_deref(),
+            input
+                .workdir
+                .as_deref()
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty()),
             &ctx.working_dir,
             "pytest",
         ) {
@@ -308,7 +313,7 @@ mod tests {
         let result = tool
             .execute(
                 serde_json::json!({
-                    "directory": "tests",
+                    "workdir": "tests",
                     "args": "-q tests/unit"
                 }),
                 &ctx,

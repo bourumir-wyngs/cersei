@@ -91,7 +91,7 @@ impl Tool for WebTestsTool {
                     "type": "string",
                     "description": "Required command matching the fixed web test regex set, e.g. \"npm run test:web\" or \"npx --yes eslint src/app.tsx\"."
                 },
-                "directory": {
+                "workdir": {
                     "type": "string",
                     "description": "Optional subdirectory (relative to the working root) in which to run the command. Must not escape the root directory."
                 },
@@ -109,9 +109,10 @@ impl Tool for WebTestsTool {
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Input {
             command: Option<String>,
-            directory: Option<String>,
+            workdir: Option<String>,
             timeout: Option<u64>,
         }
 
@@ -133,7 +134,11 @@ impl Tool for WebTestsTool {
 
         let (cwd, workspace_root) = match resolve_directory_in_workspace(
             &base_cwd,
-            input.directory.as_deref(),
+            input
+                .workdir
+                .as_deref()
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty()),
             &ctx.working_dir,
             "web_tests",
         ) {
@@ -205,8 +210,37 @@ impl Tool for WebTestsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
+    use std::sync::Mutex;
+
+    static PATH_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    struct PathGuard(Option<std::ffi::OsString>);
+
+    impl PathGuard {
+        fn prepend(dir: &std::path::Path) -> Self {
+            let previous = std::env::var_os("PATH");
+            let mut paths = vec![dir.to_path_buf()];
+            paths.extend(std::env::split_paths(
+                previous.as_deref().unwrap_or_default(),
+            ));
+            let joined = std::env::join_paths(paths).expect("join PATH");
+            std::env::set_var("PATH", &joined);
+            Self(previous)
+        }
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
 
     fn test_ctx(session_id: String, working_dir: std::path::PathBuf) -> ToolContext {
         ToolContext {
@@ -283,5 +317,72 @@ mod tests {
         assert!(
             result.content.contains("Exit code") || result.content.contains("Failed to execute")
         );
+    }
+
+    #[tokio::test]
+    async fn execute_uses_workdir_for_web_tests_command() {
+        let _lock = PATH_LOCK.lock().expect("PATH lock");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let fake_bin = workspace.path().join(".fake-bin");
+        fs::create_dir_all(&fake_bin).expect("fake bin");
+
+        let npm_path = fake_bin.join("npm");
+        fs::write(
+            &npm_path,
+            "#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'args=%s\\n' \"$*\"\n",
+        )
+        .expect("script");
+        let mut perms = fs::metadata(&npm_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&npm_path, perms).expect("chmod");
+
+        let subdir = workspace.path().join("frontend");
+        fs::create_dir_all(&subdir).expect("subdir");
+
+        let _path_guard = PathGuard::prepend(&fake_bin);
+        let ctx = test_ctx(
+            format!("web-tests-workdir-{}", uuid::Uuid::new_v4()),
+            workspace.path().to_path_buf(),
+        );
+        let tool = WebTestsTool;
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "npm run test:web",
+                    "workdir": "frontend"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result
+            .content
+            .contains(&format!("cwd={}", subdir.display())));
+        assert!(result.content.contains("args=run test:web"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_removed_directory_parameter() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let ctx = test_ctx(
+            format!("web-tests-removed-directory-{}", uuid::Uuid::new_v4()),
+            workspace.path().to_path_buf(),
+        );
+        let tool = WebTestsTool;
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "command": "npm run test:web",
+                    "directory": "frontend"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("unknown field `directory`"));
     }
 }
