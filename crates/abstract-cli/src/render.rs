@@ -369,6 +369,7 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             .map(truncate_review_text)
             .unwrap_or_default(),
         "Read" => read_tool_summary(input),
+        "MultiRead" => multiread_tool_summary(input),
         "Write" => write_tool_summary(input),
         "Edit" | "Sed" | "sed" => input
             .get("file_path")
@@ -503,6 +504,19 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
     summary
 }
 
+fn multiread_tool_summary(input: &serde_json::Value) -> String {
+    let Some(requests) = input.get("requests").and_then(|v| v.as_array()) else {
+        return String::new();
+    };
+
+    requests
+        .iter()
+        .filter(|request| request.get("file_path").and_then(|v| v.as_str()).is_some())
+        .map(read_tool_summary)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn write_tool_summary(input: &serde_json::Value) -> String {
     let file_path = input
         .get("file_path")
@@ -634,6 +648,33 @@ mod tests {
         );
         assert_eq!(summary, "src/main.rs tag:4 search /todo/ len 25");
     }
+
+    #[test]
+    fn multiread_summary_lists_each_request_like_read() {
+        let summary = tool_input_summary(
+            "MultiRead",
+            &serde_json::json!({
+                "requests": [
+                    {
+                        "file_path": "src/main.rs",
+                        "start_tag": "tag:4",
+                        "length": 25
+                    },
+                    {
+                        "file_path": "src/lib.rs",
+                        "search": "todo",
+                        "before": 1,
+                        "after": 2
+                    }
+                ]
+            }),
+        );
+        assert_eq!(
+            summary,
+            "src/main.rs tag:4 len 25\nsrc/lib.rs EOF before=1 after=2 search /todo/"
+        );
+    }
+
     #[test]
     fn write_summary_includes_char_count() {
         let summary = tool_input_summary(

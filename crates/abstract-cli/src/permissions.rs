@@ -39,6 +39,7 @@ enum SessionPermissionScope {
     WriteWorkspace,
     Pytest,
     WebTests,
+    WasmTests,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -171,6 +172,7 @@ impl CliPermissionPolicy {
             (PermissionLevel::Write, _) => Some(SessionPermissionScope::WriteWorkspace),
             (PermissionLevel::Execute, "Pytest") => Some(SessionPermissionScope::Pytest),
             (PermissionLevel::Execute, "web_tests") => Some(SessionPermissionScope::WebTests),
+            (PermissionLevel::Execute, "wasm_tests") => Some(SessionPermissionScope::WasmTests),
             _ => None,
         }
     }
@@ -345,6 +347,7 @@ impl SessionPermissionScope {
             Self::WriteWorkspace => "Write workspace",
             Self::Pytest => "Pytest",
             Self::WebTests => "Web tests",
+            Self::WasmTests => "Wasm tests",
         }
     }
 
@@ -357,6 +360,9 @@ impl SessionPermissionScope {
             Self::WebTests => {
                 "Granting this allows all web_tests runs for the rest of this session."
             }
+            Self::WasmTests => {
+                "Granting this allows all wasm_tests runs for the rest of this session."
+            }
         }
     }
 
@@ -365,6 +371,7 @@ impl SessionPermissionScope {
             Self::WriteWorkspace => "User denied write workspace (session)",
             Self::Pytest => "User denied pytest (session)",
             Self::WebTests => "User denied web_tests (session)",
+            Self::WasmTests => "User denied wasm_tests (session)",
         }
     }
 }
@@ -374,7 +381,8 @@ fn permission_prompt_choices(scope: Option<SessionPermissionScope>) -> &'static 
         Some(
             SessionPermissionScope::WriteWorkspace
             | SessionPermissionScope::Pytest
-            | SessionPermissionScope::WebTests,
+            | SessionPermissionScope::WebTests
+            | SessionPermissionScope::WasmTests,
         ) => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister ",
         None => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister ",
     }
@@ -385,7 +393,8 @@ fn valid_permission_chars(scope: Option<SessionPermissionScope>) -> &'static str
         Some(
             SessionPermissionScope::WriteWorkspace
             | SessionPermissionScope::Pytest
-            | SessionPermissionScope::WebTests,
+            | SessionPermissionScope::WebTests
+            | SessionPermissionScope::WasmTests,
         ) => "yYnNeErRxX",
         None => "yYnNeErRsExX",
     }

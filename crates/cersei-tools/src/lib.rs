@@ -47,6 +47,7 @@ pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
 pub mod web_tests_tool;
+pub mod wasm_tests_tool;
 pub mod worktree;
 pub mod xfile_storage;
 pub mod xfile_sync;
@@ -470,6 +471,7 @@ pub fn testing() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(pytest_tool::PytestTool),
         Box::new(web_tests_tool::WebTestsTool),
+        Box::new(wasm_tests_tool::WasmTestsTool),
     ]
 }
 
