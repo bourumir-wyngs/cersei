@@ -1,0 +1,13 @@
+[package]
+name = "wasm_tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM-compatible Rust test support skeleton for Cersei"
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
