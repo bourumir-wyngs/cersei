@@ -50,6 +50,7 @@ tree-sitter-typescript = { workspace = true }
 rustpython-parser = { workspace = true }
 cargo_metadata = "0.19"
 calamine = "0.31"
+pdf-extract = "0.7"
 
 [features]
 cas = ["giacrs"]
