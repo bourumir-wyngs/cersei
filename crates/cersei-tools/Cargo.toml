@@ -14,7 +14,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
-wasm_tests = { workspace = true }
+#wasm_tests = { workspace = true }
 toml_edit = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }

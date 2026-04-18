@@ -376,7 +376,9 @@ fn search_selected_lines<'a>(
 mod tests {
     use super::*;
     use crate::permissions::AllowAll;
-    use crate::xfile_storage::{clear_session_xfile_storage, store_deleted_file, store_written_text};
+    use crate::xfile_storage::{
+        clear_session_xfile_storage, store_deleted_file, store_written_text,
+    };
     use std::path::Path;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -476,7 +478,9 @@ mod tests {
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("File is absent in the current revision"));
+        assert!(result
+            .content
+            .contains("File is absent in the current revision"));
         assert_eq!(result.metadata.as_ref().unwrap()["exists"], false);
     }
 

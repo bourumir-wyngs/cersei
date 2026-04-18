@@ -17,7 +17,7 @@ use cersei_memory::manager::MemoryManager;
 use cersei_memory::session_storage;
 use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_tools::Extensions;
-use cersei_types::Role;
+use cersei_types::{Message, Role};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -266,6 +266,12 @@ pub async fn run_repl(
                             }
                             Err(e) => eprintln!("\x1b[31m  Compaction failed: {e}\x1b[0m"),
                         }
+                        None
+                    }
+                    Ok(commands::CommandAction::InjectUserMessage { message }) => {
+                        let mut messages = agent.messages();
+                        messages.push(Message::user(message));
+                        agent.set_messages(messages);
                         None
                     }
                     Ok(commands::CommandAction::SwitchAgent { model }) => {

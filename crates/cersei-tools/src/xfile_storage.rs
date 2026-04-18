@@ -20,6 +20,7 @@ const MAX_REVISIONS: usize = 16;
 static XFILE_STORAGE_REGISTRY: Lazy<dashmap::DashMap<String, Arc<Mutex<XFileStorage>>>> =
     Lazy::new(dashmap::DashMap::new);
 static XFILE_TAG_COUNTER: AtomicUsize = AtomicUsize::new(1);
+static XFILE_TRACKING_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XLine {
@@ -50,6 +51,17 @@ pub struct XPathChangeMetadata {
     pub destination_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct XCheckpointEntry {
+    path: PathBuf,
+    revision: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+struct XFileCheckpoint {
+    entries: HashMap<String, XCheckpointEntry>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct XFileRevisionMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,20 +90,26 @@ pub struct XTrackedFileSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct XTrackedFile {
+    #[serde(default = "next_tracking_id")]
+    tracking_id: String,
     revisions: VecDeque<XFileRevision>,
     next_revision_number: usize,
     last_disk_state: Option<XDiskState>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct XFileStorage {
     files: HashMap<PathBuf, XTrackedFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<XFileCheckpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedXFileStorage {
     version: u32,
     files: HashMap<PathBuf, XTrackedFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<XFileCheckpoint>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +127,62 @@ pub struct XFileSyncUpdate {
     pub revision_count: usize,
     pub stats: SyncStats,
     pub changes: Vec<SyncChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XCheckpointSummary {
+    pub tracked_files: usize,
+    pub current_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XRollbackSummary {
+    pub used_explicit_checkpoint: bool,
+    pub changed_files: usize,
+    pub removed_files: usize,
+    pub unchanged_files: usize,
+    pub affected_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XCheckpointDiffEntry {
+    pub baseline_file: XFile,
+    pub baseline_revision: usize,
+    pub current_file: XFile,
+    pub current_revision: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XCheckpointDiffSummary {
+    pub used_explicit_checkpoint: bool,
+    pub changed_files: usize,
+    pub entries: Vec<XCheckpointDiffEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct XFileTransition {
+    current: XFile,
+    target: Option<XFile>,
+}
+
+#[derive(Debug, Clone)]
+struct XRollbackPlan {
+    files: HashMap<PathBuf, XTrackedFile>,
+    transitions: Vec<XFileTransition>,
+    summary: XRollbackSummary,
+}
+
+#[derive(Debug, Clone)]
+struct XBaselineTarget {
+    revision: usize,
+    file: XFile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackDecision {
+    KeepCurrent,
+    Remove,
+    ToRevision(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +250,7 @@ pub fn save_session_xfile_storage_to_path(session_id: &str, path: &Path) -> Resu
     let payload = PersistedXFileStorage {
         version: 1,
         files: guard.files.clone(),
+        checkpoint: guard.checkpoint.clone(),
     };
     drop(guard);
 
@@ -214,6 +289,7 @@ pub fn load_session_xfile_storage_from_path(session_id: &str, path: &Path) -> Re
         session_id.to_string(),
         Arc::new(Mutex::new(XFileStorage {
             files: payload.files,
+            checkpoint: payload.checkpoint,
         })),
     );
     Ok(true)
@@ -516,6 +592,33 @@ pub fn discard_head_revision(session_id: &str, path: &Path) -> Result<XFileHead,
     guard.discard_head_revision(&key)
 }
 
+pub fn create_checkpoint(session_id: &str) -> XCheckpointSummary {
+    let storage = session_xfile_storage(session_id);
+    let mut guard = storage.lock();
+    guard.create_checkpoint()
+}
+
+pub fn diff_against_checkpoint(session_id: &str) -> Result<XCheckpointDiffSummary, String> {
+    let storage = session_xfile_storage(session_id);
+    let guard = storage.lock();
+    guard.diff_against_checkpoint()
+}
+
+pub async fn rollback_to_checkpoint(session_id: &str) -> Result<XRollbackSummary, String> {
+    let storage = session_xfile_storage(session_id);
+    let plan = {
+        let guard = storage.lock();
+        guard.plan_rollback()?
+    };
+
+    apply_rollback_transitions_to_disk(&plan.transitions).await?;
+
+    let mut guard = storage.lock();
+    guard.files = plan.files;
+    guard.refresh_disk_states()?;
+    Ok(plan.summary)
+}
+
 pub async fn apply_file_to_disk(path: &Path, file: &XFile) -> Result<(), String> {
     if !file.exists {
         match tokio::fs::remove_file(path).await {
@@ -546,6 +649,32 @@ pub async fn apply_file_transition_to_disk(current: &XFile, target: &XFile) -> R
 
     apply_file_to_disk(&target.path, target).await?;
     apply_file_to_disk(&current.path, &build_absent_file(current.path.clone())).await
+}
+
+async fn apply_rollback_transitions_to_disk(transitions: &[XFileTransition]) -> Result<(), String> {
+    for transition in transitions {
+        let remove_current = match &transition.target {
+            Some(target) => !target.exists || target.path != transition.current.path,
+            None => true,
+        };
+        if remove_current {
+            apply_file_to_disk(
+                &transition.current.path,
+                &build_absent_file(transition.current.path.clone()),
+            )
+            .await?;
+        }
+    }
+
+    for transition in transitions {
+        if let Some(target) = &transition.target {
+            if target.exists {
+                apply_file_to_disk(&target.path, target).await?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub fn render_file(file: &XFile) -> String {
@@ -610,11 +739,7 @@ pub fn diff_files(old: &XFile, new: &XFile, old_label: &str, new_label: &str) ->
             diff.push('\n');
         }
         diff.push_str("@@ file path @@\n");
-        diff.push_str(&format!(
-            "-{}\n+{}",
-            old.path.display(),
-            new.path.display()
-        ));
+        diff.push_str(&format!("-{}\n+{}", old.path.display(), new.path.display()));
     }
 
     diff
@@ -623,6 +748,13 @@ pub fn diff_files(old: &XFile, new: &XFile, old_label: &str, new_label: &str) ->
 pub(crate) fn next_tag() -> String {
     let next = XFILE_TAG_COUNTER.fetch_add(1, Ordering::Relaxed);
     STANDARD.encode(next.to_string())
+}
+
+fn next_tracking_id() -> String {
+    format!(
+        "xfile:{}",
+        XFILE_TRACKING_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn normalize_storage_path(path: &Path) -> PathBuf {
@@ -807,6 +939,22 @@ fn push_revision_with_metadata(
     make_head(revision, tracked.revisions.len())
 }
 
+fn insert_planned_file(
+    files: &mut HashMap<PathBuf, XTrackedFile>,
+    tracked: XTrackedFile,
+) -> Result<(), String> {
+    let head = tracked.current_head();
+    let path = normalize_storage_path(&head.file.path);
+    if files.contains_key(&path) {
+        return Err(format!(
+            "Rollback would leave multiple tracked files at {}.",
+            path.display()
+        ));
+    }
+    files.insert(path, tracked);
+    Ok(())
+}
+
 impl XTrackedFile {
     fn current_head(&self) -> XFileHead {
         let revision = self
@@ -834,6 +982,7 @@ impl XFileStorage {
 
         let file = build_file_with_new_tags(path.clone(), text);
         let mut tracked = XTrackedFile {
+            tracking_id: next_tracking_id(),
             revisions: VecDeque::new(),
             next_revision_number: 1,
             last_disk_state: disk_state,
@@ -847,6 +996,7 @@ impl XFileStorage {
         let file = build_file_with_new_tags(path.clone(), text);
         let tracked = self.files.entry(path.clone()).or_insert_with(|| {
             let mut tracked = XTrackedFile {
+                tracking_id: next_tracking_id(),
                 revisions: VecDeque::new(),
                 next_revision_number: 1,
                 last_disk_state: None,
@@ -864,6 +1014,7 @@ impl XFileStorage {
             .files
             .entry(path.clone())
             .or_insert_with(|| XTrackedFile {
+                tracking_id: next_tracking_id(),
                 revisions: VecDeque::new(),
                 next_revision_number: 1,
                 last_disk_state: None,
@@ -904,6 +1055,7 @@ impl XFileStorage {
         }
 
         let mut tracked = XTrackedFile {
+            tracking_id: next_tracking_id(),
             revisions: VecDeque::new(),
             next_revision_number: 1,
             last_disk_state: None,
@@ -976,6 +1128,228 @@ impl XFileStorage {
             .get_mut(path)
             .ok_or_else(|| format!("File is not loaded in XFileStorage: {}", path.display()))?;
         tracked.last_disk_state = disk_state;
+        Ok(())
+    }
+
+    fn create_checkpoint(&mut self) -> XCheckpointSummary {
+        let mut current_paths = self.files.keys().cloned().collect::<Vec<_>>();
+        current_paths.sort();
+
+        let entries = self
+            .files
+            .values()
+            .filter_map(|tracked| {
+                tracked.revisions.back().map(|revision| {
+                    (
+                        tracked.tracking_id.clone(),
+                        XCheckpointEntry {
+                            path: revision.file.path.clone(),
+                            revision: revision.number,
+                        },
+                    )
+                })
+            })
+            .collect();
+        self.checkpoint = Some(XFileCheckpoint { entries });
+
+        XCheckpointSummary {
+            tracked_files: current_paths.len(),
+            current_paths,
+        }
+    }
+
+    fn diff_against_checkpoint(&self) -> Result<XCheckpointDiffSummary, String> {
+        let use_explicit_checkpoint = self.checkpoint.is_some();
+        let mut tracked_files = self.files.values().cloned().collect::<Vec<_>>();
+        tracked_files.sort_by(|left, right| {
+            left.current_head()
+                .file
+                .path
+                .cmp(&right.current_head().file.path)
+        });
+
+        let mut entries = Vec::new();
+        for tracked in tracked_files {
+            let current = tracked.current_head();
+            let Some(baseline) = self.rollback_baseline_for_tracked_file(&tracked)? else {
+                continue;
+            };
+            if files_differ(&baseline.file, &current.file) {
+                entries.push(XCheckpointDiffEntry {
+                    baseline_file: baseline.file,
+                    baseline_revision: baseline.revision,
+                    current_file: current.file,
+                    current_revision: tracked
+                        .revisions
+                        .back()
+                        .map(|revision| revision.number)
+                        .expect("tracked file must have a head revision"),
+                });
+            }
+        }
+
+        Ok(XCheckpointDiffSummary {
+            used_explicit_checkpoint: use_explicit_checkpoint,
+            changed_files: entries.len(),
+            entries,
+        })
+    }
+
+    fn rollback_baseline_for_tracked_file(
+        &self,
+        tracked: &XTrackedFile,
+    ) -> Result<Option<XBaselineTarget>, String> {
+        let earliest_revision = tracked
+            .revisions
+            .front()
+            .cloned()
+            .expect("tracked file must have at least one revision");
+        let use_explicit_checkpoint = self.checkpoint.is_some();
+        let checkpoint_target = self
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.entries.get(&tracked.tracking_id));
+
+        if let Some(checkpoint_target) = checkpoint_target {
+            let target = tracked
+                .revisions
+                .iter()
+                .find(|revision| revision.number == checkpoint_target.revision)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Checkpoint revision {} is not retained for {}.",
+                        checkpoint_target.revision,
+                        checkpoint_target.path.display()
+                    )
+                })?;
+            return Ok(Some(XBaselineTarget {
+                revision: target.number,
+                file: target.file,
+            }));
+        }
+
+        if use_explicit_checkpoint && earliest_revision.file.exists {
+            return Ok(None);
+        }
+
+        Ok(Some(XBaselineTarget {
+            revision: earliest_revision.number,
+            file: earliest_revision.file,
+        }))
+    }
+
+    fn plan_rollback(&self) -> Result<XRollbackPlan, String> {
+        let use_explicit_checkpoint = self.checkpoint.is_some();
+        let mut tracked_files = self.files.values().cloned().collect::<Vec<_>>();
+        tracked_files.sort_by(|left, right| {
+            left.current_head()
+                .file
+                .path
+                .cmp(&right.current_head().file.path)
+        });
+
+        let mut new_files = HashMap::new();
+        let mut transitions = Vec::new();
+        let mut changed_files = 0usize;
+        let mut removed_files = 0usize;
+        let mut unchanged_files = 0usize;
+        let mut affected_paths = Vec::new();
+
+        for tracked in tracked_files {
+            let current_revision = tracked
+                .revisions
+                .back()
+                .cloned()
+                .expect("tracked file must have a head revision");
+            let decision = match self.rollback_baseline_for_tracked_file(&tracked)? {
+                Some(baseline) if !baseline.file.exists => RollbackDecision::Remove,
+                Some(baseline) => RollbackDecision::ToRevision(baseline.revision),
+                None => RollbackDecision::KeepCurrent,
+            };
+
+            match decision {
+                RollbackDecision::KeepCurrent => {
+                    unchanged_files += 1;
+                    insert_planned_file(&mut new_files, tracked)?;
+                }
+                RollbackDecision::Remove => {
+                    changed_files += 1;
+                    removed_files += 1;
+                    affected_paths.push(current_revision.file.path.clone());
+                    transitions.push(XFileTransition {
+                        current: current_revision.file,
+                        target: None,
+                    });
+                }
+                RollbackDecision::ToRevision(target_revision) => {
+                    let mut rolled_back = tracked.clone();
+                    while rolled_back
+                        .revisions
+                        .back()
+                        .map(|revision| revision.number > target_revision)
+                        .unwrap_or(false)
+                    {
+                        rolled_back.revisions.pop_back();
+                    }
+                    let Some(target_head) = rolled_back.revisions.back().cloned() else {
+                        return Err(format!(
+                            "Rollback target revision {} is not retained for {}.",
+                            target_revision,
+                            current_revision.file.path.display()
+                        ));
+                    };
+                    if target_head.number != target_revision {
+                        return Err(format!(
+                            "Rollback target revision {} is not retained for {}.",
+                            target_revision,
+                            current_revision.file.path.display()
+                        ));
+                    }
+
+                    let target_file = target_head.file;
+                    if files_differ(&current_revision.file, &target_file) {
+                        changed_files += 1;
+                        affected_paths.push(target_file.path.clone());
+                        transitions.push(XFileTransition {
+                            current: current_revision.file,
+                            target: Some(target_file.clone()),
+                        });
+                    } else {
+                        unchanged_files += 1;
+                    }
+
+                    rolled_back.last_disk_state = None;
+                    insert_planned_file(&mut new_files, rolled_back)?;
+                }
+            }
+        }
+
+        affected_paths.sort();
+        affected_paths.dedup();
+
+        Ok(XRollbackPlan {
+            files: new_files,
+            transitions,
+            summary: XRollbackSummary {
+                used_explicit_checkpoint: use_explicit_checkpoint,
+                changed_files,
+                removed_files,
+                unchanged_files,
+                affected_paths,
+            },
+        })
+    }
+
+    fn refresh_disk_states(&mut self) -> Result<(), String> {
+        for (path, tracked) in self.files.iter_mut() {
+            let current = tracked.current_head();
+            tracked.last_disk_state = if current.file.exists {
+                read_disk_state(path)?
+            } else {
+                None
+            };
+        }
         Ok(())
     }
 
@@ -1273,7 +1647,9 @@ mod tests {
     }
 
     async fn write_head_to_disk(session_id: &str, head: &XFileHead) {
-        apply_file_to_disk(&head.file.path, &head.file).await.unwrap();
+        apply_file_to_disk(&head.file.path, &head.file)
+            .await
+            .unwrap();
         record_disk_state(session_id, &head.file.path).unwrap();
     }
 
@@ -1549,7 +1925,9 @@ mod tests {
         let copy = tmp.path().join("copies/source-copy.txt");
         let moved = tmp.path().join("moved/source-moved.txt");
 
-        tokio::fs::write(&source, "alpha\nbeta\ngamma\n").await.unwrap();
+        tokio::fs::write(&source, "alpha\nbeta\ngamma\n")
+            .await
+            .unwrap();
 
         let source_head = ensure_loaded(&session_id, &source).await.unwrap();
         assert_eq!(source_head.rendered_content, "alpha\nbeta\ngamma\n");
@@ -1557,9 +1935,17 @@ mod tests {
 
         let copy_head = copy_tracked_file(&session_id, &source, &copy).unwrap();
         write_head_to_disk(&session_id, &copy_head).await;
-        assert_eq!(tokio::fs::read_to_string(&copy).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&copy).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
 
-        for (source_line, copy_line) in source_head.file.content.iter().zip(copy_head.file.content.iter()) {
+        for (source_line, copy_line) in source_head
+            .file
+            .content
+            .iter()
+            .zip(copy_head.file.content.iter())
+        {
             assert_eq!(source_line.content, copy_line.content);
             assert_ne!(source_line.tag, copy_line.tag);
         }
@@ -1567,8 +1953,22 @@ mod tests {
         let copy_revisions = list_revisions(&session_id, &copy).unwrap();
         assert_eq!(copy_revisions.len(), 2);
         assert!(!copy_revisions[0].file.exists);
-        assert_eq!(copy_revisions[1].metadata.as_ref().unwrap().operation.as_deref(), Some("copy"));
-        let copied = copy_revisions[1].metadata.as_ref().unwrap().copied.as_ref().unwrap();
+        assert_eq!(
+            copy_revisions[1]
+                .metadata
+                .as_ref()
+                .unwrap()
+                .operation
+                .as_deref(),
+            Some("copy")
+        );
+        let copied = copy_revisions[1]
+            .metadata
+            .as_ref()
+            .unwrap()
+            .copied
+            .as_ref()
+            .unwrap();
         assert_eq!(copied.source_path, source);
         assert_eq!(copied.destination_path, copy);
 
@@ -1578,7 +1978,10 @@ mod tests {
         assert_eq!(copy_absent.file.path, copy);
 
         let copy_restored = restore_revision_and_apply(&session_id, &copy, 2).await;
-        assert_eq!(tokio::fs::read_to_string(&copy).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&copy).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
         assert_eq!(copy_restored.file.path, copy);
         for (restored_line, original_copy_line) in copy_restored
             .file
@@ -1597,10 +2000,18 @@ mod tests {
         record_disk_state(&session_id, &moved_head.file.path).unwrap();
 
         assert!(!source.exists());
-        assert_eq!(tokio::fs::read_to_string(&moved).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&moved).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
         assert!(try_get_head(&session_id, &source).is_none());
 
-        for (source_line, moved_line) in source_head.file.content.iter().zip(moved_head.file.content.iter()) {
+        for (source_line, moved_line) in source_head
+            .file
+            .content
+            .iter()
+            .zip(moved_head.file.content.iter())
+        {
             assert_eq!(source_line.tag, moved_line.tag);
         }
 
@@ -1608,8 +2019,22 @@ mod tests {
         assert_eq!(moved_revisions.len(), 2);
         assert_eq!(moved_revisions[0].file.path, source);
         assert_eq!(moved_revisions[1].file.path, moved);
-        assert_eq!(moved_revisions[1].metadata.as_ref().unwrap().operation.as_deref(), Some("move"));
-        let moved_metadata = moved_revisions[1].metadata.as_ref().unwrap().moved.as_ref().unwrap();
+        assert_eq!(
+            moved_revisions[1]
+                .metadata
+                .as_ref()
+                .unwrap()
+                .operation
+                .as_deref(),
+            Some("move")
+        );
+        let moved_metadata = moved_revisions[1]
+            .metadata
+            .as_ref()
+            .unwrap()
+            .moved
+            .as_ref()
+            .unwrap();
         assert_eq!(moved_metadata.source_path, source);
         assert_eq!(moved_metadata.destination_path, moved);
 
@@ -1637,13 +2062,19 @@ mod tests {
 
         let moved_after_delete_revert = discard_head_and_apply(&session_id, &moved).await;
         assert_eq!(moved_after_delete_revert.file.path, moved);
-        assert_eq!(tokio::fs::read_to_string(&moved).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&moved).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
 
         let restored_to_source = restore_revision_and_apply(&session_id, &moved, 1).await;
         assert_eq!(restored_to_source.file.path, source);
         assert!(source.exists());
         assert!(!moved.exists());
-        assert_eq!(tokio::fs::read_to_string(&source).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&source).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
 
         let restored_revisions = list_revisions(&session_id, &source).unwrap();
         assert_eq!(
@@ -1672,13 +2103,19 @@ mod tests {
         let moved_again = discard_head_and_apply(&session_id, &source).await;
         assert_eq!(moved_again.file.path, moved);
         assert!(try_get_head(&session_id, &source).is_none());
-        assert_eq!(tokio::fs::read_to_string(&moved).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&moved).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
 
         let source_again = discard_head_and_apply(&session_id, &moved).await;
         assert_eq!(source_again.file.path, source);
         assert!(source.exists());
         assert!(!moved.exists());
-        assert_eq!(tokio::fs::read_to_string(&source).await.unwrap(), "alpha\nbeta\ngamma\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&source).await.unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
         assert!(try_get_head(&session_id, &moved).is_none());
 
         for (restored_line, original_line) in source_again
@@ -1689,6 +2126,110 @@ mod tests {
         {
             assert_eq!(restored_line.tag, original_line.tag);
         }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_and_rollback_restore_moved_deleted_and_copied_files() {
+        let tmp = tempdir_in_system_tmp("xstorage-checkpoint-");
+        let session_id = format!("xstorage-checkpoint-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let source = tmp.path().join("source.txt");
+        let deleted = tmp.path().join("deleted.txt");
+        let copy = tmp.path().join("copy.txt");
+        let moved = tmp.path().join("moved/source.txt");
+
+        tokio::fs::write(&source, "alpha\nbeta\n").await.unwrap();
+        tokio::fs::write(&deleted, "delete-me\n").await.unwrap();
+
+        let source_head = ensure_loaded(&session_id, &source).await.unwrap();
+        let deleted_head = ensure_loaded(&session_id, &deleted).await.unwrap();
+        let checkpoint = create_checkpoint(&session_id);
+        assert_eq!(checkpoint.tracked_files, 2);
+
+        let copy_head = copy_tracked_file(&session_id, &source, &copy).unwrap();
+        write_head_to_disk(&session_id, &copy_head).await;
+
+        let current_source = try_get_head(&session_id, &source).unwrap();
+        let moved_head = move_tracked_file(&session_id, &source, &moved).unwrap();
+        apply_file_transition_to_disk(&current_source.file, &moved_head.file)
+            .await
+            .unwrap();
+        record_disk_state(&session_id, &moved_head.file.path).unwrap();
+
+        let deleted_now = store_deleted_file(&session_id, &deleted);
+        apply_file_transition_to_disk(&deleted_head.file, &deleted_now.file)
+            .await
+            .unwrap();
+        record_disk_state(&session_id, &deleted_now.file.path).unwrap();
+
+        let summary = rollback_to_checkpoint(&session_id).await.unwrap();
+        assert!(summary.used_explicit_checkpoint);
+        assert_eq!(summary.changed_files, 3);
+        assert_eq!(summary.removed_files, 1);
+
+        assert_eq!(
+            tokio::fs::read_to_string(&source).await.unwrap(),
+            "alpha\nbeta\n"
+        );
+        assert!(!copy.exists());
+        assert!(!moved.exists());
+        assert_eq!(
+            tokio::fs::read_to_string(&deleted).await.unwrap(),
+            "delete-me\n"
+        );
+
+        assert!(try_get_head(&session_id, &copy).is_none());
+        assert!(try_get_head(&session_id, &moved).is_none());
+
+        let restored_source = try_get_head(&session_id, &source).unwrap();
+        let restored_deleted = try_get_head(&session_id, &deleted).unwrap();
+        assert_eq!(list_revisions(&session_id, &source).unwrap().len(), 1);
+        assert_eq!(list_revisions(&session_id, &deleted).unwrap().len(), 1);
+        for (restored_line, original_line) in restored_source
+            .file
+            .content
+            .iter()
+            .zip(source_head.file.content.iter())
+        {
+            assert_eq!(restored_line.tag, original_line.tag);
+        }
+        assert_eq!(restored_deleted.rendered_content, "delete-me\n");
+    }
+
+    #[tokio::test]
+    async fn rollback_without_explicit_checkpoint_uses_earliest_retained_state() {
+        let tmp = tempdir_in_system_tmp("xstorage-implicit-");
+        let session_id = format!("xstorage-implicit-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let existing = tmp.path().join("existing.txt");
+        let created = tmp.path().join("created.txt");
+
+        tokio::fs::write(&existing, "before\n").await.unwrap();
+        ensure_loaded(&session_id, &existing).await.unwrap();
+
+        let updated = store_written_text(&session_id, &existing, "after\n");
+        write_head_to_disk(&session_id, &updated).await;
+
+        let created_head = store_written_text(&session_id, &created, "created\n");
+        write_head_to_disk(&session_id, &created_head).await;
+
+        let summary = rollback_to_checkpoint(&session_id).await.unwrap();
+        assert!(!summary.used_explicit_checkpoint);
+        assert_eq!(summary.changed_files, 2);
+        assert_eq!(summary.removed_files, 1);
+
+        assert_eq!(
+            tokio::fs::read_to_string(&existing).await.unwrap(),
+            "before\n"
+        );
+        assert!(!created.exists());
+        assert!(try_get_head(&session_id, &created).is_none());
+
+        let restored_existing = try_get_head(&session_id, &existing).unwrap();
+        assert_eq!(restored_existing.rendered_content, "before\n");
+        assert_eq!(list_revisions(&session_id, &existing).unwrap().len(), 1);
     }
 
     #[test]

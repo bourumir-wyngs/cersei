@@ -245,7 +245,10 @@ fn require_source_and_destination(
     Ok((source, destination))
 }
 
-fn ensure_destination_available(session_id: &str, destination: &Path) -> std::result::Result<(), String> {
+fn ensure_destination_available(
+    session_id: &str,
+    destination: &Path,
+) -> std::result::Result<(), String> {
     if destination.exists() {
         return Err(format!(
             "Destination already exists on disk: {}",
@@ -374,7 +377,10 @@ mod tests {
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        assert_eq!(tokio::fs::read_to_string(&dst).await.unwrap(), "alpha\nbeta\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&dst).await.unwrap(),
+            "alpha\nbeta\n"
+        );
 
         let dst_head = try_get_head(&session_id, &dst).unwrap();
         assert_ne!(src_head.file.content[0].tag, dst_head.file.content[0].tag);
@@ -427,7 +433,10 @@ mod tests {
 
         assert!(!result.is_error, "{}", result.content);
         assert!(!src.exists());
-        assert_eq!(tokio::fs::read_to_string(&dst).await.unwrap(), "alpha\nbeta\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&dst).await.unwrap(),
+            "alpha\nbeta\n"
+        );
 
         assert!(try_get_head(&session_id, &src).is_none());
         let dst_head = try_get_head(&session_id, &dst).unwrap();
@@ -436,7 +445,14 @@ mod tests {
 
         let revisions = list_revisions(&session_id, &dst).unwrap();
         assert_eq!(
-            revisions.last().unwrap().metadata.as_ref().unwrap().operation.as_deref(),
+            revisions
+                .last()
+                .unwrap()
+                .metadata
+                .as_ref()
+                .unwrap()
+                .operation
+                .as_deref(),
             Some("move")
         );
 

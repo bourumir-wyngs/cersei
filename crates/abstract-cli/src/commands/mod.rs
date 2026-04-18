@@ -1,5 +1,7 @@
 //! Slash command registry and dispatch.
 
+mod changes;
+mod checkpoint;
 mod clear;
 mod commit;
 mod compact;
@@ -11,6 +13,7 @@ mod memory;
 mod model;
 mod resume;
 mod review;
+mod rollback;
 mod save;
 
 use crate::config::AppConfig;
@@ -27,6 +30,9 @@ pub enum CommandAction {
     },
     ClearHistory,
     Compact,
+    InjectUserMessage {
+        message: String,
+    },
     LoadSession {
         messages: Vec<cersei_types::Message>,
         session_id: String,
@@ -50,7 +56,9 @@ impl CommandRegistry {
     ) -> anyhow::Result<CommandAction> {
         let result = match cmd {
             "help" | "h" | "?" => help::run().map(|_| CommandAction::None),
+            "changes" => changes::run(args, session_id).map_err(anyhow::Error::msg),
             "clear" => clear::run().map(|_| CommandAction::ClearHistory),
+            "checkpoint" => checkpoint::run(args, session_id).map_err(anyhow::Error::msg),
             "compact" => compact::run(config).map(|_| CommandAction::Compact),
             "cost" => cost::run(session_id).map(|_| CommandAction::None),
             "commit" => commit::run(config).await.map(|_| CommandAction::None),
@@ -59,6 +67,9 @@ impl CommandRegistry {
             "model" => model::run(args, config).await,
             "config" | "cfg" => config_cmd::run(args, config).map(|_| CommandAction::None),
             "diff" => diff::run(config).map(|_| CommandAction::None),
+            "rollback" => rollback::run(args, session_id)
+                .await
+                .map_err(anyhow::Error::msg),
             "resume" => resume::run(args, config),
             "delete" | "del" => {
                 if args.trim().is_empty() {

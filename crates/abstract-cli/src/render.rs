@@ -372,6 +372,7 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
         "MultiRead" => multiread_tool_summary(input),
         "Write" => write_tool_summary(input),
         "File" => file_tool_summary(input),
+        "FileHistory" => file_history_tool_summary(input),
         "Edit" | "Sed" | "sed" => input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -567,6 +568,27 @@ fn file_tool_summary(input: &serde_json::Value) -> String {
     }
 }
 
+fn file_history_tool_summary(input: &serde_json::Value) -> String {
+    let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+    match action {
+        "list" | "checkpoint" | "rollback" => action.to_string(),
+        "revisions" | "diff" | "get_revision" | "revert" | "restore" => {
+            let file_path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if file_path.is_empty() {
+                return action.to_string();
+            }
+            match input.get("revision").and_then(|v| v.as_u64()) {
+                Some(revision) => format!("{action} {file_path} rev {revision}"),
+                None => format!("{action} {file_path}"),
+            }
+        }
+        _ => serde_json::to_string(input).unwrap_or_default(),
+    }
+}
+
 fn tool_input_console_body(name: &str, input: &serde_json::Value) -> Option<ToolConsoleBody> {
     if matches!(name, "Write" | "write") {
         return input
@@ -740,6 +762,28 @@ mod tests {
             }),
         );
         assert_eq!(summary, "move src/old.rs -> src/new.rs");
+    }
+
+    #[test]
+    fn file_history_summary_formats_rollback_action() {
+        let summary = tool_input_summary(
+            "FileHistory",
+            &serde_json::json!({
+                "action": "rollback"
+            }),
+        );
+        assert_eq!(summary, "rollback");
+    }
+
+    #[test]
+    fn file_history_summary_formats_checkpoint_diff_action() {
+        let summary = tool_input_summary(
+            "FileHistory",
+            &serde_json::json!({
+                "action": "diff"
+            }),
+        );
+        assert_eq!(summary, "diff");
     }
 
     #[test]

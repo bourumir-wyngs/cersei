@@ -3,6 +3,9 @@ pub fn run() -> anyhow::Result<()> {
     eprintln!("  /help, /h, /?     Show this help");
     eprintln!("  Trailing \\        Continue onto the next line (\\\\ does not)");
     eprintln!("  /clear            Clear conversation history");
+    eprintln!("  /checkpoint       Save a file-history checkpoint");
+    eprintln!("  /changes          Show tracked changes since the latest checkpoint");
+    eprintln!("  /rollback         Roll tracked files back to the latest checkpoint");
     eprintln!("  /compact          Manually compact context");
     eprintln!("  /cost             Show token usage and cost");
     eprintln!("  /commit           Generate a git commit with AI message");

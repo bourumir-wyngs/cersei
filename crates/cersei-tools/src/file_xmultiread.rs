@@ -76,8 +76,11 @@ impl Tool for XMultiReadTool {
             };
 
             if result.is_error {
-                return ToolResult::error(format!("Reading file {}\n{}", file_path, result.content))
-                    .with_metadata(result.metadata.unwrap_or(Value::Null));
+                return ToolResult::error(format!(
+                    "Reading file {}\n{}",
+                    file_path, result.content
+                ))
+                .with_metadata(result.metadata.unwrap_or(Value::Null));
             }
 
             outputs.push(format!("Reading file {}\n{}", file_path, result.content));
@@ -133,11 +136,15 @@ mod tests {
 
         let path_a = tmp.path().join("a.txt");
         let head_a = store_written_text(&session_id, &path_a, "one\ntwo\n");
-        tokio::fs::write(&path_a, &head_a.rendered_content).await.unwrap();
+        tokio::fs::write(&path_a, &head_a.rendered_content)
+            .await
+            .unwrap();
 
         let path_b = tmp.path().join("b.txt");
         let head_b = store_written_text(&session_id, &path_b, "three\nfour\n");
-        tokio::fs::write(&path_b, &head_b.rendered_content).await.unwrap();
+        tokio::fs::write(&path_b, &head_b.rendered_content)
+            .await
+            .unwrap();
 
         let tool = XMultiReadTool;
         let result = tool
@@ -153,8 +160,12 @@ mod tests {
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains(&format!("Reading file {}", path_a.display())));
-        assert!(result.content.contains(&format!("Reading file {}", path_b.display())));
+        assert!(result
+            .content
+            .contains(&format!("Reading file {}", path_a.display())));
+        assert!(result
+            .content
+            .contains(&format!("Reading file {}", path_b.display())));
         assert!(result.content.contains("\tone"));
         assert!(result.content.contains("\tthree"));
         assert_eq!(result.metadata.as_ref().unwrap()["request_count"], 2);

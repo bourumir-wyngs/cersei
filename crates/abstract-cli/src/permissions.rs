@@ -468,8 +468,12 @@ fn extract_read_targets(request: &PermissionRequest) -> Option<Vec<PathBuf>> {
             ]),
             _ => None,
         },
-        "FileHistory" => path_field("file_path")
-            .map(|path| vec![resolve_request_path(path, &request.working_dir)]),
+        "FileHistory" => match path_field("action")? {
+            "revisions" | "get_revision" | "diff" | "revert" | "restore" => path_field("file_path")
+                .map(|path| vec![resolve_request_path(path, &request.working_dir)]),
+            "list" | "checkpoint" | "rollback" => None,
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -972,6 +976,19 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(targets[0].ends_with("src/old.rs"));
         assert!(targets[1].ends_with("src/new.rs"));
+    }
+
+    #[test]
+    fn file_history_rollback_has_no_path_targets() {
+        let request = make_request_with_level(
+            "FileHistory",
+            json!({
+                "action": "rollback"
+            }),
+            PermissionLevel::Write,
+        );
+
+        assert!(extract_read_targets(&request).is_none());
     }
 
     #[test]

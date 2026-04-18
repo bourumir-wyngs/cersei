@@ -1,12 +1,13 @@
 //! FileHistory tool: exposes XFileStorage revision history to the AI.
 //!
-//! Actions: list, revisions, get_revision, diff, revert, restore.
+//! Actions: list, revisions, get_revision, diff, revert, restore, checkpoint, rollback.
 
 use super::*;
 use crate::xfile_storage::{
-    apply_file_transition_to_disk, diff_files, file_state, files_differ, get_revision,
-    list_revisions, list_tracked_files, record_disk_state, render_file, resolve_xfile_path,
-    restore_revision, XFileRevisionMetadata,
+    apply_file_transition_to_disk, create_checkpoint, diff_against_checkpoint, diff_files,
+    file_state, files_differ, get_revision, list_revisions, list_tracked_files, record_disk_state,
+    render_file, resolve_xfile_path, restore_revision, rollback_to_checkpoint,
+    XFileRevisionMetadata,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -25,10 +26,13 @@ impl Tool for FileHistoryTool {
          - `list` — list tracked XFileStorage files with current revision, presence state, and line counts.\n\
          - `revisions` — list retained revisions for a specific file (requires `file_path`). Revisions can represent either a present file or an absent file and may include operation metadata such as copy or move details.\n\
          - `get_revision` — get the full rendered content of a stored revision (requires `file_path` + `revision`).\n\
-         - `diff` — show a unified diff between retained revisions. Omitting `to_revision` diffs against the current XFileStorage head. \
-           Omitting `from_revision` defaults to the earliest retained revision. Omitting both diffs the previous revision against the current head.\n\
+         - `diff` — with `file_path`, show a unified diff between retained revisions. Omitting `to_revision` diffs against the current XFileStorage head. \
+           Omitting `from_revision` defaults to the earliest retained revision. Omitting both diffs the previous revision against the current head. \
+           Without `file_path`, show a combined diff between the current session state and the latest checkpoint. If no explicit checkpoint exists yet, the implicit session-start baseline is used.\n\
          - `revert` — restore a file to a specific retained revision by cloning that revision into a new XFileStorage head and applying it to disk (requires `file_path` + `revision`). If the target revision is absent, the file is deleted.\n\
-         - `restore` — same as revert (alias)."
+         - `restore` — same as revert (alias).\n\
+         - `checkpoint` — save the current retained head revision of every tracked file in this session.\n\
+         - `rollback` — destructively roll tracked files back to the saved checkpoint. If no explicit checkpoint exists yet, rollback uses each tracked file's earliest retained session revision as the baseline."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -45,12 +49,12 @@ impl Tool for FileHistoryTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["list", "revisions", "get_revision", "diff", "revert", "restore"],
-                    "description": "The action to perform. `list` needs no extra fields. `revisions` and `diff` need `file_path`. `get_revision`, `revert`, and `restore` need both `file_path` and `revision`."
+                    "enum": ["list", "revisions", "get_revision", "diff", "revert", "restore", "checkpoint", "rollback"],
+                    "description": "The action to perform. `list`, `checkpoint`, and `rollback` need no extra fields. `diff` may omit `file_path` to compare the current session state against the latest checkpoint. `revisions` needs `file_path`. `get_revision`, `revert`, and `restore` need both `file_path` and `revision`."
                 },
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the tracked file. Required for every action except `list`. Absolute paths and workspace-relative paths are accepted."
+                    "description": "Path to the tracked file. Required for `revisions`, `get_revision`, `revert`, and `restore`. Optional for `diff`: if omitted, `diff` compares the whole tracked session state to the latest checkpoint. Absolute paths and workspace-relative paths are accepted."
                 },
                 "revision": {
                     "type": "integer",
@@ -86,6 +90,7 @@ impl Tool for FileHistoryTool {
 
         match input.action.as_str() {
             "list" => action_list(&ctx.session_id),
+            "checkpoint" => action_checkpoint(&ctx.session_id),
             "revisions" => {
                 let path = match require_path(&input.file_path, ctx) {
                     Ok(path) => path,
@@ -105,11 +110,20 @@ impl Tool for FileHistoryTool {
                 action_get_revision(&ctx.session_id, &path, revision)
             }
             "diff" => {
-                let path = match require_path(&input.file_path, ctx) {
-                    Ok(path) => path,
-                    Err(err) => return err,
-                };
-                action_diff(&ctx.session_id, &path, input.from_revision, input.to_revision)
+                match &input.file_path {
+                    Some(path) => {
+                        let path = resolve_xfile_path(ctx, path);
+                        action_diff(&ctx.session_id, &path, input.from_revision, input.to_revision)
+                    }
+                    None => {
+                        if input.from_revision.is_some() || input.to_revision.is_some() {
+                            return ToolResult::error(
+                                "`from_revision` and `to_revision` require `file_path` for action `diff`",
+                            );
+                        }
+                        action_checkpoint_diff(&ctx.session_id)
+                    }
+                }
             }
             "revert" | "restore" => {
                 let path = match require_path(&input.file_path, ctx) {
@@ -122,8 +136,9 @@ impl Tool for FileHistoryTool {
                 };
                 action_revert(&ctx.session_id, &path, revision).await
             }
+            "rollback" => action_rollback(&ctx.session_id).await,
             other => ToolResult::error(format!(
-                "Unknown action: `{}`. Valid actions: list, revisions, get_revision, diff, revert, restore",
+                "Unknown action: `{}`. Valid actions: list, revisions, get_revision, diff, revert, restore, checkpoint, rollback",
                 other
             )),
         }
@@ -173,6 +188,24 @@ fn action_list(session_id: &str) -> ToolResult {
             if file.exists { "present" } else { "absent" },
             file.line_count,
         ));
+    }
+    ToolResult::success(out)
+}
+
+fn action_checkpoint(session_id: &str) -> ToolResult {
+    let summary = create_checkpoint(session_id);
+    if summary.tracked_files == 0 {
+        return ToolResult::success(
+            "Saved an empty FileHistory checkpoint for this session. No tracked files exist yet.",
+        );
+    }
+
+    let mut out = format!(
+        "Saved a FileHistory checkpoint for {} tracked file(s):\n\n",
+        summary.tracked_files
+    );
+    for path in summary.current_paths {
+        out.push_str(&format!("  {}\n", path.display()));
     }
     ToolResult::success(out)
 }
@@ -311,6 +344,59 @@ fn action_diff(
     }
 }
 
+fn action_checkpoint_diff(session_id: &str) -> ToolResult {
+    let summary = match diff_against_checkpoint(session_id) {
+        Ok(summary) => summary,
+        Err(err) => return ToolResult::error(err),
+    };
+    if summary.entries.is_empty() {
+        let baseline = if summary.used_explicit_checkpoint {
+            "saved checkpoint"
+        } else {
+            "implicit session-start baseline"
+        };
+        return ToolResult::success(format!(
+            "No differences between the current tracked session state and the {}.",
+            baseline
+        ));
+    }
+
+    let baseline = if summary.used_explicit_checkpoint {
+        "saved checkpoint"
+    } else {
+        "implicit session-start baseline"
+    };
+    let mut out = format!(
+        "Combined diff between the current tracked session state and the {}:\n\n",
+        baseline
+    );
+    for (idx, entry) in summary.entries.iter().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if entry.baseline_file.path == entry.current_file.path {
+            out.push_str(&format!("File: {}\n", entry.current_file.path.display()));
+        } else {
+            out.push_str(&format!(
+                "File: {} -> {}\n",
+                entry.baseline_file.path.display(),
+                entry.current_file.path.display()
+            ));
+        }
+        out.push_str(&diff_files(
+            &entry.baseline_file,
+            &entry.current_file,
+            &format!("rev {}", entry.baseline_revision),
+            &format!("rev {} (current)", entry.current_revision),
+        ));
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+
+    ToolResult::success(out.trim_end().to_string())
+}
+
 async fn action_revert(session_id: &str, path: &Path, revision: usize) -> ToolResult {
     let revisions = match tracked_revisions(session_id, path) {
         Ok(revisions) => revisions,
@@ -354,7 +440,11 @@ async fn action_revert(session_id: &str, path: &Path, revision: usize) -> ToolRe
         &current.file,
         &head.file,
         &format!("rev {}", current.number),
-        &format!("restored from rev {} at {}", revision, head.file.path.display()),
+        &format!(
+            "restored from rev {} at {}",
+            revision,
+            head.file.path.display()
+        ),
     );
 
     ToolResult::success(format!(
@@ -364,6 +454,30 @@ async fn action_revert(session_id: &str, path: &Path, revision: usize) -> ToolRe
         head.file.path.display(),
         diff.trim_end()
     ))
+}
+
+async fn action_rollback(session_id: &str) -> ToolResult {
+    let summary = match rollback_to_checkpoint(session_id).await {
+        Ok(summary) => summary,
+        Err(err) => return ToolResult::error(err),
+    };
+
+    let checkpoint_kind = if summary.used_explicit_checkpoint {
+        "saved checkpoint"
+    } else {
+        "implicit session-start baseline"
+    };
+    let mut out = format!(
+        "Rolled back FileHistory state to the {}. Changed: {}, removed: {}, unchanged: {}.",
+        checkpoint_kind, summary.changed_files, summary.removed_files, summary.unchanged_files
+    );
+    if !summary.affected_paths.is_empty() {
+        out.push_str("\n\nAffected paths:\n");
+        for path in summary.affected_paths {
+            out.push_str(&format!("  {}\n", path.display()));
+        }
+    }
+    ToolResult::success(out)
 }
 
 fn format_revision_metadata(metadata: &XFileRevisionMetadata) -> String {
@@ -397,10 +511,11 @@ fn format_revision_metadata(metadata: &XFileRevisionMetadata) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_tool::FileTool;
     use crate::file_xwrite::XWriteTool;
     use crate::permissions::AllowAll;
     use crate::xfile_storage::{
-        clear_session_xfile_storage, list_revisions, store_loaded_if_missing,
+        clear_session_xfile_storage, list_revisions, store_loaded_if_missing, try_get_head,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -717,6 +832,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diff_without_file_path_reports_combined_diff_since_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        clear_session_xfile_storage(&ctx.session_id);
+        let edited = tmp.path().join("edited.txt");
+        let created = tmp.path().join("created.txt");
+
+        xwrite(&ctx, &edited.display().to_string(), "alpha\n").await;
+
+        let tool = FileHistoryTool;
+        let checkpoint = tool
+            .execute(json_input("checkpoint", json!({})), &ctx)
+            .await;
+        assert!(!checkpoint.is_error, "{}", checkpoint.content);
+
+        xwrite(&ctx, &edited.display().to_string(), "beta\n").await;
+        xwrite(&ctx, &created.display().to_string(), "new\n").await;
+
+        let result = tool.execute(json_input("diff", json!({})), &ctx).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("saved checkpoint"));
+        assert!(result
+            .content
+            .contains(&format!("File: {}", edited.display())));
+        assert!(result
+            .content
+            .contains(&format!("File: {}", created.display())));
+        assert!(result.content.contains("-alpha"));
+        assert!(result.content.contains("+beta"));
+        assert!(result.content.contains("+new"));
+        assert!(result.content.contains("(absent)"));
+    }
+
+    #[tokio::test]
+    async fn diff_without_file_path_uses_implicit_session_start_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        clear_session_xfile_storage(&ctx.session_id);
+        let existing = tmp.path().join("existing.txt");
+
+        tokio::fs::write(&existing, "before\n").await.unwrap();
+        xwrite(&ctx, &existing.display().to_string(), "after\n").await;
+
+        let tool = FileHistoryTool;
+        let result = tool.execute(json_input("diff", json!({})), &ctx).await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("implicit session-start baseline"));
+        assert!(result
+            .content
+            .contains(&format!("File: {}", existing.display())));
+        assert!(result.content.contains("-before"));
+        assert!(result.content.contains("+after"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_diff_rejects_revision_bounds_without_file_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        clear_session_xfile_storage(&ctx.session_id);
+
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input(
+                    "diff",
+                    json!({
+                        "from_revision": 1
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .contains("`from_revision` and `to_revision` require `file_path`"));
+    }
+
+    #[tokio::test]
     async fn revert_clones_requested_revision_into_new_head() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = make_ctx(tmp.path());
@@ -821,6 +1018,69 @@ mod tests {
         let revisions = list_revisions(&ctx.session_id, &file_path).unwrap();
         assert_eq!(revisions.last().unwrap().number, 4);
         assert!(!revisions.last().unwrap().file.exists);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_and_rollback_restore_session_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        clear_session_xfile_storage(&ctx.session_id);
+
+        let source = tmp.path().join("source.txt");
+        let deleted = tmp.path().join("deleted.txt");
+        let copy = tmp.path().join("copy.txt");
+        let moved = tmp.path().join("moved/source.txt");
+
+        xwrite(&ctx, &source.display().to_string(), "alpha\n").await;
+        xwrite(&ctx, &deleted.display().to_string(), "delete-me\n").await;
+
+        let tool = FileHistoryTool;
+        let checkpoint = tool
+            .execute(json_input("checkpoint", json!({})), &ctx)
+            .await;
+        assert!(!checkpoint.is_error, "{}", checkpoint.content);
+        assert!(checkpoint
+            .content
+            .contains("Saved a FileHistory checkpoint"));
+
+        let file_tool = FileTool;
+        for input in [
+            json!({
+                "action": "copy",
+                "source_path": source.display().to_string(),
+                "destination_path": copy.display().to_string()
+            }),
+            json!({
+                "action": "move",
+                "source_path": source.display().to_string(),
+                "destination_path": moved.display().to_string()
+            }),
+            json!({
+                "action": "delete",
+                "file_path": deleted.display().to_string()
+            }),
+        ] {
+            let result = file_tool.execute(input, &ctx).await;
+            assert!(!result.is_error, "{}", result.content);
+        }
+
+        let rollback = tool.execute(json_input("rollback", json!({})), &ctx).await;
+        assert!(!rollback.is_error, "{}", rollback.content);
+        assert!(rollback.content.contains("saved checkpoint"));
+        assert!(rollback.content.contains("removed: 1"));
+
+        assert_eq!(tokio::fs::read_to_string(&source).await.unwrap(), "alpha\n");
+        assert!(!copy.exists());
+        assert!(!moved.exists());
+        assert_eq!(
+            tokio::fs::read_to_string(&deleted).await.unwrap(),
+            "delete-me\n"
+        );
+
+        assert!(try_get_head(&ctx.session_id, &copy).is_none());
+        assert!(try_get_head(&ctx.session_id, &moved).is_none());
+        assert_eq!(list_revisions(&ctx.session_id, &source).unwrap().len(), 2);
+        assert_eq!(list_revisions(&ctx.session_id, &deleted).unwrap().len(), 2);
     }
 
     #[tokio::test]

@@ -245,11 +245,18 @@ fn parse_artifacts(build_output: &str) -> Vec<PathBuf> {
             continue;
         }
 
-        if message.pointer("/target/test").and_then(serde_json::Value::as_bool) != Some(true) {
+        if message
+            .pointer("/target/test")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
             continue;
         }
 
-        let Some(executable) = message.get("executable").and_then(serde_json::Value::as_str) else {
+        let Some(executable) = message
+            .get("executable")
+            .and_then(serde_json::Value::as_str)
+        else {
             continue;
         };
 
@@ -431,17 +438,19 @@ impl Tool for WasmTestsTool {
             ));
         }
 
-
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
         let args = input.args.unwrap_or_default();
         let test_name = input.test_name.as_deref();
         let inferred_package = infer_package(&project_root, &workspace_root);
 
-        let explicit_artifact =
-            match resolve_artifact_path(&project_root, &workspace_root, input.artifact.as_deref()) {
-                Ok(path) => path,
-                Err(err) => return err,
-            };
+        let explicit_artifact = match resolve_artifact_path(
+            &project_root,
+            &workspace_root,
+            input.artifact.as_deref(),
+        ) {
+            Ok(path) => path,
+            Err(err) => return err,
+        };
         let helper_runner = helper_runner_path(&workspace_root);
         let needs_helper_build = !helper_runner.is_file();
         let needs_wasm_build = explicit_artifact.is_none();
@@ -533,13 +542,8 @@ impl Tool for WasmTestsTool {
 
             for artifact in &discovered_artifacts {
                 let list_args = vec!["--list".to_string()];
-                let list_command = run_command(
-                    &workspace_root,
-                    &project_root,
-                    artifact,
-                    None,
-                    &list_args,
-                );
+                let list_command =
+                    run_command(&workspace_root, &project_root, artifact, None, &list_args);
                 let list_result = execute_shell_command(
                     &list_command,
                     &project_root,
@@ -713,7 +717,6 @@ mod tests {
         std::fs::write(root.join("src/lib.rs"), "pub fn meaning() -> u32 { 42 }\n").unwrap();
     }
 
-
     #[test]
     fn build_command_targets_inferred_package_when_provided() {
         let command = build_command(Some("wasm_tests"), Some("my_test"));
@@ -729,7 +732,10 @@ mod tests {
 {"reason":"compiler-artifact","target":{"test":true},"executable":"/tmp/a.wasm"}
 {"reason":"compiler-artifact","target":{"test":true},"executable":"/tmp/b.wasm"}"#;
         let artifacts = parse_artifacts(output);
-        assert_eq!(artifacts, vec![PathBuf::from("/tmp/a.wasm"), PathBuf::from("/tmp/b.wasm")]);
+        assert_eq!(
+            artifacts,
+            vec![PathBuf::from("/tmp/a.wasm"), PathBuf::from("/tmp/b.wasm")]
+        );
     }
     #[tokio::test]
     async fn missing_config_asks_operator_permission_before_writing() {

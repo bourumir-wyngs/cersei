@@ -31,8 +31,8 @@ members = [
     "crates/cersei-hooks",
     "crates/cersei-mcp",
     "crates/abstract-cli",
-    "crates/wasm_tests",
-    "wasm_test",
+#    "crates/wasm_tests",
+#    "wasm_test",
 ]
 
 [workspace.package]
@@ -131,7 +131,7 @@ cersei-agent = { path = "crates/cersei-agent" }
 cersei-memory = { path = "crates/cersei-memory" }
 cersei-hooks = { path = "crates/cersei-hooks" }
 cersei-mcp = { path = "crates/cersei-mcp" }
-wasm_tests = { path = "crates/wasm_tests" }
+#wasm_tests = { path = "crates/wasm_tests" }
 
 [features]
 default = ["cas"]
