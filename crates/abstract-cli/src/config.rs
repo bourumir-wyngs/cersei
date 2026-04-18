@@ -45,7 +45,7 @@ impl Default for AppConfig {
             model: "gpt-5.4".into(),
             reviewer_model: "gpt-5.4".into(),
             provider: "openai".into(),
-            max_turns: 20,
+            max_turns: 50,
             max_tokens: 16384,
             effort: "medium".into(),
             output_style: "default".into(),

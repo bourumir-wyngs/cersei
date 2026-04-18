@@ -8,6 +8,7 @@ use crate::repl;
 use crate::reviewer;
 use crate::sessions;
 use crate::theme::Theme;
+use crate::render::ConsoleReviewRenderer;
 use crate::tools_config;
 use crate::Cli;
 
@@ -28,6 +29,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     let theme = Theme::from_name(&config.theme);
     let tool_extensions = tools_config::load_extensions_from_start_dir()?;
 
+    tool_extensions.insert(ConsoleReviewRenderer::new(&theme, cli.json));
     print_startup_warnings();
 
     // Resolve or create session ID

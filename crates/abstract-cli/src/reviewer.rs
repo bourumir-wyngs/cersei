@@ -90,9 +90,14 @@ impl CliReviewerExecutor {
 #[async_trait::async_trait]
 impl ReviewExecutor for CliReviewerExecutor {
     async fn review(&self, request: ReviewRequest) -> Result<ReviewResponse, String> {
+        let console_renderer = self.tool_extensions.get::<crate::render::ConsoleReviewRenderer>();
         let reviewer_model = self.state.model();
         let reviewer_session_id = self.state.session_id();
         let xfile_session_id = self.state.xfile_session_id();
+        let diff_to_review = request.diff.clone();
+        if let Some(renderer) = console_renderer.as_ref() {
+            renderer.review_diff(&reviewer_model, &reviewer_session_id, &diff_to_review);
+        }
         let existing_messages = load_reviewer_messages(&self.config, &reviewer_session_id)
             .map_err(|err| format!("Failed to load reviewer session: {err}"))?;
         let (agent, resolved_model) = app::build_reviewer_agent(

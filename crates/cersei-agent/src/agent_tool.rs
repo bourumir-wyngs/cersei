@@ -136,7 +136,7 @@ impl Tool for AgentTool {
         let mut builder = Agent::builder()
             .provider(provider)
             .tools(sub_tools)
-            .max_turns(input.max_turns.unwrap_or(10))
+            .max_turns(input.max_turns.unwrap_or(50))
             .permission_policy(AllowAll)
             .working_dir(&ctx.working_dir)
             .tool_extensions(ctx.extensions.clone());

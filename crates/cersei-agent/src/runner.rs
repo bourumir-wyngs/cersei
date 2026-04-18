@@ -292,8 +292,19 @@ pub async fn run_agent_streaming(
     loop {
         turn += 1;
         if turn > agent.max_turns {
-            log_turn_handoff_to_human("max_turns_reached", true, false);
-            break;
+            if auto_summary_requested {
+                log_turn_handoff_to_human("max_turns_reached", true, true);
+                break;
+            }
+
+            agent
+                .messages
+                .lock()
+                .push(Message::user(END_TURN_SUMMARY_PROMPT));
+            auto_summary_requested = true;
+            turn = agent.max_turns;
+            log_turn_handoff_to_human("max_turns_reached", true, true);
+            continue;
         }
 
         // Check cancellation
@@ -504,18 +515,21 @@ pub async fn run_agent_streaming(
         // Handle stop reason
         match &response.stop_reason {
             StopReason::EndTurn => {
-                if !auto_summary_requested
-                    && !assistant_message_has_progress_summary(&response.message)
-                {
-                    agent
-                        .messages
-                        .lock()
-                        .push(Message::user(END_TURN_SUMMARY_PROMPT));
-                    auto_summary_requested = true;
+                if !assistant_message_has_progress_summary(&response.message) {
+                    if !auto_summary_requested {
+                        agent
+                            .messages
+                            .lock()
+                            .push(Message::user(END_TURN_SUMMARY_PROMPT));
+                        auto_summary_requested = true;
+                        log_turn_handoff_to_human("missing_summary_on_end_turn", true, true);
+                        continue;
+                    }
+
                     log_turn_handoff_to_human("missing_summary_on_end_turn", true, true);
-                    continue;
+                    break;
                 }
-                log_turn_handoff_to_human("end_turn", false, false);
+                log_turn_handoff_to_human("end_turn", false, auto_summary_requested);
                 break;
             }
             StopReason::ToolUse => {
@@ -1013,6 +1027,24 @@ mod tests {
 
         assert_eq!(output.turns, 2);
         assert!(output.message.get_all_text().contains("Summary:"));
+    }
+    #[tokio::test]
+    async fn max_turns_reached_logs_summary_prompt_sent() {
+        let agent = Agent::builder()
+            .provider(SummaryProvider {
+                responses: vec!["done"],
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            })
+            .working_dir(std::env::temp_dir())
+            .model("test-model")
+            .max_turns(0)
+            .build()
+            .unwrap();
+
+        let output = run_agent(&agent, "test").await.unwrap();
+
+        assert_eq!(output.turns, 1);
+        assert_eq!(output.message.get_all_text(), "");
     }
 
     #[tokio::test]

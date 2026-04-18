@@ -303,7 +303,7 @@ impl Default for AgentBuilder {
             system_prompt: None,
             append_system_prompt: None,
             model: None,
-            max_turns: 10,
+            max_turns: 50,
             max_tokens: 16384,
             temperature: None,
             thinking_budget: None,

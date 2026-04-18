@@ -25,6 +25,48 @@ enum ToolConsoleBodyKind {
     Diff,
 }
 
+#[derive(Clone)]
+pub struct ConsoleReviewRenderer {
+    theme: Theme,
+    json_mode: bool,
+}
+
+impl ConsoleReviewRenderer {
+    pub fn new(theme: &Theme, json_mode: bool) -> Self {
+        Self {
+            theme: theme.clone(),
+            json_mode,
+        }
+    }
+
+    pub fn review_diff(&self, reviewer_model: &str, session_id: &str, diff: &str) {
+        if self.json_mode {
+            let _ = writeln!(io::stderr(), "{}", diff);
+            let _ = writeln!(io::stderr());
+            return;
+        }
+
+        let _ = execute!(
+            io::stderr(),
+            Print("\n"),
+            SetForegroundColor(self.theme.tool_badge),
+            SetAttribute(Attribute::Bold),
+            Print("  [Reviewer]"),
+            ResetColor,
+            SetForegroundColor(self.theme.dim),
+            Print(format!(" {} {} checkpoint diff", reviewer_model, session_id)),
+            ResetColor,
+            Print("\n"),
+        );
+
+        print_tool_body_static(&self.theme, &ToolConsoleBody {
+            text: diff.to_string(),
+            kind: ToolConsoleBodyKind::Diff,
+        });
+        let _ = execute!(io::stderr(), Print("\n"));
+    }
+}
+
 impl StreamRenderer {
     pub fn new(theme: &Theme, json_mode: bool) -> Self {
         Self {
@@ -263,36 +305,41 @@ impl StreamRenderer {
         let _ = io::stdout().flush();
     }
     fn print_tool_body(&self, body: &ToolConsoleBody) {
-        let _ = execute!(io::stderr(), Print("\n"));
+        print_tool_body_static(&self.theme, body);
+    }
 
-        if body.text.is_empty() {
-            let _ = execute!(
-                io::stderr(),
-                SetForegroundColor(self.theme.dim),
-                Print("    (empty)\n"),
-                ResetColor,
-            );
-            return;
-        }
+}
 
-        for line in body_lines(&body.text) {
-            let color = match body.kind {
-                ToolConsoleBodyKind::Content => self.theme.text,
-                ToolConsoleBodyKind::Diff => match line.chars().next() {
-                    Some('+') => self.theme.success,
-                    Some('-') => self.theme.error,
-                    _ => self.theme.dim,
-                },
-            };
-            let _ = execute!(
-                io::stderr(),
-                SetForegroundColor(color),
-                Print("    "),
-                Print(line),
-                ResetColor,
-                Print("\n"),
-            );
-        }
+fn print_tool_body_static(theme: &Theme, body: &ToolConsoleBody) {
+    let _ = execute!(io::stderr(), Print("\n"));
+
+    if body.text.is_empty() {
+        let _ = execute!(
+            io::stderr(),
+            SetForegroundColor(theme.dim),
+            Print("    (empty)\n"),
+            ResetColor,
+        );
+        return;
+    }
+
+    for line in body_lines(&body.text) {
+        let color = match body.kind {
+            ToolConsoleBodyKind::Content => theme.text,
+            ToolConsoleBodyKind::Diff => match line.chars().next() {
+                Some('+') => theme.success,
+                Some('-') => theme.error,
+                _ => theme.dim,
+            },
+        };
+        let _ = execute!(
+            io::stderr(),
+            SetForegroundColor(color),
+            Print("    "),
+            Print(line),
+            ResetColor,
+            Print("\n"),
+        );
     }
 }
 
