@@ -3,7 +3,7 @@
 use super::*;
 use crate::xfile_storage::{
     apply_mutations, ensure_loaded, record_disk_state, resolve_xfile_path, sync_if_disk_changed,
-    XFile, XFileSyncUpdate, XLineMutation,
+    xfile_session_id, XFile, XFileSyncUpdate, XLineMutation,
 };
 use crate::xfile_sync::SyncChange;
 use serde::{Deserialize, Serialize};
@@ -149,7 +149,8 @@ impl Tool for XEditTool {
         };
 
         let path = resolve_xfile_path(ctx, &req.file_path);
-        let before_head = match ensure_loaded(&ctx.session_id, &path).await {
+        let storage_session_id = xfile_session_id(ctx);
+        let before_head = match ensure_loaded(&storage_session_id, &path).await {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
@@ -159,7 +160,7 @@ impl Tool for XEditTool {
                 path.display()
             ));
         }
-        if let Some(sync) = match sync_if_disk_changed(&ctx.session_id, &path).await {
+        if let Some(sync) = match sync_if_disk_changed(&storage_session_id, &path).await {
             Ok(sync) => sync,
             Err(err) => return ToolResult::error(err),
         } {
@@ -176,7 +177,7 @@ impl Tool for XEditTool {
             Err(err) => return ToolResult::error(err),
         };
 
-        let head = match apply_mutations(&ctx.session_id, &path, None, &operations) {
+        let head = match apply_mutations(&storage_session_id, &path, None, &operations) {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
@@ -184,7 +185,7 @@ impl Tool for XEditTool {
         if let Err(err) = tokio::fs::write(&path, &head.rendered_content).await {
             return ToolResult::error(format!("Failed to flush edited file: {}", err));
         }
-        if let Err(err) = record_disk_state(&ctx.session_id, &path) {
+        if let Err(err) = record_disk_state(&storage_session_id, &path) {
             return ToolResult::error(err);
         }
 

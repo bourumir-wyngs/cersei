@@ -20,6 +20,7 @@ static PERMISSIONS_PROJECT_NAME: LazyLock<RwLock<Option<String>>> =
 #[serde(default)]
 pub struct AppConfig {
     pub model: String,
+    pub reviewer_model: String,
     pub provider: String,
     pub max_turns: u32,
     pub max_tokens: u32,
@@ -42,6 +43,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model: "gpt-5.4".into(),
+            reviewer_model: "gpt-5.4".into(),
             provider: "openai".into(),
             max_turns: 20,
             max_tokens: 16384,
@@ -188,6 +190,9 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     if overlay.model != AppConfig::default().model {
         base.model = overlay.model;
     }
+    if overlay.reviewer_model != AppConfig::default().reviewer_model {
+        base.reviewer_model = overlay.reviewer_model;
+    }
     if overlay.provider != AppConfig::default().provider {
         base.provider = overlay.provider;
     }
@@ -229,6 +234,9 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
 fn apply_env(config: &mut AppConfig) {
     if let Ok(v) = std::env::var("ABSTRACT_MODEL") {
         config.model = v;
+    }
+    if let Ok(v) = std::env::var("ABSTRACT_REVIEWER_MODEL") {
+        config.reviewer_model = v;
     }
     if let Ok(v) = std::env::var("ABSTRACT_PROVIDER") {
         config.provider = v;

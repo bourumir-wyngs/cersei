@@ -1,7 +1,7 @@
 //! Read tool: session-scoped tagged file reads backed by XFileStorage.
 
 use super::*;
-use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, XFile, XLine};
+use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, xfile_session_id, XFile, XLine};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -121,7 +121,8 @@ impl Tool for XReadTool {
         }
 
         let path = resolve_xfile_path(ctx, &req.file_path);
-        let head = match ensure_loaded(&ctx.session_id, &path).await {
+        let storage_session_id = xfile_session_id(ctx);
+        let head = match ensure_loaded(&storage_session_id, &path).await {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };

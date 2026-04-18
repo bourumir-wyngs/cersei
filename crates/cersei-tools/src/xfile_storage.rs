@@ -295,6 +295,13 @@ pub fn load_session_xfile_storage_from_path(session_id: &str, path: &Path) -> Re
     Ok(true)
 }
 
+pub fn xfile_session_id(ctx: &ToolContext) -> String {
+    ctx.extensions
+        .get::<crate::XFileStorageScope>()
+        .map(|scope| scope.session_id.clone())
+        .unwrap_or_else(|| ctx.session_id.clone())
+}
+
 pub fn resolve_xfile_path(ctx: &ToolContext, input: &str) -> PathBuf {
     let candidate = Path::new(input);
     let resolved = if candidate.is_absolute() {

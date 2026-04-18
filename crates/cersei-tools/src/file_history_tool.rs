@@ -6,13 +6,14 @@ use super::*;
 use crate::xfile_storage::{
     apply_file_transition_to_disk, create_checkpoint, diff_against_checkpoint, diff_files,
     file_state, files_differ, get_revision, list_revisions, list_tracked_files, record_disk_state,
-    render_file, resolve_xfile_path, restore_revision, rollback_to_checkpoint,
+    render_file, resolve_xfile_path, restore_revision, rollback_to_checkpoint, xfile_session_id,
     XFileRevisionMetadata,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 pub struct FileHistoryTool;
+pub struct ReadOnlyFileHistoryTool;
 
 #[async_trait]
 impl Tool for FileHistoryTool {
@@ -21,18 +22,7 @@ impl Tool for FileHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect session-scoped XFileStorage revision history for files loaded by Read, Write, Edit, or matching Grep results. History is limited to the retained XFileStorage revisions for this session. \
-         Actions:\n\
-         - `list` — list tracked XFileStorage files with current revision, presence state, and line counts.\n\
-         - `revisions` — list retained revisions for a specific file (requires `file_path`). Revisions can represent either a present file or an absent file and may include operation metadata such as copy or move details.\n\
-         - `get_revision` — get the full rendered content of a stored revision (requires `file_path` + `revision`).\n\
-         - `diff` — with `file_path`, show a unified diff between retained revisions. Omitting `to_revision` diffs against the current XFileStorage head. \
-           Omitting `from_revision` defaults to the earliest retained revision. Omitting both diffs the previous revision against the current head. \
-           Without `file_path`, show a combined diff between the current session state and the latest checkpoint. If no explicit checkpoint exists yet, the implicit session-start baseline is used.\n\
-         - `revert` — restore a file to a specific retained revision by cloning that revision into a new XFileStorage head and applying it to disk (requires `file_path` + `revision`). If the target revision is absent, the file is deleted.\n\
-         - `restore` — same as revert (alias).\n\
-         - `checkpoint` — save the current retained head revision of every tracked file in this session.\n\
-         - `rollback` — destructively roll tracked files back to the saved checkpoint. If no explicit checkpoint exists yet, rollback uses each tracked file's earliest retained session revision as the baseline."
+        full_description()
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -44,104 +34,209 @@ impl Tool for FileHistoryTool {
     }
 
     fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["list", "revisions", "get_revision", "diff", "revert", "restore", "checkpoint", "rollback"],
-                    "description": "The action to perform. `list`, `checkpoint`, and `rollback` need no extra fields. `diff` may omit `file_path` to compare the current session state against the latest checkpoint. `revisions` needs `file_path`. `get_revision`, `revert`, and `restore` need both `file_path` and `revision`."
-                },
-                "file_path": {
-                    "type": "string",
-                    "description": "Path to the tracked file. Required for `revisions`, `get_revision`, `revert`, and `restore`. Optional for `diff`: if omitted, `diff` compares the whole tracked session state to the latest checkpoint. Absolute paths and workspace-relative paths are accepted."
-                },
-                "revision": {
-                    "type": "integer",
-                    "description": "Revision number for `get_revision`, `revert`, or `restore`."
-                },
-                "from_revision": {
-                    "type": "integer",
-                    "description": "Starting revision for `diff`. If omitted and `to_revision` is provided, diff starts from the earliest retained revision. If both are omitted, diff compares the previous revision to the current head."
-                },
-                "to_revision": {
-                    "type": "integer",
-                    "description": "Ending revision for `diff`. If omitted, diff ends at the current head revision."
-                }
-            },
-            "required": ["action"]
-        })
+        full_input_schema()
     }
 
     async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
-        #[derive(Deserialize)]
-        struct Input {
-            action: String,
-            file_path: Option<String>,
-            revision: Option<usize>,
-            from_revision: Option<usize>,
-            to_revision: Option<usize>,
+        execute_impl(input, ctx, false).await
+    }
+}
+
+#[async_trait]
+impl Tool for ReadOnlyFileHistoryTool {
+    fn name(&self) -> &str {
+        "FileHistory"
+    }
+
+    fn description(&self) -> &str {
+        read_only_description()
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    fn category(&self) -> ToolCategory {
+        ToolCategory::FileSystem
+    }
+
+    fn input_schema(&self) -> Value {
+        read_only_input_schema()
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        execute_impl(input, ctx, true).await
+    }
+}
+
+fn full_description() -> &'static str {
+    "Inspect session-scoped XFileStorage revision history for files loaded by Read, Write, Edit, or matching Grep results. History is limited to the retained XFileStorage revisions for this session. \
+     Actions:\n\
+     - `list` — list tracked XFileStorage files with current revision, presence state, and line counts.\n\
+     - `revisions` — list retained revisions for a specific file (requires `file_path`). Revisions can represent either a present file or an absent file and may include operation metadata such as copy or move details.\n\
+     - `get_revision` — get the full rendered content of a stored revision (requires `file_path` + `revision`).\n\
+     - `diff` — with `file_path`, show a unified diff between retained revisions. Omitting `to_revision` diffs against the current XFileStorage head. \
+       Omitting `from_revision` defaults to the earliest retained revision. Omitting both diffs the previous revision against the current head. \
+       Without `file_path`, show a combined diff between the current session state and the latest checkpoint. If no explicit checkpoint exists yet, the implicit session-start baseline is used.\n\
+     - `revert` — restore a file to a specific retained revision by cloning that revision into a new XFileStorage head and applying it to disk (requires `file_path` + `revision`). If the target revision is absent, the file is deleted.\n\
+     - `restore` — same as revert (alias).\n\
+     - `checkpoint` — save the current retained head revision of every tracked file in this session.\n\
+     - `rollback` — destructively roll tracked files back to the saved checkpoint. If no explicit checkpoint exists yet, rollback uses each tracked file's earliest retained session revision as the baseline."
+}
+
+fn read_only_description() -> &'static str {
+    "Inspect XFileStorage revision history for files loaded by Read, Write, Edit, or matching Grep results. This reviewer variant is read-only. \
+     Actions:\n\
+     - `list` — list tracked XFileStorage files with current revision, presence state, and line counts.\n\
+     - `revisions` — list retained revisions for a specific file (requires `file_path`).\n\
+     - `get_revision` — get the full rendered content of a stored revision (requires `file_path` + `revision`).\n\
+     - `diff` — with `file_path`, show a unified diff between retained revisions. Omitting `to_revision` diffs against the current XFileStorage head. \
+       Omitting `from_revision` defaults to the earliest retained revision. Omitting both diffs the previous revision against the current head. \
+       Without `file_path`, show a combined diff between the current session state and the latest checkpoint. If no explicit checkpoint exists yet, the implicit session-start baseline is used."
+}
+
+fn full_input_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "revisions", "get_revision", "diff", "revert", "restore", "checkpoint", "rollback"],
+                "description": "The action to perform. `list`, `checkpoint`, and `rollback` need no extra fields. `diff` may omit `file_path` to compare the current session state against the latest checkpoint. `revisions` needs `file_path`. `get_revision`, `revert`, and `restore` need both `file_path` and `revision`."
+            },
+            "file_path": {
+                "type": "string",
+                "description": "Path to the tracked file. Required for `revisions`, `get_revision`, `revert`, and `restore`. Optional for `diff`: if omitted, `diff` compares the whole tracked session state to the latest checkpoint. Absolute paths and workspace-relative paths are accepted."
+            },
+            "revision": {
+                "type": "integer",
+                "description": "Revision number for `get_revision`, `revert`, or `restore`."
+            },
+            "from_revision": {
+                "type": "integer",
+                "description": "Starting revision for `diff`. If omitted and `to_revision` is provided, diff starts from the earliest retained revision. If both are omitted, diff compares the previous revision to the current head."
+            },
+            "to_revision": {
+                "type": "integer",
+                "description": "Ending revision for `diff`. If omitted, diff ends at the current head revision."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+fn read_only_input_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "revisions", "get_revision", "diff"],
+                "description": "The action to perform. `revisions` needs `file_path`. `get_revision` needs `file_path` and `revision`. `diff` may omit `file_path` to compare the current session state against the latest checkpoint."
+            },
+            "file_path": {
+                "type": "string",
+                "description": "Path to the tracked file. Required for `revisions` and `get_revision`. Optional for `diff`: if omitted, `diff` compares the whole tracked session state to the latest checkpoint. Absolute paths and workspace-relative paths are accepted."
+            },
+            "revision": {
+                "type": "integer",
+                "description": "Revision number for `get_revision`."
+            },
+            "from_revision": {
+                "type": "integer",
+                "description": "Starting revision for `diff`. If omitted and `to_revision` is provided, diff starts from the earliest retained revision. If both are omitted, diff compares the previous revision to the current head."
+            },
+            "to_revision": {
+                "type": "integer",
+                "description": "Ending revision for `diff`. If omitted, diff ends at the current head revision."
+            }
+        },
+        "required": ["action"]
+    })
+}
+
+fn is_mutating_action(action: &str) -> bool {
+    matches!(action, "revert" | "restore" | "checkpoint" | "rollback")
+}
+
+async fn execute_impl(input: Value, ctx: &ToolContext, read_only: bool) -> ToolResult {
+    #[derive(Deserialize)]
+    struct Input {
+        action: String,
+        file_path: Option<String>,
+        revision: Option<usize>,
+        from_revision: Option<usize>,
+        to_revision: Option<usize>,
+    }
+
+    let input: Input = match serde_json::from_value(input) {
+        Ok(i) => i,
+        Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
+    };
+    let storage_session_id = xfile_session_id(ctx);
+
+    if read_only && is_mutating_action(&input.action) {
+        return ToolResult::error(
+            "FileHistory is read-only in reviewer sessions. Allowed actions: list, revisions, get_revision, diff",
+        );
+    }
+
+    match input.action.as_str() {
+        "list" => action_list(&storage_session_id),
+        "checkpoint" => action_checkpoint(&storage_session_id),
+        "revisions" => {
+            let path = match require_path(&input.file_path, ctx) {
+                Ok(path) => path,
+                Err(err) => return err,
+            };
+            action_revisions(&storage_session_id, &path)
         }
-
-        let input: Input = match serde_json::from_value(input) {
-            Ok(i) => i,
-            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
-        };
-
-        match input.action.as_str() {
-            "list" => action_list(&ctx.session_id),
-            "checkpoint" => action_checkpoint(&ctx.session_id),
-            "revisions" => {
-                let path = match require_path(&input.file_path, ctx) {
-                    Ok(path) => path,
-                    Err(err) => return err,
-                };
-                action_revisions(&ctx.session_id, &path)
+        "get_revision" => {
+            let path = match require_path(&input.file_path, ctx) {
+                Ok(path) => path,
+                Err(err) => return err,
+            };
+            let revision = match require_revision(input.revision) {
+                Ok(revision) => revision,
+                Err(err) => return err,
+            };
+            action_get_revision(&storage_session_id, &path, revision)
+        }
+        "diff" => match &input.file_path {
+            Some(path) => {
+                let path = resolve_xfile_path(ctx, path);
+                action_diff(
+                    &storage_session_id,
+                    &path,
+                    input.from_revision,
+                    input.to_revision,
+                )
             }
-            "get_revision" => {
-                let path = match require_path(&input.file_path, ctx) {
-                    Ok(path) => path,
-                    Err(err) => return err,
-                };
-                let revision = match require_revision(input.revision) {
-                    Ok(revision) => revision,
-                    Err(err) => return err,
-                };
-                action_get_revision(&ctx.session_id, &path, revision)
-            }
-            "diff" => {
-                match &input.file_path {
-                    Some(path) => {
-                        let path = resolve_xfile_path(ctx, path);
-                        action_diff(&ctx.session_id, &path, input.from_revision, input.to_revision)
-                    }
-                    None => {
-                        if input.from_revision.is_some() || input.to_revision.is_some() {
-                            return ToolResult::error(
-                                "`from_revision` and `to_revision` require `file_path` for action `diff`",
-                            );
-                        }
-                        action_checkpoint_diff(&ctx.session_id)
-                    }
+            None => {
+                if input.from_revision.is_some() || input.to_revision.is_some() {
+                    return ToolResult::error(
+                        "`from_revision` and `to_revision` require `file_path` for action `diff`",
+                    );
                 }
+                action_checkpoint_diff(&storage_session_id)
             }
-            "revert" | "restore" => {
-                let path = match require_path(&input.file_path, ctx) {
-                    Ok(path) => path,
-                    Err(err) => return err,
-                };
-                let revision = match require_revision(input.revision) {
-                    Ok(revision) => revision,
-                    Err(err) => return err,
-                };
-                action_revert(&ctx.session_id, &path, revision).await
-            }
-            "rollback" => action_rollback(&ctx.session_id).await,
-            other => ToolResult::error(format!(
-                "Unknown action: `{}`. Valid actions: list, revisions, get_revision, diff, revert, restore, checkpoint, rollback",
-                other
-            )),
+        },
+        "revert" | "restore" => {
+            let path = match require_path(&input.file_path, ctx) {
+                Ok(path) => path,
+                Err(err) => return err,
+            };
+            let revision = match require_revision(input.revision) {
+                Ok(revision) => revision,
+                Err(err) => return err,
+            };
+            action_revert(&storage_session_id, &path, revision).await
         }
+        "rollback" => action_rollback(&storage_session_id).await,
+        other => ToolResult::error(format!(
+            "Unknown action: `{}`. Valid actions: list, revisions, get_revision, diff, revert, restore, checkpoint, rollback",
+            other
+        )),
     }
 }
 

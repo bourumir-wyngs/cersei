@@ -35,6 +35,7 @@ pub mod powershell;
 pub mod process_tool;
 pub mod pytest_tool;
 pub mod remote_trigger;
+pub mod review_tool;
 pub mod send_message;
 mod shell_sandbox;
 pub mod skill_tool;
@@ -147,6 +148,86 @@ pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
     pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewSource {
+    CheckpointDiff,
+    GitDiff,
+}
+
+impl ReviewSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CheckpointDiff => "checkpoint diff",
+            Self::GitDiff => "git diff",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewRequest {
+    pub diff: String,
+    pub source: ReviewSource,
+}
+
+impl ReviewRequest {
+    pub fn checkpoint(diff: String) -> Self {
+        Self {
+            diff,
+            source: ReviewSource::CheckpointDiff,
+        }
+    }
+
+    pub fn git_diff(diff: String) -> Self {
+        Self {
+            diff,
+            source: ReviewSource::GitDiff,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewResponse {
+    pub review: String,
+    pub reviewer_model: String,
+    pub reviewer_session_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct XFileStorageScope {
+    pub session_id: String,
+}
+
+impl XFileStorageScope {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+        }
+    }
+}
+
+#[async_trait]
+pub trait ReviewExecutor: Send + Sync {
+    async fn review(&self, request: ReviewRequest) -> std::result::Result<ReviewResponse, String>;
+}
+
+#[derive(Clone)]
+pub struct ReviewService {
+    executor: Arc<dyn ReviewExecutor>,
+}
+
+impl ReviewService {
+    pub fn new(executor: Arc<dyn ReviewExecutor>) -> Self {
+        Self { executor }
+    }
+
+    pub async fn review(
+        &self,
+        request: ReviewRequest,
+    ) -> std::result::Result<ReviewResponse, String> {
+        self.executor.review(request).await
+    }
 }
 
 impl ToolResult {
@@ -427,6 +508,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
+        Box::new(review_tool::ReviewTool),
         Box::new(structure_tool::StructureTool),
     ]
 }
@@ -447,6 +529,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
+        Box::new(review_tool::ReviewTool),
         Box::new(structure_tool::StructureTool),
     ]
 }

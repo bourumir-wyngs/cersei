@@ -3,9 +3,6 @@ use crate::config::AppConfig;
 use anyhow::{bail, Context};
 use std::process::Command;
 
-const REVIEW_INSTRUCTION: &str =
-    "Review these changes. You can also use tools to access current version of code.";
-
 pub async fn run(config: &AppConfig) -> anyhow::Result<CommandAction> {
     let diff = match git_diff(config)? {
         Some(diff) => diff,
@@ -15,9 +12,7 @@ pub async fn run(config: &AppConfig) -> anyhow::Result<CommandAction> {
         }
     };
 
-    Ok(CommandAction::RunPrompt {
-        prompt: build_review_prompt(&diff),
-    })
+    Ok(CommandAction::RunReviewer { diff })
 }
 
 fn git_diff(config: &AppConfig) -> anyhow::Result<Option<String>> {
@@ -47,22 +42,22 @@ fn git_diff(config: &AppConfig) -> anyhow::Result<Option<String>> {
         Ok(Some(diff))
     }
 }
-
-fn build_review_prompt(diff: &str) -> String {
-    format!("{REVIEW_INSTRUCTION}\n\n{diff}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn build_review_prompt_includes_instruction_and_full_diff() {
-        let diff = "diff --git a/a.rs b/a.rs\n+hello\n";
-        let prompt = build_review_prompt(diff);
+    fn run_reviewer_action_contains_full_diff() {
+        let action = CommandAction::RunReviewer {
+            diff: "diff --git a/a.rs b/a.rs\n+hello\n".to_string(),
+        };
 
-        assert!(prompt.starts_with(REVIEW_INSTRUCTION));
-        assert!(prompt.ends_with(diff));
-        assert!(prompt.contains("\n\ndiff --git a/a.rs b/a.rs\n+hello\n"));
+        match action {
+            CommandAction::RunReviewer { diff } => {
+                assert!(diff.contains("diff --git a/a.rs b/a.rs"));
+                assert!(diff.contains("+hello"));
+            }
+            _ => panic!("unexpected action"),
+        }
     }
 }

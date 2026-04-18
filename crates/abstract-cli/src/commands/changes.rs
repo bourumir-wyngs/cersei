@@ -64,7 +64,8 @@ fn render_changes(summary: &XCheckpointDiffSummary) -> String {
 mod tests {
     use super::*;
     use cersei_tools::xfile_storage::{
-        apply_file_to_disk, create_checkpoint, record_disk_state, store_written_text,
+        apply_file_to_disk, clear_session_xfile_storage, create_checkpoint, record_disk_state,
+        store_written_text,
     };
 
     #[tokio::test]
@@ -72,6 +73,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("changes-command-{}", uuid::Uuid::new_v4());
         let path = tmp.path().join("sample.txt");
+        clear_session_xfile_storage(&session_id);
 
         let first = store_written_text(&session_id, &path, "before\n");
         apply_file_to_disk(&path, &first.file).await.unwrap();
@@ -93,6 +95,7 @@ mod tests {
     #[tokio::test]
     async fn changes_renders_empty_diff_against_implicit_session_start() {
         let session_id = format!("changes-command-{}", uuid::Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
 
         let rendered = render_changes(&diff_against_checkpoint(&session_id).unwrap());
 
@@ -107,6 +110,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("changes-command-{}", uuid::Uuid::new_v4());
         let path = tmp.path().join("sample.txt");
+        clear_session_xfile_storage(&session_id);
 
         let first = store_written_text(&session_id, &path, "before\n");
         apply_file_to_disk(&path, &first.file).await.unwrap();

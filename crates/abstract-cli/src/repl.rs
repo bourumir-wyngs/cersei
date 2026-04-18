@@ -8,6 +8,7 @@ use crate::commands;
 use crate::config::AppConfig;
 use crate::input::InputReader;
 use crate::render::{self, StreamRenderer};
+use crate::reviewer;
 use crate::signals::SignalHandle;
 use crate::status::StatusLine;
 use crate::theme::Theme;
@@ -17,6 +18,7 @@ use cersei_memory::manager::MemoryManager;
 use cersei_memory::session_storage;
 use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_tools::Extensions;
+use cersei_tools::ReviewRequest;
 use cersei_types::{Message, Role};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -134,6 +136,7 @@ pub async fn run_repl(
     json_mode: bool,
     running: Arc<AtomicBool>,
     signal_handle: SignalHandle,
+    reviewer_state: reviewer::ReviewerState,
 ) -> anyhow::Result<()> {
     let mut repl_config = config.clone();
     let mut current_session_id = session_id.to_string();
@@ -179,7 +182,32 @@ pub async fn run_repl(
                     .await
                 {
                     Ok(commands::CommandAction::None) => None,
-                    Ok(commands::CommandAction::RunPrompt { prompt }) => Some(prompt),
+                    Ok(commands::CommandAction::RunReviewer { diff }) => {
+                        match reviewer::review_service(tool_extensions) {
+                            Some(service) => {
+                                match service.review(ReviewRequest::git_diff(diff)).await {
+                                    Ok(response) => {
+                                        renderer.external_review(
+                                            &response.reviewer_model,
+                                            &response.reviewer_session_id,
+                                            &response.review,
+                                        );
+                                        let mut messages = agent.messages();
+                                        messages.push(Message::user(format!(
+                                            "Reviewer feedback from session {} using {}:\n\n{}",
+                                            response.reviewer_session_id,
+                                            response.reviewer_model,
+                                            response.review
+                                        )));
+                                        agent.set_messages(messages);
+                                    }
+                                    Err(err) => renderer.error(&format!("Review failed: {err}")),
+                                }
+                            }
+                            None => renderer.error("Reviewer service is not available."),
+                        }
+                        None
+                    }
                     Ok(commands::CommandAction::ClearHistory) => {
                         agent.clear_messages();
                         is_first_turn = true;
@@ -238,6 +266,9 @@ pub async fn run_repl(
                                     repl_config.provider = provider.to_string();
                                 }
                                 current_session_id = loaded_id.clone();
+                                reviewer_state
+                                    .set_session_id(reviewer::reviewer_session_id(&loaded_id));
+                                reviewer_state.set_xfile_session_id(loaded_id.clone());
                                 is_first_turn = true;
                                 status = StatusLine::new(
                                     theme,
@@ -301,6 +332,12 @@ pub async fn run_repl(
                             }
                             Err(e) => renderer.error(&format!("Switch failed: {e}")),
                         }
+                        None
+                    }
+                    Ok(commands::CommandAction::SwitchReviewer { model }) => {
+                        repl_config.reviewer_model = model.clone();
+                        reviewer_state.set_model(model.clone());
+                        renderer.model_switched(&format!("reviewer {model}"));
                         None
                     }
                     Err(e) => {

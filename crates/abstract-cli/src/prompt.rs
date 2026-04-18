@@ -8,6 +8,22 @@ use cersei_memory::manager::MemoryManager;
 
 /// Build the complete system prompt for the CLI agent.
 pub fn build_cli_system_prompt(config: &AppConfig, memory_manager: &MemoryManager) -> String {
+    build_cli_system_prompt_with_append(config, memory_manager, None)
+}
+
+/// Build the reviewer-specific system prompt for the CLI reviewer agent.
+pub fn build_cli_reviewer_system_prompt(
+    config: &AppConfig,
+    memory_manager: &MemoryManager,
+) -> String {
+    build_cli_system_prompt_with_append(config, memory_manager, Some(REVIEWER_APPEND_PROMPT))
+}
+
+fn build_cli_system_prompt_with_append(
+    config: &AppConfig,
+    memory_manager: &MemoryManager,
+    append_system_prompt: Option<&str>,
+) -> String {
     let memory_content = memory_manager.build_context();
 
     let mut extra_dynamic = Vec::new();
@@ -55,11 +71,32 @@ pub fn build_cli_system_prompt(config: &AppConfig, memory_manager: &MemoryManage
         memory_content,
         extra_cached_sections: extra_cached,
         extra_dynamic_sections: extra_dynamic,
+        append_system_prompt: append_system_prompt.map(str::to_string),
         ..Default::default()
     };
 
     build_system_prompt(&opts)
 }
+
+const REVIEWER_APPEND_PROMPT: &str = r#"
+You are the reviewer agent.
+
+You are reviewing diffs produced by another agent working in the same workspace.
+You must not assume you have access to that agent's private reasoning or session
+history unless it appears in your own reviewer session.
+
+Focus on:
+- major correctness defects
+- unsafe code or security issues
+- suspicious behavior or potentially bad intent
+- regressions, missing validation, and risky side effects
+
+Do not make edits, rollbacks, or other workspace changes. You may inspect current
+files, git state, and file history to support the review.
+
+Do not spend time on minor style nits unless they point to a real defect.
+If you find no serious issues, say so clearly.
+"#;
 
 fn detect_git_info(working_dir: &std::path::Path) -> Option<String> {
     use std::process::Command;

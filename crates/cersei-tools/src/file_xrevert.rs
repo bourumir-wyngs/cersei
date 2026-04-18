@@ -3,7 +3,7 @@
 use super::*;
 use crate::xfile_storage::{
     apply_file_transition_to_disk, diff_files, discard_head_revision, list_revisions,
-    record_disk_state, resolve_xfile_path,
+    record_disk_state, resolve_xfile_path, xfile_session_id,
 };
 use serde::Deserialize;
 
@@ -60,7 +60,8 @@ impl Tool for XRevertTool {
             }
         };
         let requested_path = resolve_xfile_path(ctx, requested);
-        let revisions = match list_revisions(&ctx.session_id, &requested_path) {
+        let storage_session_id = xfile_session_id(ctx);
+        let revisions = match list_revisions(&storage_session_id, &requested_path) {
             Some(revisions) if revisions.len() >= 2 => revisions,
             Some(_) => {
                 return ToolResult::error(format!(
@@ -82,11 +83,11 @@ impl Tool for XRevertTool {
         if let Err(err) = apply_file_transition_to_disk(&current.file, &previous.file).await {
             return ToolResult::error(err);
         }
-        let head = match discard_head_revision(&ctx.session_id, &requested_path) {
+        let head = match discard_head_revision(&storage_session_id, &requested_path) {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
-        if let Err(err) = record_disk_state(&ctx.session_id, &head.file.path) {
+        if let Err(err) = record_disk_state(&storage_session_id, &head.file.path) {
             return ToolResult::error(err);
         }
         let diff = diff_files(

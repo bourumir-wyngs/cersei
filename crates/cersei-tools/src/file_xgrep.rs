@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::xfile_storage::{
-    resolve_xfile_path, store_loaded_if_missing, try_get_head, XFile, XLine,
+    resolve_xfile_path, store_loaded_if_missing, try_get_head, xfile_session_id, XFile, XLine,
 };
 use regex::RegexBuilder;
 use serde::Deserialize;
@@ -124,12 +124,14 @@ impl Tool for XGrepTool {
         };
 
         let candidates = collect_candidate_files(&path, glob.as_ref());
+        let storage_session_id = xfile_session_id(ctx);
         let mut hits = Vec::new();
         let mut match_count = 0usize;
         let mut truncated = false;
 
         for candidate in candidates {
-            let searched = match search_file(candidate.as_path(), &ctx.session_id, &regex).await {
+            let searched = match search_file(candidate.as_path(), &storage_session_id, &regex).await
+            {
                 Ok(result) => result,
                 Err(err) => return ToolResult::error(err),
             };

@@ -4,7 +4,7 @@ use super::*;
 use crate::xfile_storage::{
     apply_file_to_disk, apply_file_transition_to_disk, copy_tracked_file, ensure_loaded,
     move_tracked_file, record_disk_state, resolve_xfile_path, store_deleted_file,
-    sync_if_disk_changed, try_get_head,
+    sync_if_disk_changed, try_get_head, xfile_session_id,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -106,6 +106,7 @@ impl Tool for FileTool {
 }
 
 async fn execute_copy(req: FileRequest, ctx: &ToolContext) -> ToolResult {
+    let storage_session_id = xfile_session_id(ctx);
     let (source, destination) = match require_source_and_destination(&req, ctx) {
         Ok(paths) => paths,
         Err(err) => return err,
@@ -113,21 +114,21 @@ async fn execute_copy(req: FileRequest, ctx: &ToolContext) -> ToolResult {
     if let Err(err) = prepare_parent_dirs(&destination, req.create_parents.unwrap_or(true)).await {
         return ToolResult::error(err);
     }
-    if let Err(err) = ensure_destination_available(&ctx.session_id, &destination) {
+    if let Err(err) = ensure_destination_available(&storage_session_id, &destination) {
         return ToolResult::error(err);
     }
 
-    if let Err(err) = load_and_sync_if_needed(&ctx.session_id, &source).await {
+    if let Err(err) = load_and_sync_if_needed(&storage_session_id, &source).await {
         return ToolResult::error(err);
     }
-    let head = match copy_tracked_file(&ctx.session_id, &source, &destination) {
+    let head = match copy_tracked_file(&storage_session_id, &source, &destination) {
         Ok(head) => head,
         Err(err) => return ToolResult::error(err),
     };
     if let Err(err) = apply_file_to_disk(&head.file.path, &head.file).await {
         return ToolResult::error(err);
     }
-    if let Err(err) = record_disk_state(&ctx.session_id, &head.file.path) {
+    if let Err(err) = record_disk_state(&storage_session_id, &head.file.path) {
         return ToolResult::error(err);
     }
 
@@ -135,6 +136,7 @@ async fn execute_copy(req: FileRequest, ctx: &ToolContext) -> ToolResult {
 }
 
 async fn execute_move(req: FileRequest, ctx: &ToolContext) -> ToolResult {
+    let storage_session_id = xfile_session_id(ctx);
     let (source, destination) = match require_source_and_destination(&req, ctx) {
         Ok(paths) => paths,
         Err(err) => return err,
@@ -142,22 +144,22 @@ async fn execute_move(req: FileRequest, ctx: &ToolContext) -> ToolResult {
     if let Err(err) = prepare_parent_dirs(&destination, req.create_parents.unwrap_or(true)).await {
         return ToolResult::error(err);
     }
-    if let Err(err) = ensure_destination_available(&ctx.session_id, &destination) {
+    if let Err(err) = ensure_destination_available(&storage_session_id, &destination) {
         return ToolResult::error(err);
     }
 
-    let current = match load_and_sync_if_needed(&ctx.session_id, &source).await {
+    let current = match load_and_sync_if_needed(&storage_session_id, &source).await {
         Ok(head) => head,
         Err(err) => return ToolResult::error(err),
     };
-    let head = match move_tracked_file(&ctx.session_id, &source, &destination) {
+    let head = match move_tracked_file(&storage_session_id, &source, &destination) {
         Ok(head) => head,
         Err(err) => return ToolResult::error(err),
     };
     if let Err(err) = apply_file_transition_to_disk(&current.file, &head.file).await {
         return ToolResult::error(err);
     }
-    if let Err(err) = record_disk_state(&ctx.session_id, &head.file.path) {
+    if let Err(err) = record_disk_state(&storage_session_id, &head.file.path) {
         return ToolResult::error(err);
     }
 
@@ -165,6 +167,7 @@ async fn execute_move(req: FileRequest, ctx: &ToolContext) -> ToolResult {
 }
 
 async fn execute_delete(req: FileRequest, ctx: &ToolContext) -> ToolResult {
+    let storage_session_id = xfile_session_id(ctx);
     let path = match req
         .file_path
         .as_deref()
@@ -173,7 +176,7 @@ async fn execute_delete(req: FileRequest, ctx: &ToolContext) -> ToolResult {
         Some(path) => path,
         None => return ToolResult::error("`file_path` is required for action `delete`"),
     };
-    let current = match load_and_sync_if_needed(&ctx.session_id, &path).await {
+    let current = match load_and_sync_if_needed(&storage_session_id, &path).await {
         Ok(head) => head,
         Err(err) => return ToolResult::error(err),
     };
@@ -181,11 +184,11 @@ async fn execute_delete(req: FileRequest, ctx: &ToolContext) -> ToolResult {
         return ToolResult::error(format!("File is already absent: {}", path.display()));
     }
 
-    let head = store_deleted_file(&ctx.session_id, &path);
+    let head = store_deleted_file(&storage_session_id, &path);
     if let Err(err) = apply_file_transition_to_disk(&current.file, &head.file).await {
         return ToolResult::error(err);
     }
-    if let Err(err) = record_disk_state(&ctx.session_id, &head.file.path) {
+    if let Err(err) = record_disk_state(&storage_session_id, &head.file.path) {
         return ToolResult::error(err);
     }
 

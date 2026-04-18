@@ -8,17 +8,58 @@ use std::collections::HashMap;
 // Stores last-displayed number → "provider/model" mapping for quick selection.
 static MODEL_INDEX: std::sync::OnceLock<parking_lot::Mutex<HashMap<usize, String>>> =
     std::sync::OnceLock::new();
+static REVIEWER_MODEL_INDEX: std::sync::OnceLock<parking_lot::Mutex<HashMap<usize, String>>> =
+    std::sync::OnceLock::new();
+
+#[derive(Clone, Copy)]
+enum SelectionTarget {
+    Coding,
+    Reviewer,
+}
 
 fn model_index() -> &'static parking_lot::Mutex<HashMap<usize, String>> {
     MODEL_INDEX.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
+fn reviewer_model_index() -> &'static parking_lot::Mutex<HashMap<usize, String>> {
+    REVIEWER_MODEL_INDEX.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
 pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction> {
+    run_for(args, config, SelectionTarget::Coding).await
+}
+
+pub async fn run_reviewer(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction> {
+    run_for(args, config, SelectionTarget::Reviewer).await
+}
+
+async fn run_for(
+    args: &str,
+    config: &AppConfig,
+    target: SelectionTarget,
+) -> anyhow::Result<CommandAction> {
+    let (current_model, index, command_name, current_label, set_message) = match target {
+        SelectionTarget::Coding => (
+            config.model.as_str(),
+            model_index(),
+            "/model",
+            "Current model",
+            "Model set to",
+        ),
+        SelectionTarget::Reviewer => (
+            config.reviewer_model.as_str(),
+            reviewer_model_index(),
+            "/reviewer",
+            "Current reviewer model",
+            "Reviewer model set to",
+        ),
+    };
+
     if args.is_empty() {
-        eprintln!("Current model: {}", config.model);
-        eprintln!("\x1b[90mUsage: /model <name|number>\x1b[0m");
+        eprintln!("{current_label}: {}", current_model);
+        eprintln!("\x1b[90mUsage: {command_name} <name|number>\x1b[0m");
         eprintln!(
-            "\x1b[90mExamples: /model gpt-5.4, /model gemini-3.1-pro-preview, /model 3\x1b[0m"
+            "\x1b[90mExamples: {command_name} gpt-5.4, {command_name} gemini-3.1-pro-preview, {command_name} 3\x1b[0m"
         );
         eprintln!("\x1b[90mAliases: opus, sonnet, haiku, gemini\x1b[0m");
         eprintln!();
@@ -26,17 +67,17 @@ pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction
         let mut new_index: HashMap<usize, String> = HashMap::new();
         let mut counter = 1usize;
         for provider in display_providers() {
-            render_provider_models(provider, &config.model, &mut counter, &mut new_index).await;
+            render_provider_models(provider, current_model, &mut counter, &mut new_index).await;
             eprintln!();
         }
-        *model_index().lock() = new_index;
+        *index.lock() = new_index;
 
         return Ok(CommandAction::None);
     }
 
     // Resolve numeric shortcut from the last listing
     let resolved_from_index = if let Ok(n) = args.trim().parse::<usize>() {
-        model_index().lock().get(&n).cloned()
+        index.lock().get(&n).cloned()
     } else {
         None
     };
@@ -53,7 +94,7 @@ pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction
         }
     };
 
-    let provider_id = selected_provider_id(config, &resolved);
+    let provider_id = selected_provider_id(config, current_model, &resolved);
     let model_id = resolved
         .split_once('/')
         .map(|(_, model)| model)
@@ -73,18 +114,21 @@ pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction
 
     validate_model_selection(provider_id, &normalized_model).await?;
 
-    eprintln!("\x1b[90mModel set to: {normalized}\x1b[0m");
-    Ok(CommandAction::SwitchAgent { model: normalized })
+    eprintln!("\x1b[90m{set_message}: {normalized}\x1b[0m");
+    Ok(match target {
+        SelectionTarget::Coding => CommandAction::SwitchAgent { model: normalized },
+        SelectionTarget::Reviewer => CommandAction::SwitchReviewer { model: normalized },
+    })
 }
 
-fn current_provider(config: &AppConfig) -> &'static ProviderEntry {
+fn current_provider<'a>(config: &'a AppConfig, current_model: &'a str) -> &'static ProviderEntry {
     if config.provider != "auto" {
         if let Some(entry) = registry::lookup(&config.provider) {
             return entry;
         }
     }
 
-    if let Some((provider, _)) = config.model.split_once('/') {
+    if let Some((provider, _)) = current_model.split_once('/') {
         if let Some(entry) = registry::lookup(provider) {
             return entry;
         }
@@ -104,7 +148,11 @@ fn display_providers() -> Vec<&'static ProviderEntry> {
         .collect()
 }
 
-fn selected_provider_id<'a>(config: &'a AppConfig, model: &'a str) -> &'a str {
+fn selected_provider_id<'a>(
+    config: &'a AppConfig,
+    current_model: &'a str,
+    model: &'a str,
+) -> &'a str {
     if let Some((provider, _)) = model.split_once('/') {
         return provider;
     }
@@ -122,7 +170,7 @@ fn selected_provider_id<'a>(config: &'a AppConfig, model: &'a str) -> &'a str {
         m if m.starts_with("mistral-") || m.starts_with("codestral-") => "mistral",
         m if m.starts_with("deepseek-") => "deepseek",
         m if m.starts_with("grok-") => "xai",
-        _ => current_provider(config).id,
+        _ => current_provider(config, current_model).id,
     }
 }
 
@@ -179,7 +227,7 @@ async fn validate_model_selection(provider_id: &str, model_id: &str) -> anyhow::
     }
 
     anyhow::bail!(
-        "Unknown {} model '{}'. Use /model to list supported models.",
+        "Unknown {} model '{}'. Use /model or /reviewer to list supported models.",
         provider.name,
         model_id
     )
@@ -374,7 +422,7 @@ mod tests {
             ..AppConfig::default()
         };
         assert_eq!(
-            selected_provider_id(&config, "gemini-3.1-pro-preview"),
+            selected_provider_id(&config, &config.model, "gemini-3.1-pro-preview"),
             "google"
         );
     }

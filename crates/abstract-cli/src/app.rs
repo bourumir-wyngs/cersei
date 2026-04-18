@@ -5,6 +5,7 @@ use crate::network_policy::CliNetworkPolicy;
 use crate::permissions::CliPermissionPolicy;
 use crate::prompt;
 use crate::repl;
+use crate::reviewer;
 use crate::sessions;
 use crate::theme::Theme;
 use crate::tools_config;
@@ -42,7 +43,21 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     };
 
     // Build memory manager with graph memory
-    let memory_manager = build_memory_manager(&config)?;
+    let memory_manager = Arc::new(build_memory_manager(&config)?);
+
+    let reviewer_state = reviewer::ReviewerState::new(
+        config.reviewer_model.clone(),
+        reviewer::reviewer_session_id(&session_id),
+        session_id.clone(),
+    );
+    tool_extensions.insert(cersei_tools::ReviewService::new(Arc::new(
+        reviewer::CliReviewerExecutor::new(
+            config.clone(),
+            Arc::clone(&memory_manager),
+            tool_extensions.clone(),
+            reviewer_state.clone(),
+        ),
+    )));
 
     let running = Arc::new(AtomicBool::new(false));
 
@@ -54,7 +69,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     let (agent, resolved_model) = build_agent(
         &config.model,
         &config,
-        &memory_manager,
+        memory_manager.as_ref(),
         &session_id,
         cancel_token.clone(),
         None,
@@ -78,7 +93,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
             &theme,
             &session_id,
             &config,
-            &memory_manager,
+            memory_manager.as_ref(),
             &tool_extensions,
             cli.json,
             running,
@@ -91,11 +106,12 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
             &theme,
             &session_id,
             &config,
-            &memory_manager,
+            memory_manager.as_ref(),
             &tool_extensions,
             cli.json,
             running,
             signal_handle,
+            reviewer_state,
         )
         .await
     }
@@ -168,6 +184,93 @@ pub fn build_agent(
     }
 
     // Inject existing messages (for provider switching)
+    if let Some(msgs) = existing_messages {
+        builder = builder.with_messages(msgs);
+    }
+
+    let agent = builder.build()?;
+    Ok((agent, resolved_model))
+}
+
+/// Build the reviewer agent with its own transcript session and reviewer-specific prompt.
+pub fn build_reviewer_agent(
+    model_string: &str,
+    config: &AppConfig,
+    memory_manager: &MemoryManager,
+    session_id: &str,
+    xfile_session_id: &str,
+    cancel_token: CancellationToken,
+    existing_messages: Option<Vec<Message>>,
+    tool_extensions: Extensions,
+) -> anyhow::Result<(cersei::Agent, String)> {
+    let (provider, resolved_model) =
+        cersei_provider::from_model_string(model_string).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let system_prompt = prompt::build_cli_reviewer_system_prompt(config, memory_manager);
+    let effort = EffortLevel::from_str(&config.effort);
+    let theme = Theme::from_name(&config.theme);
+
+    let mcp_configs: Vec<McpServerConfig> = config
+        .mcp_servers
+        .iter()
+        .map(|s| {
+            let args_ref: Vec<&str> = s.args.iter().map(|a| a.as_str()).collect();
+            let mut cfg = McpServerConfig::stdio(&s.name, &s.command, &args_ref);
+            cfg.env = s.env.clone();
+            cfg
+        })
+        .collect();
+
+    tool_extensions.insert(FileHistory::new());
+    tool_extensions.insert(cersei_tools::XFileStorageScope::new(
+        xfile_session_id.to_string(),
+    ));
+
+    let mut review_tools: Vec<Box<dyn cersei_tools::Tool>> = cersei_tools::all()
+        .into_iter()
+        .filter(|tool| {
+            matches!(
+                tool.name(),
+                "Read" | "MultiRead" | "Glob" | "Grep" | "ListDirectory" | "Structure" | "Git"
+            )
+        })
+        .collect();
+    review_tools.push(Box::new(
+        cersei_tools::file_history_tool::ReadOnlyFileHistoryTool,
+    ));
+
+    let mut builder = cersei::Agent::builder()
+        .provider(provider)
+        .tools(review_tools)
+        .system_prompt(system_prompt)
+        .model(&resolved_model)
+        .max_turns(config.max_turns)
+        .max_tokens(config.max_tokens)
+        .auto_compact(config.auto_compact)
+        .enable_broadcast(512)
+        .cancel_token(cancel_token)
+        .session_id(session_id)
+        .working_dir(&config.working_dir)
+        .tool_extensions(tool_extensions);
+
+    if config.permissions_mode == "allow_all" {
+        builder = builder.permission_policy(AllowAll);
+    } else {
+        builder = builder
+            .permission_policy(CliPermissionPolicy::new(&theme))
+            .network_policy(CliNetworkPolicy::new(&theme));
+    }
+
+    let budget = effort.thinking_budget_tokens();
+    builder = builder.thinking_budget(budget);
+    if let Some(temp) = effort.temperature() {
+        builder = builder.temperature(temp);
+    }
+
+    for mcp in mcp_configs {
+        builder = builder.mcp_server(mcp);
+    }
+
     if let Some(msgs) = existing_messages {
         builder = builder.with_messages(msgs);
     }

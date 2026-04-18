@@ -213,6 +213,28 @@ impl StreamRenderer {
         }
     }
 
+    pub fn external_review(&mut self, reviewer_model: &str, session_id: &str, review: &str) {
+        if self.json_mode {
+            return;
+        }
+
+        self.flush();
+        let _ = execute!(
+            io::stderr(),
+            Print("\n"),
+            SetForegroundColor(self.theme.tool_badge),
+            SetAttribute(Attribute::Bold),
+            Print("  [Reviewer]"),
+            ResetColor,
+            SetForegroundColor(self.theme.dim),
+            Print(format!(" {} {}", reviewer_model, session_id)),
+            ResetColor,
+            Print("\n"),
+        );
+        self.print_markdown(review);
+        let _ = execute!(io::stderr(), Print("\n"));
+    }
+
     /// Print a completion separator.
     pub fn complete(&mut self) {
         self.flush();
@@ -383,6 +405,7 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(truncate_review_text)
             .unwrap_or_default(),
+        "Review" => "checkpoint diff".to_string(),
         "Revert" | "revert" => input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -615,6 +638,13 @@ fn tool_result_console_body(name: &str, result: &str) -> Option<ToolConsoleBody>
         return extract_result_string_field(result, "diff").map(|diff| ToolConsoleBody {
             text: diff,
             kind: ToolConsoleBodyKind::Diff,
+        });
+    }
+
+    if name == "Review" {
+        return Some(ToolConsoleBody {
+            text: result.to_string(),
+            kind: ToolConsoleBodyKind::Content,
         });
     }
 

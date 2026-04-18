@@ -3,6 +3,7 @@
 use super::*;
 use crate::xfile_storage::{
     ensure_loaded, record_disk_state, resolve_xfile_path, store_written_text, sync_if_disk_changed,
+    xfile_session_id,
 };
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -75,18 +76,19 @@ impl Tool for XWriteTool {
         };
 
         let path = resolve_xfile_path(ctx, &req.file_path);
+        let storage_session_id = xfile_session_id(ctx);
         if let Err(err) = prepare_parent_dirs(&path, req.create_parents.unwrap_or(true)).await {
             return ToolResult::error(err);
         }
-        if let Err(err) = track_existing_file_before_write(&ctx.session_id, &path).await {
+        if let Err(err) = track_existing_file_before_write(&storage_session_id, &path).await {
             return ToolResult::error(err);
         }
 
-        let head = store_written_text(&ctx.session_id, &path, &req.content);
+        let head = store_written_text(&storage_session_id, &path, &req.content);
         if let Err(err) = tokio::fs::write(&path, &head.rendered_content).await {
             return ToolResult::error(format!("Failed to write file: {}", err));
         }
-        if let Err(err) = record_disk_state(&ctx.session_id, &path) {
+        if let Err(err) = record_disk_state(&storage_session_id, &path) {
             return ToolResult::error(err);
         }
 

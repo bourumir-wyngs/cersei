@@ -12,6 +12,7 @@ mod permissions;
 mod prompt;
 mod render;
 mod repl;
+mod reviewer;
 mod sessions;
 mod signals;
 mod status;
@@ -290,6 +291,7 @@ fn resolve_model_alias(model: &str) -> String {
 fn config_set(config: &mut config::AppConfig, key: &str, value: &str) -> anyhow::Result<()> {
     match key {
         "model" => config.model = value.into(),
+        "reviewer_model" => config.reviewer_model = value.into(),
         "provider" => config.provider = value.into(),
         "effort" => config.effort = value.into(),
         "theme" => config.theme = value.into(),

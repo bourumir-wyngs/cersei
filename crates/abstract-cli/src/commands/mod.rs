@@ -22,10 +22,13 @@ pub struct CommandRegistry;
 
 pub enum CommandAction {
     None,
-    RunPrompt {
-        prompt: String,
+    RunReviewer {
+        diff: String,
     },
     SwitchAgent {
+        model: String,
+    },
+    SwitchReviewer {
         model: String,
     },
     ClearHistory,
@@ -63,6 +66,7 @@ impl CommandRegistry {
             "cost" => cost::run(session_id).map(|_| CommandAction::None),
             "commit" => commit::run(config).await.map(|_| CommandAction::None),
             "review" => review::run(config).await,
+            "reviewer" => model::run_reviewer(args, config).await,
             "memory" | "mem" => memory::run(config).map(|_| CommandAction::None),
             "model" => model::run(args, config).await,
             "config" | "cfg" => config_cmd::run(args, config).map(|_| CommandAction::None),
