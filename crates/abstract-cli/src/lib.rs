@@ -7,6 +7,7 @@ mod config;
 mod init;
 mod input;
 mod login;
+pub mod memory_tools;
 mod network_policy;
 mod permissions;
 mod prompt;

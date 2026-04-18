@@ -46,6 +46,7 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
 
     // Build memory manager with graph memory
     let memory_manager = Arc::new(build_memory_manager(&config)?);
+    tool_extensions.insert(memory_manager.clone());
 
     let reviewer_state = reviewer::ReviewerState::new(
         config.reviewer_model.clone(),
@@ -162,7 +163,12 @@ pub fn build_agent(
         .cancel_token(cancel_token)
         .session_id(session_id)
         .working_dir(&config.working_dir)
-        .tool_extensions(tool_extensions);
+        .tool_extensions(tool_extensions.clone());
+
+    if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
+        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new((*mem_arc).clone()));
+        builder = builder.tool(crate::memory_tools::MemoryStoreTool::new((*mem_arc).clone()));
+    }
 
     // Permission policy
     if config.permissions_mode == "allow_all" {
@@ -253,7 +259,11 @@ pub fn build_reviewer_agent(
         .cancel_token(cancel_token)
         .session_id(session_id)
         .working_dir(&config.working_dir)
-        .tool_extensions(tool_extensions);
+        .tool_extensions(tool_extensions.clone());
+
+    if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
+        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new((*mem_arc).clone()));
+    }
 
     if config.permissions_mode == "allow_all" {
         builder = builder.permission_policy(AllowAll);

@@ -108,9 +108,10 @@ pub fn history_path() -> PathBuf {
     global_config_dir().join("history")
 }
 
-/// ~/.abstract/graph.db
+/// ~/.abstract/{project}_graph.db
 pub fn graph_db_path() -> PathBuf {
-    global_config_dir().join("graph.db")
+    let project_name = permissions_project_name();
+    global_config_dir().join(format!("{project_name}_graph.db"))
 }
 
 pub fn initialize_permissions_project_name(start_dir: &Path, explicit_name: Option<&str>) {
@@ -296,6 +297,15 @@ mod tests {
         assert_eq!(
             permissions_path(),
             global_config_dir().join("permissions_cersei.yaml")
+        );
+    }
+
+    #[test]
+    fn graph_db_path_uses_project_file_name() {
+        initialize_permissions_project_name(Path::new("/tmp/cersei"), None);
+        assert_eq!(
+            graph_db_path(),
+            global_config_dir().join("cersei_graph.db")
         );
     }
 }
