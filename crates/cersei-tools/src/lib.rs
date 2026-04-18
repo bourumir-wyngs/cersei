@@ -26,6 +26,7 @@ pub mod list_directory;
 pub mod mysql_tool;
 pub mod network_policy;
 pub mod spreadsheet_tool;
+pub mod pdf_tool;
 pub mod notebook_edit;
 pub mod npm_tool;
 pub mod npx_tool;
@@ -513,6 +514,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(structure_tool::StructureTool),
         Box::new(spreadsheet_tool::SpreadsheetInfoTool),
         Box::new(spreadsheet_tool::SpreadsheetReadTool),
+        Box::new(pdf_tool::PdfReadTool),
     ]
 }
 
@@ -536,6 +538,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(structure_tool::StructureTool),
         Box::new(spreadsheet_tool::SpreadsheetInfoTool),
         Box::new(spreadsheet_tool::SpreadsheetReadTool),
+        Box::new(pdf_tool::PdfReadTool),
     ]
 }
 

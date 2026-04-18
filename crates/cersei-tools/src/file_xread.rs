@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, xfile_session_id, XFile, XLine};
+use crate::pdf_tool::is_pdf_path;
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
@@ -121,6 +122,9 @@ impl Tool for XReadTool {
             return ToolResult::error("Read accepts either `end_tag` or `length`, not both.");
         }
         let path = resolve_xfile_path(ctx, &req.file_path);
+        if is_pdf_path(&path) {
+            return ToolResult::error("Use PdfRead tool to read this format");
+        }
         if is_spreadsheet_path(&path) {
             return ToolResult::error("Use SpreadSheet tool to read this format");
         }
@@ -449,6 +453,32 @@ mod tests {
 
         assert!(result.is_error);
         assert_eq!(result.content, "Use SpreadSheet tool to read this format");
+    }
+
+    #[tokio::test]
+    async fn xread_rejects_pdf_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-pdf-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join("pdf.pdf");
+        let path = tmp.path().join("doc.pdf");
+        tokio::fs::copy(&source, &path).await.unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string()
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "Use PdfRead tool to read this format");
     }
 
 
