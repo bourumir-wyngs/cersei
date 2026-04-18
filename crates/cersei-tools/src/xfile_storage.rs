@@ -338,9 +338,13 @@ pub async fn ensure_loaded(session_id: &str, path: &Path) -> Result<XFileHead, S
         return Ok(head);
     }
 
-    let text = tokio::fs::read_to_string(&key)
-        .await
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let text = tokio::fs::read_to_string(&key).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            "Binary files cannot be handled with File tool, use Bash".to_string()
+        } else {
+            format!("Failed to read file: {}", e)
+        }
+    })?;
     let disk_state = read_disk_state(&key).ok().flatten();
 
     let storage = session_xfile_storage(session_id);
@@ -494,9 +498,13 @@ pub async fn sync_if_disk_changed(
         }
     };
 
-    let disk_text = tokio::fs::read_to_string(&key)
-        .await
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let disk_text = tokio::fs::read_to_string(&key).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            "Binary files cannot be handled with File tool, use Bash".to_string()
+        } else {
+            format!("Failed to read file: {}", e)
+        }
+    })?;
 
     let storage = session_xfile_storage(session_id);
     let mut guard = storage.lock();

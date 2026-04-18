@@ -4,6 +4,7 @@ use super::*;
 use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, xfile_session_id, XFile, XLine};
 use regex::Regex;
 use serde::Deserialize;
+use std::path::Path;
 
 pub struct XReadTool;
 
@@ -119,8 +120,10 @@ impl Tool for XReadTool {
         if search.is_none() && req.end_tag.is_some() && req.length.is_some() {
             return ToolResult::error("Read accepts either `end_tag` or `length`, not both.");
         }
-
         let path = resolve_xfile_path(ctx, &req.file_path);
+        if is_spreadsheet_path(&path) {
+            return ToolResult::error("Use SpreadSheet tool to read this format");
+        }
         let storage_session_id = xfile_session_id(ctx);
         let head = match ensure_loaded(&storage_session_id, &path).await {
             Ok(head) => head,
@@ -373,6 +376,13 @@ fn search_selected_lines<'a>(
     chunks
 }
 
+fn is_spreadsheet_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "xls" | "xlsx" | "ods"))
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +428,29 @@ mod tests {
 
         assert!(names.iter().any(|name| name == "Read"));
     }
+    #[tokio::test]
+    async fn xread_rejects_spreadsheet_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-spreadsheet-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("sheet.xlsx");
+        tokio::fs::write(&path, b"placeholder").await.unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string()
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(result.content, "Use SpreadSheet tool to read this format");
+    }
+
 
     #[tokio::test]
     async fn xread_search_filters_lines_without_requiring_start_tag() {

@@ -170,4 +170,34 @@ mod tests {
         assert!(result.content.contains("\tthree"));
         assert_eq!(result.metadata.as_ref().unwrap()["request_count"], 2);
     }
+    #[tokio::test]
+    async fn xmultiread_reports_spreadsheet_hint_cleanly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xmultiread-spreadsheet-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("sheet.xlsx");
+        tokio::fs::write(&path, b"placeholder").await.unwrap();
+
+        let tool = XMultiReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "requests": [
+                        { "file_path": path.display().to_string() }
+                    ]
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(result.is_error);
+        assert_eq!(
+            result.content,
+            format!(
+                "Reading file {}\nUse SpreadSheet tool to read this format",
+                path.display()
+            )
+        );
+    }
 }

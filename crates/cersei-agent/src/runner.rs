@@ -292,6 +292,7 @@ pub async fn run_agent_streaming(
     loop {
         turn += 1;
         if turn > agent.max_turns {
+            log_turn_handoff_to_human("max_turns_reached", true, false);
             break;
         }
 
