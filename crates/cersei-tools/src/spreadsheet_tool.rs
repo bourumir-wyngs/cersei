@@ -665,6 +665,9 @@ fn parse_a1_cell(cell: &str) -> StringResult<(usize, usize)> {
     let mut letters = String::new();
     let mut digits = String::new();
     for ch in trimmed.chars() {
+        if ch == '$' {
+            continue;
+        }
         if ch.is_ascii_alphabetic() && digits.is_empty() {
             letters.push(ch.to_ascii_uppercase());
         } else if ch.is_ascii_digit() {
@@ -678,9 +681,17 @@ fn parse_a1_cell(cell: &str) -> StringResult<(usize, usize)> {
         return Err(format!("Invalid cell reference '{}'.", trimmed));
     }
 
-    let col = letters.chars().fold(0usize, |acc, ch| {
-        acc * 26 + ((ch as u8 - b'A') as usize + 1)
-    }) - 1;
+    let mut col_one_based = 0usize;
+    for ch in letters.chars() {
+        let value = (ch as u8 - b'A') as usize + 1;
+        col_one_based = col_one_based
+            .checked_mul(26)
+            .and_then(|acc| acc.checked_add(value))
+            .ok_or_else(|| format!("Column reference is too large in '{}'.", trimmed))?;
+    }
+    let col = col_one_based
+        .checked_sub(1)
+        .ok_or_else(|| format!("Invalid column reference '{}'.", trimmed))?;
     let row = digits
         .parse::<usize>()
         .map_err(|_| format!("Invalid row number in '{}'.", trimmed))?
@@ -707,7 +718,27 @@ fn column_label(mut index: usize) -> String {
 mod tests {
     use super::*;
     use calamine::{Cell, Data, Range};
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
+
+    fn test_ctx(working_dir: PathBuf) -> ToolContext {
+        ToolContext {
+            session_id: format!("spreadsheet-test-{}", uuid::Uuid::new_v4()),
+            working_dir,
+            permissions: Arc::new(permissions::AllowAll),
+            ..ToolContext::default()
+        }
+    }
+
+    fn fixture_path(name: &str) -> String {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+            .display()
+            .to_string()
+    }
     #[test]
     fn parses_multi_cell_range() {
         let selection = parse_a1_range("A2:D5").unwrap();
@@ -715,6 +746,16 @@ mod tests {
         assert_eq!(selection.end_row, 5);
         assert_eq!(selection.start_col, 0);
         assert_eq!(selection.end_col, 4);
+    }
+
+    #[test]
+    fn parses_absolute_a1_cell() {
+        assert_eq!(parse_a1_cell("$B$3").unwrap(), (1, 2));
+    }
+
+    #[test]
+    fn rejects_overflowing_column_reference() {
+        assert!(parse_a1_cell("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ1").is_err());
     }
 
     #[test]
@@ -762,5 +803,79 @@ mod tests {
         assert_eq!(selection.requested_start_col, 3);
         assert_eq!(selection.requested_end_col, 4);
         assert!(selection.truncated_columns);
+    }
+
+    #[tokio::test]
+    async fn reads_real_fixture_metadata_for_all_formats() {
+        let ctx = test_ctx(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let tool = SpreadsheetInfoTool;
+
+        for file_name in ["Spreadsheet.ods", "Spreadsheet.xls", "Spreadsheet.xlsx"] {
+            let result = tool
+                .execute(
+                    json!({
+                        "file_path": fixture_path(file_name),
+                        "include_ranges": true
+                    }),
+                    &ctx,
+                )
+                .await;
+
+            assert!(!result.is_error, "{} => {}", file_name, result.content);
+            assert!(result.content.contains("Sheets: 2"), "{} => {}", file_name, result.content);
+            assert!(result.content.contains("Sheet1: 3 rows x 5 columns"), "{} => {}", file_name, result.content);
+            assert!(result.content.contains("Sheet2: 7 rows x 2 columns"), "{} => {}", file_name, result.content);
+            assert!(result.content.contains("range A1:E3"), "{} => {}", file_name, result.content);
+            assert!(result.content.contains("range A1:B7"), "{} => {}", file_name, result.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_real_fixture_sheet_content_across_formats() {
+        let ctx = test_ctx(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let tool = SpreadsheetReadTool;
+
+        for file_name in ["Spreadsheet.ods", "Spreadsheet.xls", "Spreadsheet.xlsx"] {
+            let result = tool
+                .execute(
+                    json!({
+                        "file_path": fixture_path(file_name),
+                        "sheet_name": "Sheet2",
+                        "format": "csv",
+                        "range": "A2:B7"
+                    }),
+                    &ctx,
+                )
+                .await;
+
+            assert!(!result.is_error, "{} => {}", file_name, result.content);
+            assert!(result.content.contains("x,y"), "{} => {}", file_name, result.content);
+            assert!(result.content.contains("1,1"), "{} => {}", file_name, result.content);
+            assert!(result.content.contains("5,25"), "{} => {}", file_name, result.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_real_fixture_with_explicit_column_slice() {
+        let ctx = test_ctx(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let tool = SpreadsheetReadTool;
+
+        let result = tool
+            .execute(
+                json!({
+                    "file_path": fixture_path("Spreadsheet.xlsx"),
+                    "sheet_name": "Sheet1",
+                    "format": "markdown",
+                    "start_col": 1,
+                    "col_limit": 2
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("Requested columns: 1..3"), "{}", result.content);
+        assert!(result.content.contains("| b | c |"), "{}", result.content);
+        assert!(result.content.contains("| 2 | 4 |"), "{}", result.content);
     }
 }
