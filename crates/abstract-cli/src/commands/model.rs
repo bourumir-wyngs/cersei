@@ -6,9 +6,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 // Stores last-displayed number → "provider/model" mapping for quick selection.
+// `/model` and `/reviewer` intentionally share the same numeric shortcuts.
 static MODEL_INDEX: std::sync::OnceLock<parking_lot::Mutex<HashMap<usize, String>>> =
-    std::sync::OnceLock::new();
-static REVIEWER_MODEL_INDEX: std::sync::OnceLock<parking_lot::Mutex<HashMap<usize, String>>> =
     std::sync::OnceLock::new();
 
 #[derive(Clone, Copy)]
@@ -19,10 +18,6 @@ enum SelectionTarget {
 
 fn model_index() -> &'static parking_lot::Mutex<HashMap<usize, String>> {
     MODEL_INDEX.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
-}
-
-fn reviewer_model_index() -> &'static parking_lot::Mutex<HashMap<usize, String>> {
-    REVIEWER_MODEL_INDEX.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
 pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction> {
@@ -48,7 +43,7 @@ async fn run_for(
         ),
         SelectionTarget::Reviewer => (
             config.reviewer_model.as_str(),
-            reviewer_model_index(),
+            model_index(),
             "/reviewer",
             "Current reviewer model",
             "Reviewer model set to",
@@ -77,7 +72,14 @@ async fn run_for(
 
     // Resolve numeric shortcut from the last listing
     let resolved_from_index = if let Ok(n) = args.trim().parse::<usize>() {
-        index.lock().get(&n).cloned()
+        let resolved = index.lock().get(&n).cloned();
+        if resolved.is_none() {
+            anyhow::bail!(
+                "Unknown model shortcut '{}'. Run /model or /reviewer to list models first.",
+                n
+            );
+        }
+        resolved
     } else {
         None
     };
@@ -368,7 +370,7 @@ fn is_chat_completions_compatible(provider_id: &str, model: &str) -> bool {
 mod tests {
     use super::{
         display_providers, fallback_models, is_chat_completions_compatible,
-        normalize_provider_model_id, selected_provider_id,
+        model_index, normalize_provider_model_id, run_reviewer, selected_provider_id, CommandAction,
     };
     use crate::config::AppConfig;
     use cersei_provider::registry;
@@ -447,5 +449,33 @@ mod tests {
             normalize_provider_model_id("google", "models/gemini-3.1-pro-preview"),
             "gemini-3.1-pro-preview"
         );
+    }
+
+    #[tokio::test]
+    async fn reviewer_numeric_shortcuts_share_model_listing_index() {
+        model_index()
+            .lock()
+            .insert(4242, "anthropic/claude-sonnet-4-6".to_string());
+
+        let config = AppConfig::default();
+        let action = run_reviewer("4242", &config).await.unwrap();
+
+        match action {
+            CommandAction::SwitchReviewer { model } => {
+                assert_eq!(model, "anthropic/claude-sonnet-4-6");
+            }
+            _ => panic!("unexpected action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_numeric_shortcut_returns_explicit_error() {
+        let config = AppConfig::default();
+        let err = match run_reviewer("99999", &config).await {
+            Ok(_) => panic!("expected missing shortcut to fail"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("Unknown model shortcut '99999'"));
     }
 }
