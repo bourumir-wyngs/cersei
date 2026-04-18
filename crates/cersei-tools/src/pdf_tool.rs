@@ -29,6 +29,10 @@ pub struct PdfReadRequest {
     #[serde(default)]
     pub search: Option<String>,
     #[serde(default)]
+    pub before: Option<usize>,
+    #[serde(default)]
+    pub after: Option<usize>,
+    #[serde(default)]
     pub max_chars: Option<usize>,
 }
 
@@ -77,6 +81,17 @@ impl Tool for PdfReadTool {
                     "type": "string",
                     "description": "Optional Rust `regex` pattern. If set and non-empty, PdfRead filters extracted text to matching lines plus nearby context, separating match groups with `---------------`."
                 },
+                "before": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional number of context lines to include before each search match."
+                },
+                "after": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional number of context lines to include after each search match."
+                },
+
                 "max_chars": {
                     "type": "integer",
                     "minimum": 1,
@@ -130,7 +145,12 @@ impl Tool for PdfReadTool {
                 Ok(regex) => regex,
                 Err(err) => return ToolResult::error(format!("Invalid regex: {}", err)),
             };
-            render_search_matches(&selected, &regex, SEARCH_CONTEXT_LINES, SEARCH_CONTEXT_LINES)
+            render_search_matches(
+                &selected,
+                &regex,
+                req.before.unwrap_or(SEARCH_CONTEXT_LINES),
+                req.after.unwrap_or(SEARCH_CONTEXT_LINES),
+            )
         } else {
             selected.clone()
         };
@@ -374,6 +394,47 @@ mod tests {
         assert!(!result.content.contains("No matches found."));
         let metadata = result.metadata.expect("metadata");
         assert!(metadata["selected_chars"].as_u64().unwrap() <= 200);
+    }
+
+    #[tokio::test]
+    async fn pdf_read_search_respects_before_and_after() {
+        let tool = PdfReadTool;
+        let path = fixture_path("pdf.pdf");
+        let ctx = test_ctx(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+        let with_context = tool
+            .execute(
+                json!({
+                    "file_path": path.display().to_string(),
+                    "search": "two",
+                    "before": 1,
+                    "after": 1,
+                    "max_chars": 5000
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!with_context.is_error, "{}", with_context.content);
+        assert!(with_context.content.contains("one"), "{}", with_context.content);
+        assert!(with_context.content.contains("two"), "{}", with_context.content);
+        assert!(with_context.content.contains("three"), "{}", with_context.content);
+
+        let without_context = tool
+            .execute(
+                json!({
+                    "file_path": path.display().to_string(),
+                    "search": "two",
+                    "before": 0,
+                    "after": 0,
+                    "max_chars": 5000
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!without_context.is_error, "{}", without_context.content);
+        assert_eq!(without_context.content.trim(), "two");
     }
 
     #[test]
