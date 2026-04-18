@@ -371,6 +371,7 @@ fn tool_input_summary(name: &str, input: &serde_json::Value) -> String {
         "Read" => read_tool_summary(input),
         "MultiRead" => multiread_tool_summary(input),
         "Write" => write_tool_summary(input),
+        "File" => file_tool_summary(input),
         "Edit" | "Sed" | "sed" => input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -529,6 +530,41 @@ fn write_tool_summary(input: &serde_json::Value) -> String {
         .unwrap_or(0);
 
     format!("{file_path} {char_count} chars")
+}
+
+fn file_tool_summary(input: &serde_json::Value) -> String {
+    match input.get("action").and_then(|v| v.as_str()).unwrap_or("") {
+        "delete" => format!(
+            "delete {}",
+            input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        ),
+        "copy" => format!(
+            "copy {} -> {}",
+            input
+                .get("source_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            input
+                .get("destination_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        ),
+        "move" => format!(
+            "move {} -> {}",
+            input
+                .get("source_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+            input
+                .get("destination_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+        ),
+        _ => serde_json::to_string(input).unwrap_or_default(),
+    }
 }
 
 fn tool_input_console_body(name: &str, input: &serde_json::Value) -> Option<ToolConsoleBody> {
@@ -691,6 +727,19 @@ mod tests {
             &serde_json::json!({"file_path": "src/main.rs", "content": "aé🙂"}),
         );
         assert_eq!(summary, "src/main.rs 3 chars");
+    }
+
+    #[test]
+    fn file_summary_formats_move_action() {
+        let summary = tool_input_summary(
+            "File",
+            &serde_json::json!({
+                "action": "move",
+                "source_path": "src/old.rs",
+                "destination_path": "src/new.rs"
+            }),
+        );
+        assert_eq!(summary, "move src/old.rs -> src/new.rs");
     }
 
     #[test]

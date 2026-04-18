@@ -457,6 +457,17 @@ fn extract_read_targets(request: &PermissionRequest) -> Option<Vec<PathBuf>> {
             path_field("file_path")?,
             &request.working_dir,
         )]),
+        "File" => match path_field("action")? {
+            "delete" => Some(vec![resolve_request_path(
+                path_field("file_path")?,
+                &request.working_dir,
+            )]),
+            "copy" | "move" => Some(vec![
+                resolve_request_path(path_field("source_path")?, &request.working_dir),
+                resolve_request_path(path_field("destination_path")?, &request.working_dir),
+            ]),
+            _ => None,
+        },
         "FileHistory" => path_field("file_path")
             .map(|path| vec![resolve_request_path(path, &request.working_dir)]),
         _ => None,
@@ -943,6 +954,24 @@ mod tests {
                 .map(SessionPermissionScope::label),
             Some("Write workspace")
         );
+    }
+
+    #[test]
+    fn file_move_requests_extract_source_and_destination_targets() {
+        let request = make_request_with_level(
+            "File",
+            json!({
+                "action": "move",
+                "source_path": "src/old.rs",
+                "destination_path": "src/new.rs"
+            }),
+            PermissionLevel::Write,
+        );
+
+        let targets = extract_read_targets(&request).unwrap();
+        assert_eq!(targets.len(), 2);
+        assert!(targets[0].ends_with("src/old.rs"));
+        assert!(targets[1].ends_with("src/new.rs"));
     }
 
     #[test]

@@ -291,6 +291,7 @@ fn materialise(old: &XFile, _old_lines: &[&str], new_lines: &[&str], ops: &[Diff
     SyncResult {
         file: XFile {
             path: old.path.clone(),
+            exists: true,
             content,
         },
         changes,

@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(disk, "updated\nworld\n");
 
         let head = try_get_head(&session_id, &path).unwrap();
-        assert_eq!(head.revision_count, 2);
+        assert_eq!(head.revision_count, 3);
         assert_eq!(head.rendered_content, disk);
     }
 
@@ -279,10 +279,11 @@ mod tests {
         assert!(!second.is_error, "{}", second.content);
 
         let revisions = list_revisions(&session_id, &path).unwrap();
-        assert_eq!(revisions.len(), 3);
-        assert_eq!(render_file(&revisions[0].file), "first\n");
-        assert_eq!(render_file(&revisions[1].file), "external\n");
-        assert_eq!(render_file(&revisions[2].file), "final\n");
+        assert_eq!(revisions.len(), 4);
+        assert!(!revisions[0].file.exists);
+        assert_eq!(render_file(&revisions[1].file), "first\n");
+        assert_eq!(render_file(&revisions[2].file), "external\n");
+        assert_eq!(render_file(&revisions[3].file), "final\n");
         assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "final\n");
     }
 

@@ -153,6 +153,12 @@ impl Tool for XEditTool {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
+        if !before_head.file.exists {
+            return ToolResult::error(format!(
+                "Cannot edit {} because the current revision is absent. Use Write to recreate the file.",
+                path.display()
+            ));
+        }
         if let Some(sync) = match sync_if_disk_changed(&ctx.session_id, &path).await {
             Ok(sync) => sync,
             Err(err) => return ToolResult::error(err),
@@ -504,7 +510,7 @@ mod tests {
         assert_eq!(disk, "ALPHA\nbeta\ngamma\n");
 
         let head = try_get_head(&session_id, &path).unwrap();
-        assert_eq!(head.revision_count, 2);
+        assert_eq!(head.revision_count, 3);
         assert_eq!(head.file.content[0].content, "ALPHA");
         assert_eq!(head.file.content[0].tag, initial.file.content[0].tag);
         assert_eq!(head.file.content[1].tag, initial.file.content[1].tag);
@@ -576,7 +582,7 @@ mod tests {
         assert_eq!(disk, "ONE\nONE-POINT-FIVE\ntwo\nthree\n");
 
         let head = try_get_head(&session_id, &path).unwrap();
-        assert_eq!(head.revision_count, 2);
+        assert_eq!(head.revision_count, 3);
         assert_eq!(head.file.content[0].tag, initial.file.content[0].tag);
         assert_eq!(head.file.content[2].tag, initial.file.content[1].tag);
         assert_eq!(head.file.content[3].tag, initial.file.content[2].tag);
@@ -720,7 +726,7 @@ mod tests {
         assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "a1\n");
 
         let head = try_get_head(&session_id, &path).unwrap();
-        assert_eq!(head.revision_count, 1);
+        assert_eq!(head.revision_count, 2);
         assert_eq!(head.rendered_content, "a1\n");
     }
 

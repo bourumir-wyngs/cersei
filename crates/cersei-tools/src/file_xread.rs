@@ -125,6 +125,18 @@ impl Tool for XReadTool {
             Ok(head) => head,
             Err(err) => return ToolResult::error(err),
         };
+        if !head.file.exists {
+            return ToolResult::success(
+                "File is absent in the current revision. Use Write to recreate it.",
+            )
+            .with_metadata(serde_json::json!({
+                "file_path": head.file.path.display().to_string(),
+                "current_version": head.current_version,
+                "line_count": 0,
+                "selected_count": 0,
+                "exists": false,
+            }));
+        }
 
         let selected = match select_lines(
             &head.file,
@@ -186,6 +198,7 @@ impl Tool for XReadTool {
             "current_version": head.current_version,
             "line_count": head.file.content.len(),
             "selected_count": selected_count,
+            "exists": true,
         }))
     }
 }
@@ -363,7 +376,7 @@ fn search_selected_lines<'a>(
 mod tests {
     use super::*;
     use crate::permissions::AllowAll;
-    use crate::xfile_storage::{clear_session_xfile_storage, store_written_text};
+    use crate::xfile_storage::{clear_session_xfile_storage, store_deleted_file, store_written_text};
     use std::path::Path;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -436,6 +449,35 @@ mod tests {
         assert!(result.content.contains("\tfoo two"));
         assert!(result.content.contains("\tend"));
         assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 6);
+    }
+
+    #[tokio::test]
+    async fn xread_reports_absent_current_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-absent-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("missing.txt");
+        let head = store_written_text(&session_id, &path, "hello\n");
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+        store_deleted_file(&session_id, &path);
+        tokio::fs::remove_file(&path).await.unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string()
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("File is absent in the current revision"));
+        assert_eq!(result.metadata.as_ref().unwrap()["exists"], false);
     }
 
     #[tokio::test]

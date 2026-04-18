@@ -1,9 +1,9 @@
 //! Revert tool: restore the previous XFileStorage revision of a tracked file.
 
 use super::*;
-use crate::file_history::unified_diff;
 use crate::xfile_storage::{
-    discard_head_revision, list_revisions, record_disk_state, render_file, resolve_xfile_path,
+    apply_file_transition_to_disk, diff_files, discard_head_revision, list_revisions,
+    record_disk_state, resolve_xfile_path,
 };
 use serde::Deserialize;
 
@@ -16,7 +16,7 @@ impl Tool for XRevertTool {
     }
 
     fn description(&self) -> &str {
-        "Restore the immediately previous XFileStorage revision for a tracked file in this session. `file_path` is required. Revert works only for files already loaded into XFileStorage by Read, Write, Edit, or matching Grep results. On success, Revert flushes the restored content to disk, removes the current head revision from XFileStorage, and returns a unified diff from the old head to the restored revision."
+        "Restore the immediately previous XFileStorage revision for a tracked file in this session. `file_path` is required. Revert works only for files already loaded into XFileStorage by Read, Write, Edit, or matching Grep results. On success, Revert applies the previous revision to disk, removes the current head revision from XFileStorage, and returns a unified diff from the old head to the restored revision. If the previous revision represents an absent file, Revert deletes the file from disk."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -79,27 +79,27 @@ impl Tool for XRevertTool {
             .last()
             .expect("checked revision list is non-empty");
         let previous = &revisions[revisions.len() - 2];
-        let current_text = render_file(&current.file);
-        let restored_text = render_file(&previous.file);
-        if let Err(e) = tokio::fs::write(&requested_path, restored_text.as_bytes()).await {
-            return ToolResult::error(format!("Failed to restore file: {}", e));
-        }
-        if let Err(err) = record_disk_state(&ctx.session_id, &requested_path) {
+        if let Err(err) = apply_file_transition_to_disk(&current.file, &previous.file).await {
             return ToolResult::error(err);
         }
-        if let Err(err) = discard_head_revision(&ctx.session_id, &requested_path) {
+        let head = match discard_head_revision(&ctx.session_id, &requested_path) {
+            Ok(head) => head,
+            Err(err) => return ToolResult::error(err),
+        };
+        if let Err(err) = record_disk_state(&ctx.session_id, &head.file.path) {
             return ToolResult::error(err);
         }
-        let diff = unified_diff(
-            &current_text,
-            &restored_text,
+        let diff = diff_files(
+            &current.file,
+            &head.file,
             &format!("{} (current)", requested_path.display()),
-            &format!("{} (reverted)", requested_path.display()),
+            &format!("{} (reverted)", head.file.path.display()),
         );
 
         ToolResult::success(format!(
-            "Reverted {} to the previous XFileStorage revision.\n{}",
+            "Reverted {} to the previous XFileStorage revision at {}.\n{}",
             requested_path.display(),
+            head.file.path.display(),
             diff.trim_end()
         ))
     }
@@ -183,6 +183,39 @@ mod tests {
             tokio::fs::read_to_string(&path).await.unwrap(),
             "hello world\n"
         );
+    }
+
+    #[tokio::test]
+    async fn revert_deletes_new_file_back_to_absent_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xrevert-test-{}", Uuid::new_v4());
+        let ctx = test_ctx(tmp.path(), &session_id);
+        let writer = XWriteTool;
+
+        let write = writer
+            .execute(
+                json!({
+                    "file_path": "sample.txt",
+                    "content": "hello world\n",
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(!write.is_error, "{}", write.content);
+
+        let path = tmp.path().join("sample.txt");
+        assert!(path.exists());
+
+        let revert_tool = XRevertTool;
+        let revert = revert_tool
+            .execute(json!({ "file_path": "sample.txt" }), &ctx)
+            .await;
+
+        assert!(!revert.is_error, "{}", revert.content);
+        assert!(!path.exists());
+
+        let head = try_get_head(&ctx.session_id, &path).unwrap();
+        assert!(!head.file.exists);
     }
 
     #[tokio::test]

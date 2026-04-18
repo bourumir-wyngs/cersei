@@ -3,10 +3,10 @@
 //! Actions: list, revisions, get_revision, diff, revert, restore.
 
 use super::*;
-use crate::file_history::unified_diff;
 use crate::xfile_storage::{
-    get_revision, list_revisions, list_tracked_files, record_disk_state, render_file,
-    resolve_xfile_path, restore_revision,
+    apply_file_transition_to_disk, diff_files, file_state, files_differ, get_revision,
+    list_revisions, list_tracked_files, record_disk_state, render_file, resolve_xfile_path,
+    restore_revision, XFileRevisionMetadata,
 };
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -22,12 +22,12 @@ impl Tool for FileHistoryTool {
     fn description(&self) -> &str {
         "Inspect session-scoped XFileStorage revision history for files loaded by Read, Write, Edit, or matching Grep results. History is limited to the retained XFileStorage revisions for this session. \
          Actions:\n\
-         - `list` — list tracked XFileStorage files with current revision and line counts.\n\
-         - `revisions` — list retained revisions for a specific file (requires `file_path`).\n\
+         - `list` — list tracked XFileStorage files with current revision, presence state, and line counts.\n\
+         - `revisions` — list retained revisions for a specific file (requires `file_path`). Revisions can represent either a present file or an absent file and may include operation metadata such as copy or move details.\n\
          - `get_revision` — get the full rendered content of a stored revision (requires `file_path` + `revision`).\n\
          - `diff` — show a unified diff between retained revisions. Omitting `to_revision` diffs against the current XFileStorage head. \
            Omitting `from_revision` defaults to the earliest retained revision. Omitting both diffs the previous revision against the current head.\n\
-         - `revert` — restore a file to a specific retained revision by cloning that revision into a new XFileStorage head and flushing it to disk (requires `file_path` + `revision`).\n\
+         - `revert` — restore a file to a specific retained revision by cloning that revision into a new XFileStorage head and applying it to disk (requires `file_path` + `revision`). If the target revision is absent, the file is deleted.\n\
          - `restore` — same as revert (alias)."
     }
 
@@ -166,10 +166,11 @@ fn action_list(session_id: &str) -> ToolResult {
     let mut out = String::from("Tracked XFileStorage files:\n\n");
     for file in files {
         out.push_str(&format!(
-            "  {} — revisions: {}, current: rev {}, lines: {}\n",
+            "  {} — revisions: {}, current: rev {}, state: {}, lines: {}\n",
             file.path.display(),
             file.revision_count,
             file.current_revision,
+            if file.exists { "present" } else { "absent" },
             file.line_count,
         ));
     }
@@ -197,12 +198,19 @@ fn action_revisions(session_id: &str, path: &Path) -> ToolResult {
         } else {
             ""
         };
+        let metadata = revision
+            .metadata
+            .as_ref()
+            .map(format_revision_metadata)
+            .unwrap_or_default();
         out.push_str(&format!(
-            "  rev {}{} — lines: {}, bytes: {}\n",
+            "  rev {}{} — state: {}, lines: {}, bytes: {}{}\n",
             revision.number,
             current,
+            file_state(&revision.file),
             revision.file.content.len(),
             rendered.len(),
+            metadata,
         ));
     }
 
@@ -211,7 +219,12 @@ fn action_revisions(session_id: &str, path: &Path) -> ToolResult {
 
 fn action_get_revision(session_id: &str, path: &Path, revision: usize) -> ToolResult {
     match get_revision(session_id, path, revision) {
-        Some(revision) => ToolResult::success(render_file(&revision.file)),
+        Some(found) if found.file.exists => ToolResult::success(render_file(&found.file)),
+        Some(_) => ToolResult::success(format!(
+            "Revision {} for {} represents an absent file.",
+            revision,
+            path.display()
+        )),
         None => ToolResult::error(format!(
             "Revision {} not found for {}. Use action `revisions` to see available revisions.",
             revision,
@@ -284,14 +297,14 @@ fn action_diff(
         None => current,
     };
 
-    let diff = unified_diff(
-        &render_file(&from.file),
-        &render_file(&to.file),
+    let diff = diff_files(
+        &from.file,
+        &to.file,
         &format!("rev {}", from.number),
         &format!("rev {}", to.number),
     );
 
-    if diff.contains("@@") {
+    if files_differ(&from.file, &to.file) {
         ToolResult::success(diff)
     } else {
         ToolResult::success("No differences between the selected revisions.")
@@ -326,12 +339,7 @@ async fn action_revert(session_id: &str, path: &Path, revision: usize) -> ToolRe
         }
     };
 
-    let current_text = render_file(&current.file);
-    let target_text = render_file(&target.file);
-    if let Err(err) = tokio::fs::write(path, target_text.as_bytes()).await {
-        return ToolResult::error(format!("Failed to write file: {}", err));
-    }
-    if let Err(err) = record_disk_state(session_id, path) {
+    if let Err(err) = apply_file_transition_to_disk(&current.file, &target.file).await {
         return ToolResult::error(err);
     }
 
@@ -339,19 +347,51 @@ async fn action_revert(session_id: &str, path: &Path, revision: usize) -> ToolRe
         Ok(head) => head,
         Err(err) => return ToolResult::error(err),
     };
-    let diff = unified_diff(
-        &current_text,
-        &head.rendered_content,
+    if let Err(err) = record_disk_state(session_id, &head.file.path) {
+        return ToolResult::error(err);
+    }
+    let diff = diff_files(
+        &current.file,
+        &head.file,
         &format!("rev {}", current.number),
-        &format!("restored from rev {}", revision),
+        &format!("restored from rev {} at {}", revision, head.file.path.display()),
     );
 
     ToolResult::success(format!(
-        "Restored {} to revision {} through XFileStorage. A new head revision was created.\n{}",
+        "Restored {} to revision {} through XFileStorage at {}. A new head revision was created.\n{}",
         path.display(),
         revision,
+        head.file.path.display(),
         diff.trim_end()
     ))
+}
+
+fn format_revision_metadata(metadata: &XFileRevisionMetadata) -> String {
+    let mut details = Vec::new();
+
+    if let Some(operation) = metadata.operation.as_deref() {
+        details.push(format!("op: {}", operation));
+    }
+    if let Some(moved) = &metadata.moved {
+        details.push(format!(
+            "moved: {} -> {}",
+            moved.source_path.display(),
+            moved.destination_path.display()
+        ));
+    }
+    if let Some(copied) = &metadata.copied {
+        details.push(format!(
+            "copied: {} -> {}",
+            copied.source_path.display(),
+            copied.destination_path.display()
+        ));
+    }
+
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", details.join(", "))
+    }
 }
 
 #[cfg(test)]
@@ -359,7 +399,9 @@ mod tests {
     use super::*;
     use crate::file_xwrite::XWriteTool;
     use crate::permissions::AllowAll;
-    use crate::xfile_storage::{clear_session_xfile_storage, list_revisions};
+    use crate::xfile_storage::{
+        clear_session_xfile_storage, list_revisions, store_loaded_if_missing,
+    };
     use serde_json::json;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -432,7 +474,8 @@ mod tests {
         let list = tool.execute(json_input("list", json!({})), &ctx).await;
         assert!(!list.is_error, "{}", list.content);
         assert!(list.content.contains("sample.txt"));
-        assert!(list.content.contains("revisions: 2"));
+        assert!(list.content.contains("revisions: 3"));
+        assert!(list.content.contains("state: present"));
 
         let revisions = tool
             .execute(
@@ -442,7 +485,8 @@ mod tests {
             .await;
         assert!(!revisions.is_error, "{}", revisions.content);
         assert!(revisions.content.contains("rev 1"));
-        assert!(revisions.content.contains("rev 2, current"));
+        assert!(revisions.content.contains("state: absent"));
+        assert!(revisions.content.contains("rev 3, current"));
     }
 
     #[tokio::test]
@@ -463,7 +507,7 @@ mod tests {
                     "get_revision",
                     json!({
                         "file_path": file_path,
-                        "revision": 1
+                        "revision": 2
                     }),
                 ),
                 &ctx,
@@ -472,6 +516,34 @@ mod tests {
 
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(result.content, "first\n");
+    }
+
+    #[tokio::test]
+    async fn get_revision_reports_absent_baseline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        clear_session_xfile_storage(&ctx.session_id);
+        let file_path = tmp.path().join("sample.txt");
+        let file_path = file_path.display().to_string();
+
+        xwrite(&ctx, &file_path, "first\n").await;
+
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input(
+                    "get_revision",
+                    json!({
+                        "file_path": file_path,
+                        "revision": 1
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("represents an absent file"));
     }
 
     #[tokio::test]
@@ -491,8 +563,8 @@ mod tests {
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("--- rev 1"));
-        assert!(result.content.contains("+++ rev 2"));
+        assert!(result.content.contains("--- rev 2"));
+        assert!(result.content.contains("+++ rev 3"));
         assert!(result.content.contains("-first"));
         assert!(result.content.contains("+second"));
     }
@@ -514,8 +586,8 @@ mod tests {
                     "diff",
                     json!({
                         "file_path": file_path,
-                        "from_revision": 1,
-                        "to_revision": 3
+                        "from_revision": 2,
+                        "to_revision": 4
                     }),
                 ),
                 &ctx,
@@ -523,8 +595,8 @@ mod tests {
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        assert!(result.content.contains("--- rev 1"));
-        assert!(result.content.contains("+++ rev 3"));
+        assert!(result.content.contains("--- rev 2"));
+        assert!(result.content.contains("+++ rev 4"));
         assert!(result.content.contains("-first"));
         assert!(result.content.contains("+third"));
     }
@@ -556,8 +628,9 @@ mod tests {
         assert!(!result.is_error, "{}", result.content);
         assert!(result.content.contains("--- rev 1"));
         assert!(result.content.contains("+++ rev 2"));
-        assert!(result.content.contains("-first"));
-        assert!(result.content.contains("+second"));
+        assert!(result.content.contains("(absent)"));
+        assert!(result.content.contains("(present)"));
+        assert!(result.content.contains("+first"));
     }
 
     #[tokio::test]
@@ -600,7 +673,9 @@ mod tests {
         let file_path = tmp.path().join("sample.txt");
         let file_path = file_path.display().to_string();
 
-        xwrite(&ctx, &file_path, "only\n").await;
+        let path = PathBuf::from(&file_path);
+        tokio::fs::write(&path, "only\n").await.unwrap();
+        store_loaded_if_missing(&ctx.session_id, &path, "only\n");
 
         let tool = FileHistoryTool;
         let result = tool
@@ -659,7 +734,7 @@ mod tests {
                     "revert",
                     json!({
                         "file_path": file_path_str,
-                        "revision": 1
+                        "revision": 2
                     }),
                 ),
                 &ctx,
@@ -673,8 +748,8 @@ mod tests {
         );
 
         let revisions = list_revisions(&ctx.session_id, &file_path).unwrap();
-        assert_eq!(revisions.len(), 3);
-        assert_eq!(revisions.last().unwrap().number, 3);
+        assert_eq!(revisions.len(), 4);
+        assert_eq!(revisions.last().unwrap().number, 4);
         assert_eq!(render_file(&revisions.last().unwrap().file), "first\n");
     }
 
@@ -695,7 +770,7 @@ mod tests {
                     "restore",
                     json!({
                         "file_path": file_path_str,
-                        "revision": 1
+                        "revision": 2
                     }),
                 ),
                 &ctx,
@@ -710,9 +785,42 @@ mod tests {
         assert!(result.content.contains("Restored"));
 
         let revisions = list_revisions(&ctx.session_id, &file_path).unwrap();
-        assert_eq!(revisions.len(), 3);
-        assert_eq!(revisions.last().unwrap().number, 3);
+        assert_eq!(revisions.len(), 4);
+        assert_eq!(revisions.last().unwrap().number, 4);
         assert_eq!(render_file(&revisions.last().unwrap().file), "first\n");
+    }
+
+    #[tokio::test]
+    async fn revert_to_absent_revision_deletes_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        clear_session_xfile_storage(&ctx.session_id);
+        let file_path = tmp.path().join("sample.txt");
+        let file_path_str = file_path.display().to_string();
+
+        xwrite(&ctx, &file_path_str, "first\n").await;
+        xwrite(&ctx, &file_path_str, "second\n").await;
+
+        let tool = FileHistoryTool;
+        let result = tool
+            .execute(
+                json_input(
+                    "revert",
+                    json!({
+                        "file_path": file_path_str,
+                        "revision": 1
+                    }),
+                ),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(!file_path.exists());
+
+        let revisions = list_revisions(&ctx.session_id, &file_path).unwrap();
+        assert_eq!(revisions.last().unwrap().number, 4);
+        assert!(!revisions.last().unwrap().file.exists);
     }
 
     #[tokio::test]

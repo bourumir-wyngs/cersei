@@ -11,6 +11,7 @@ pub mod config_tool;
 pub mod cron;
 pub mod file_history;
 pub mod file_history_tool;
+pub mod file_tool;
 pub mod file_xedit;
 pub mod file_xgrep;
 pub mod file_xread;
@@ -419,6 +420,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xmultiread::XMultiReadTool),
         Box::new(file_xwrite::XWriteTool),
         Box::new(file_xedit::XEditTool),
+        Box::new(file_tool::FileTool),
         Box::new(file_xrevert::XRevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(file_xgrep::XGrepTool),
@@ -438,6 +440,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xmultiread::XMultiReadTool),
         Box::new(file_xwrite::XWriteTool),
         Box::new(file_xedit::XEditTool),
+        Box::new(file_tool::FileTool),
         Box::new(file_xrevert::XRevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(file_xgrep::XGrepTool),
