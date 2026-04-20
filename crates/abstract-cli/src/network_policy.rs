@@ -114,7 +114,7 @@ fn matched_network_decision(command: &str, requested: NetworkAccess) -> Option<N
         return Some(NetworkDecision::Allow(NetworkAccess::Blocked));
     }
 
-    match_persisted_rule_for_request(command, true).map(|rule| {
+    match_persisted_rule_for_request("", command, true).map(|rule| {
         if !rule.allow {
             return NetworkDecision::Allow(NetworkAccess::Blocked);
         }
@@ -137,7 +137,7 @@ fn matched_network_decision_in(
         return Some(NetworkDecision::Allow(NetworkAccess::Blocked));
     }
 
-    match_persisted_rule_for_request_in(persisted, command, true).map(|rule| {
+    match_persisted_rule_for_request_in(persisted, "", command, true).map(|rule| {
         if !rule.allow {
             return NetworkDecision::Allow(NetworkAccess::Blocked);
         }
@@ -219,6 +219,7 @@ mod tests {
     fn persisted_allow_rule_grants_requested_network() {
         let rules = vec![PersistedPermissionRule {
             regex: "^cargo build$".into(),
+            tool: None,
             network: true,
             allow: true,
             allow_read: Vec::new(),
@@ -234,6 +235,7 @@ mod tests {
     fn persisted_deny_rule_downgrades_to_blocked_network() {
         let rules = vec![PersistedPermissionRule {
             regex: "^cargo build$".into(),
+            tool: None,
             network: true,
             allow: false,
             allow_read: Vec::new(),
@@ -257,6 +259,7 @@ mod tests {
     fn non_network_rule_runs_command_without_network() {
         let rules = vec![PersistedPermissionRule {
             regex: "^cargo build$".into(),
+            tool: None,
             network: false,
             allow: true,
             allow_read: Vec::new(),

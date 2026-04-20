@@ -46,6 +46,8 @@ enum SessionPermissionScope {
 pub(crate) struct PersistedPermissionRule {
     pub(crate) regex: String,
     #[serde(default)]
+    pub(crate) tool: Option<String>,
+    #[serde(default)]
     pub(crate) network: bool,
     #[serde(default)]
     pub(crate) allow: bool,
@@ -103,15 +105,17 @@ pub(crate) fn command_line_from_tool_input(
 }
 
 pub(crate) fn match_persisted_rule_for_request(
+    tool_name: &str,
     command_line: &str,
     uses_network: bool,
 ) -> Option<PersistedPermissionRule> {
     let persisted = load_persisted_file();
-    match_persisted_rule_for_request_in(&persisted, command_line, uses_network).cloned()
+    match_persisted_rule_for_request_in(&persisted, tool_name, command_line, uses_network).cloned()
 }
 
 pub(crate) fn match_persisted_rule_for_request_in<'a>(
     persisted: &'a [PersistedPermissionRule],
+    tool_name: &str,
     command_line: &str,
     uses_network: bool,
 ) -> Option<&'a PersistedPermissionRule> {
@@ -119,9 +123,17 @@ pub(crate) fn match_persisted_rule_for_request_in<'a>(
         if !uses_network && rule.network {
             return false;
         }
-        Regex::new(&rule.regex)
-            .ok()
-            .is_some_and(|regex| regex.is_match(command_line))
+
+        let tool_matches = rule.tool.as_deref().is_none_or(|tool| tool == tool_name);
+        let regex_matches = if rule.regex.is_empty() {
+            true
+        } else {
+            Regex::new(&rule.regex)
+                .ok()
+                .is_some_and(|regex| regex.is_match(command_line))
+        };
+
+        tool_matches && regex_matches
     })
 }
 
@@ -149,6 +161,7 @@ pub(crate) fn register_command_line(command_line: &str) {
 
     persisted.push(PersistedPermissionRule {
         regex,
+        tool: None,
         network: false,
         allow: false,
         allow_read: Vec::new(),
@@ -199,7 +212,7 @@ impl PermissionPolicy for CliPermissionPolicy {
         let session_scope = Self::session_scope_for_request(request);
 
         if let Some(rule) =
-            match_persisted_rule_for_request_in(&persisted, &command_line, request_uses_network)
+            match_persisted_rule_for_request_in(&persisted, &request.tool_name, &command_line, request_uses_network)
         {
             return if rule.allow {
                 PermissionDecision::Allow
@@ -705,6 +718,7 @@ mod tests {
         let initial = vec![PersistedPermissionRule {
             regex: "^cargo test$".into(),
             network: false,
+            tool: None,
             allow: false,
             allow_read: Vec::new(),
         }];
@@ -717,6 +731,7 @@ mod tests {
         if !persisted.iter().any(|rule| rule.regex == regex) {
             persisted.push(PersistedPermissionRule {
                 regex,
+                tool: None,
                 network: false,
                 allow: false,
                 allow_read: Vec::new(),
@@ -737,12 +752,14 @@ mod tests {
         let rules = vec![
             PersistedPermissionRule {
                 regex: "^cargo build$".into(),
+                tool: None,
                 network: true,
                 allow: true,
                 allow_read: Vec::new(),
             },
             PersistedPermissionRule {
                 regex: "^cargo build$".into(),
+                tool: None,
                 network: false,
                 allow: false,
                 allow_read: Vec::new(),
@@ -768,6 +785,7 @@ mod tests {
     fn networked_execute_rules_accept_network_entries() {
         let rules = vec![PersistedPermissionRule {
             regex: r"^cargo (build|check|run|test|bench|rustc|doc|rustdoc)( .*)?$".into(),
+            tool: None,
             network: true,
             allow: true,
             allow_read: Vec::new(),
@@ -784,6 +802,7 @@ mod tests {
         let command_line = command_line_from_request(&request);
         let matched = match_persisted_rule_for_request_in(
             &rules,
+            &request.tool_name,
             &command_line,
             request_uses_network(&request),
         );
@@ -795,6 +814,7 @@ mod tests {
     fn networked_execute_rules_can_run_without_network() {
         let rules = vec![PersistedPermissionRule {
             regex: r"^cargo (build|check|run|test|bench|rustc|doc|rustdoc)( .*)?$".into(),
+            tool: None,
             network: false,
             allow: true,
             allow_read: Vec::new(),
@@ -811,6 +831,7 @@ mod tests {
         let command_line = command_line_from_request(&request);
         let matched = match_persisted_rule_for_request_in(
             &rules,
+            &request.tool_name,
             &command_line,
             request_uses_network(&request),
         );
@@ -826,12 +847,14 @@ mod tests {
         let rules = vec![
             PersistedPermissionRule {
                 regex: r"^cargo (build|check|run|test|bench|rustc|doc|rustdoc)( .*)?$".into(),
+                tool: None,
                 network: false,
                 allow: false,
                 allow_read: Vec::new(),
             },
             PersistedPermissionRule {
                 regex: r"^cargo (build|check|run|test|bench|rustc|doc|rustdoc)( .*)?$".into(),
+                tool: None,
                 network: true,
                 allow: true,
                 allow_read: Vec::new(),
@@ -849,6 +872,7 @@ mod tests {
         let command_line = command_line_from_request(&request);
         let matched = match_persisted_rule_for_request_in(
             &rules,
+            &request.tool_name,
             &command_line,
             request_uses_network(&request),
         );
@@ -863,6 +887,7 @@ mod tests {
     fn non_networked_execute_rules_ignore_networked_entries() {
         let rules = vec![PersistedPermissionRule {
             regex: r"^cargo (build|check|run|test|bench|rustc|doc|rustdoc)( .*)?$".into(),
+            tool: None,
             network: true,
             allow: true,
             allow_read: Vec::new(),
@@ -879,6 +904,7 @@ mod tests {
         let command_line = command_line_from_request(&request);
         let matched = match_persisted_rule_for_request_in(
             &rules,
+            &request.tool_name,
             &command_line,
             request_uses_network(&request),
         );
@@ -925,6 +951,7 @@ mod tests {
 
         let rules = vec![PersistedPermissionRule {
             regex: "^$".into(),
+            tool: None,
             network: false,
             allow: false,
             allow_read: vec![external.path().display().to_string()],
@@ -939,6 +966,60 @@ mod tests {
             exact_command_line_regex("cargo test -- --exact foo::bar"),
             r"^cargo test \-\- \-\-exact foo::bar$"
         );
+    }
+
+    #[test]
+    fn tool_only_rules_match_unconditionally_for_matching_tool() {
+        let rules = vec![PersistedPermissionRule {
+            regex: String::new(),
+            tool: Some("Read".into()),
+            network: false,
+            allow: true,
+            allow_read: Vec::new(),
+        }];
+
+        let matched = match_persisted_rule_for_request_in(&rules, "Read", "Read {}", false);
+
+        assert_eq!(matched.map(|rule| rule.allow), Some(true));
+    }
+
+    #[test]
+    fn tool_only_rules_do_not_match_other_tools() {
+        let rules = vec![PersistedPermissionRule {
+            regex: String::new(),
+            tool: Some("Read".into()),
+            network: false,
+            allow: true,
+            allow_read: Vec::new(),
+        }];
+
+        let matched = match_persisted_rule_for_request_in(&rules, "Write", "Write {}", false);
+
+        assert!(matched.is_none());
+    }
+
+    #[test]
+    fn tool_and_regex_rules_require_both_matches() {
+        let rules = vec![
+            PersistedPermissionRule {
+                regex: "^cargo test$".into(),
+                tool: Some("Cargo".into()),
+                network: false,
+                allow: true,
+                allow_read: Vec::new(),
+            },
+            PersistedPermissionRule {
+                regex: "^cargo test$".into(),
+                tool: Some("Bash".into()),
+                network: false,
+                allow: false,
+                allow_read: Vec::new(),
+            },
+        ];
+
+        let matched = match_persisted_rule_for_request_in(&rules, "Cargo", "cargo test", false);
+
+        assert_eq!(matched.map(|rule| rule.allow), Some(true));
     }
 
     #[test]
