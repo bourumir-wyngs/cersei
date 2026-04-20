@@ -1,4 +1,4 @@
-//! wasm_tests tool: run wasm32-wasip1-compatible Rust tests in a tightly sandboxed flow.
+//! Wasm_tests tool: run wasm32-wasip1-compatible Rust tests in a tightly sandboxed flow.
 
 use super::*;
 use crate::network_policy::{
@@ -17,7 +17,7 @@ use toml_edit::{DocumentMut, Item};
 
 pub struct WasmTestsTool;
 
-const BUILD_PROMPT: &str = "Build wasm_tests artifacts (Cargo-like sandbox with network allowed during build only). This permission is remembered for all future wasm_tests builds in the session.";
+const BUILD_PROMPT: &str = "Build Wasm_tests artifacts (Cargo-like sandbox with network allowed during build only). This permission is remembered for all future Wasm_tests builds in the session.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,14 +86,14 @@ async fn ensure_configure_permission(
         config_path.display()
     );
     let request = PermissionRequest {
-        tool_name: "wasm_tests".into(),
+        tool_name: "Wasm_tests".into(),
         tool_input: serde_json::json!({
             "command": command,
             "project_root": project_root.display().to_string(),
             "config_path": config_path.display().to_string(),
         }),
         permission_level: PermissionLevel::Write,
-        description: format!("Configure wasm_tests runner at {}", config_path.display()),
+        description: format!("Configure Wasm_tests runner at {}", config_path.display()),
         id: format!("wasm-tests-configure-{}", uuid::Uuid::new_v4()),
         working_dir: ctx.working_dir.clone(),
     };
@@ -349,7 +349,7 @@ async fn execute_shell_command(
 #[async_trait]
 impl Tool for WasmTestsTool {
     fn name(&self) -> &str {
-        "wasm_tests"
+        "Wasm_tests"
     }
 
     fn description(&self) -> &str {
@@ -757,11 +757,11 @@ mod tests {
         assert_eq!(policy.request_count(), 1);
 
         let requests = policy.requests();
-        assert_eq!(requests[0].tool_name, "wasm_tests");
+        assert_eq!(requests[0].tool_name, "Wasm_tests");
         assert_eq!(requests[0].permission_level, PermissionLevel::Write);
         assert!(requests[0]
             .description
-            .contains("Configure wasm_tests runner"));
+            .contains("Configure Wasm_tests runner"));
         assert!(!wasm_test_config_path(workspace.path()).exists());
     }
 
