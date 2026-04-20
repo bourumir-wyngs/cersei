@@ -43,7 +43,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             model: "gpt-5.4".into(),
-            reviewer_model: "gpt-5.4".into(),
+            reviewer_model: "google/gemini-3.1-pro-preview".into(),
             provider: "openai".into(),
             max_turns: 50,
             max_tokens: 16384,
