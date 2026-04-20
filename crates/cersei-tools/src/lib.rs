@@ -288,6 +288,7 @@ pub struct ToolsConfig {
     pub mysql: Option<MySqlToolConfig>,
     pub postgresql: Option<PostgresToolConfig>,
     pub browser: Option<BrowserToolConfig>,
+    pub wasm_tests: Option<WasmTestsToolConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -370,6 +371,12 @@ impl Default for BrowserWindowConfig {
             height: 1000,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WasmTestsToolConfig {
+    pub network: Option<String>,
 }
 
 static GLOBAL_TOOLS_CONFIG: once_cell::sync::Lazy<parking_lot::RwLock<ToolsConfig>> =

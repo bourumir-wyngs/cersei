@@ -44,6 +44,7 @@ enum SessionPermissionScope {
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersistedPermissionRule {
+    #[serde(default)]
     pub(crate) regex: String,
     #[serde(default)]
     pub(crate) tool: Option<String>,
@@ -124,7 +125,7 @@ pub(crate) fn match_persisted_rule_for_request_in<'a>(
             return false;
         }
 
-        let tool_matches = rule.tool.as_deref().is_none_or(|tool| tool == tool_name);
+        let tool_matches = rule.tool.as_deref().is_none_or(|tool| tool.eq_ignore_ascii_case(tool_name));
         let regex_matches = if rule.regex.is_empty() {
             true
         } else {
@@ -145,6 +146,15 @@ fn request_uses_network(request: &PermissionRequest) -> bool {
                 .get("network")
                 .and_then(|value| value.as_str());
             NetworkAccess::from_input(network) != NetworkAccess::Blocked
+        }
+        "Wasm_tests" | "wasm_tests" => {
+            let tools_config = cersei_tools::global_tools_config();
+            let yaml_network = tools_config
+                .wasm_tests
+                .as_ref()
+                .and_then(|config| config.network.as_deref())
+                .unwrap_or("none");
+            NetworkAccess::from_input(Some(yaml_network)) != NetworkAccess::Blocked
         }
         _ => false,
     }
@@ -185,7 +195,9 @@ impl CliPermissionPolicy {
             (PermissionLevel::Write, _) => Some(SessionPermissionScope::WriteWorkspace),
             (PermissionLevel::Execute, "Pytest") => Some(SessionPermissionScope::Pytest),
             (PermissionLevel::Execute, "web_tests") => Some(SessionPermissionScope::WebTests),
-            (PermissionLevel::Execute, "wasm_tests") => Some(SessionPermissionScope::WasmTests),
+            (PermissionLevel::Execute, "Wasm_tests") | (PermissionLevel::Execute, "wasm_tests") => {
+                Some(SessionPermissionScope::WasmTests)
+            }
             _ => None,
         }
     }
@@ -526,6 +538,7 @@ fn permission_preview(request: &PermissionRequest, command_line: &str) -> Option
             | "Npx"
             | "Pytest"
             | "web_tests"
+            | "Wasm_tests" | "wasm_tests"
     );
 
     if direct_command {
@@ -1023,6 +1036,46 @@ mod tests {
     }
 
     #[test]
+    fn regex_only_rules_still_match_any_tool_command_for_wasm_tests() {
+        let rules = vec![PersistedPermissionRule {
+            regex: "^cargo build$".into(),
+            tool: None,
+            network: true,
+            allow: true,
+            allow_read: Vec::new(),
+        }];
+
+        let matched = match_persisted_rule_for_request_in(
+            &rules,
+            "Wasm_tests",
+            "cargo build",
+            true,
+        );
+
+        assert_eq!(matched.map(|rule| (rule.tool.clone(), rule.allow)), Some((None, true)));
+    }
+
+    #[test]
+    fn regex_only_rules_still_match_any_tool_command_for_other_tools() {
+        let rules = vec![PersistedPermissionRule {
+            regex: "^cargo build$".into(),
+            tool: None,
+            network: true,
+            allow: true,
+            allow_read: Vec::new(),
+        }];
+
+        let matched = match_persisted_rule_for_request_in(
+            &rules,
+            "Cargo",
+            "cargo build",
+            true,
+        );
+
+        assert_eq!(matched.map(|rule| (rule.tool.clone(), rule.allow)), Some((None, true)));
+    }
+
+    #[test]
     fn write_requests_use_global_workspace_scope() {
         let request = make_request_with_level(
             "Write",
@@ -1041,6 +1094,71 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn wasm_tests_uses_yaml_network_setting_when_defined() {
+        let original = cersei_tools::global_tools_config();
+        let mut config = original.clone();
+        config.wasm_tests = Some(cersei_tools::WasmTestsToolConfig {
+            network: Some("full".into()),
+        });
+        cersei_tools::set_global_tools_config(config);
+
+        let request = PermissionRequest {
+            tool_name: "Wasm_tests".into(),
+            tool_input: json!({ "project_root": "wasm_test" }),
+            permission_level: PermissionLevel::Execute,
+            description: "test".into(),
+            id: "test-id".into(),
+            working_dir: PathBuf::from("/tmp"),
+        };
+
+        assert!(request_uses_network(&request));
+
+        cersei_tools::set_global_tools_config(original);
+    }
+
+    #[test]
+    fn wasm_tests_defaults_to_no_network_without_yaml_setting() {
+        let original = cersei_tools::global_tools_config();
+        cersei_tools::set_global_tools_config(cersei_tools::ToolsConfig::default());
+
+        let request = PermissionRequest {
+            tool_name: "Wasm_tests".into(),
+            tool_input: json!({ "project_root": "wasm_test" }),
+            permission_level: PermissionLevel::Execute,
+            description: "test".into(),
+            id: "test-id".into(),
+            working_dir: PathBuf::from("/tmp"),
+        };
+
+        assert!(!request_uses_network(&request));
+
+        cersei_tools::set_global_tools_config(original);
+    }
+
+    #[test]
+    fn wasm_tests_honors_blocked_yaml_network_setting() {
+        let original = cersei_tools::global_tools_config();
+        let mut config = original.clone();
+        config.wasm_tests = Some(cersei_tools::WasmTestsToolConfig {
+            network: Some("none".into()),
+        });
+        cersei_tools::set_global_tools_config(config);
+
+        let request = PermissionRequest {
+            tool_name: "Wasm_tests".into(),
+            tool_input: json!({ "project_root": "wasm_test" }),
+            permission_level: PermissionLevel::Execute,
+            description: "test".into(),
+            id: "test-id".into(),
+            working_dir: PathBuf::from("/tmp"),
+        };
+
+        assert!(!request_uses_network(&request));
+
+        cersei_tools::set_global_tools_config(original);
+    }
     #[test]
     fn file_move_requests_extract_source_and_destination_targets() {
         let request = make_request_with_level(
@@ -1116,6 +1234,77 @@ mod tests {
             permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
             "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
         );
+    }
+
+    #[test]
+    fn wasm_tests_direct_command_line_is_extracted() {
+        assert_eq!(
+            command_line_from_request(&make_request(
+                "Wasm_tests",
+                json!({ "command": "cargo test --target wasm32-wasip1" })
+            )),
+            "cargo test --target wasm32-wasip1"
+        );
+    }
+
+    #[test]
+    fn tool_only_rules_match_wasm_tests_case_insensitively() {
+        let rules = vec![PersistedPermissionRule {
+            regex: String::new(),
+            tool: Some("wasm_tests".into()),
+            network: false,
+            allow: true,
+            allow_read: Vec::new(),
+        }];
+
+        let matched = match_persisted_rule_for_request_in(
+            &rules,
+            "Wasm_tests",
+            "cargo test --target wasm32-wasip1",
+            false,
+        );
+
+        assert_eq!(matched.map(|rule| rule.allow), Some(true));
+    }
+
+    #[test]
+    fn wasm_tests_requests_use_wasm_tests_session_scope() {
+        let request = make_request_with_level(
+            "Wasm_tests",
+            json!({ "command": "cargo test --target wasm32-wasip1" }),
+            PermissionLevel::Execute,
+        );
+
+        assert_eq!(
+            CliPermissionPolicy::session_scope_for_request(&request),
+            Some(SessionPermissionScope::WasmTests)
+        );
+        assert_eq!(
+            CliPermissionPolicy::session_scope_for_request(&request)
+                .map(SessionPermissionScope::label),
+            Some("Wasm tests")
+        );
+        assert_eq!(
+            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
+            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
+        );
+    }
+
+    #[tokio::test]
+    async fn session_wasm_tests_scope_allows_other_wasm_tests_commands() {
+        let policy = CliPermissionPolicy::new(&Theme::dark());
+        policy.allow_scope_for_session(SessionPermissionScope::WasmTests);
+
+        let request = make_request_with_level(
+            "Wasm_tests",
+            json!({ "command": "cargo test --target wasm32-wasip1 -- --exact demo" }),
+            PermissionLevel::Execute,
+        );
+
+        assert!(matches!(
+            policy.check(&request).await,
+            PermissionDecision::Allow
+        ));
     }
 
     #[tokio::test]
@@ -1217,24 +1406,28 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn session_pytest_scope_does_not_affect_other_execute_tools() {
-        let policy = CliPermissionPolicy::new(&Theme::dark());
-        policy.allow_scope_for_session(SessionPermissionScope::Pytest);
+    #[test]
+    fn yaml_deserialization_succeeds_without_regex_field() {
+        let yaml = r#"
+- tool: Read
+  allow: true
+"#;
+        let result: Result<PersistedPermissions, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_ok(), "Deserialization should succeed even if 'regex' field is missing: {:?}", result.err());
+        let rules = result.unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].tool, Some("Read".into()));
+        assert_eq!(rules[0].regex, "");
+    }
 
-        let request = make_request_with_level(
-            "Bash",
-            json!({ "command": "echo hi" }),
-            PermissionLevel::Execute,
-        );
-
-        assert_eq!(
-            CliPermissionPolicy::session_scope_for_request(&request),
-            None
-        );
-        assert_eq!(
-            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
-            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "
-        );
+    #[test]
+    fn yaml_deserialization_succeeds_with_regex_field() {
+        let yaml = r#"
+- tool: Read
+  allow: true
+  regex: ""
+"#;
+        let result: Result<PersistedPermissions, _> = serde_saphyr::from_str(yaml);
+        assert!(result.is_ok(), "Deserialization should succeed if 'regex' field is present: {:?}", result.err());
     }
 }
