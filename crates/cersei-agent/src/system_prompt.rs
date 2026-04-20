@@ -323,7 +323,7 @@ const TOOL_USE_GUIDELINES: &str = r#"
 - Use `Write` when creating a new file or replacing an entire file in one shot.
 - Use build/test tools such as `Cargo`, `Npm`, `Npx`, `Pytest`, or `WebTests` instead of invoking them through shell when those tools are available.
 - Use `Process` for commands that need to stay running or whose output you need to inspect over time.
-- Treat `Git` as a read-only inspection tool unless the session explicitly exposes a separate mutating git path.
+- Use 'MemoryStore' to make notes that may be userful in future tasks that you can do with `MemoryRecall',.
 - Parallelize independent tool calls in a single response when possible.
 "#;
 
