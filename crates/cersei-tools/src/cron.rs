@@ -24,17 +24,34 @@ pub fn clear_crons() {
     CRON_REGISTRY.clear();
 }
 
-// ─── CronCreate ──────────────────────────────────────────────────────────────
+// ─── Cron Tool ───────────────────────────────────────────────────────────────
 
-pub struct CronCreateTool;
+pub struct CronTool;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CronRequest {
+    pub action: CronAction,
+    pub id: Option<String>,
+    pub schedule: Option<String>,
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CronAction {
+    Create,
+    List,
+    Delete,
+}
 
 #[async_trait]
-impl Tool for CronCreateTool {
+impl Tool for CronTool {
     fn name(&self) -> &str {
-        "CronCreate"
+        "Cron"
     }
     fn description(&self) -> &str {
-        "Schedule a recurring or one-shot prompt to run on a cron schedule."
+        "Manage recurring or one-shot prompt schedules. Use `create` to schedule a prompt, \
+        `list` to see all jobs, and `delete` to remove a job."
     }
     fn permission_level(&self) -> PermissionLevel {
         PermissionLevel::Execute
@@ -47,128 +64,78 @@ impl Tool for CronCreateTool {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "schedule": { "type": "string", "description": "Cron expression (e.g. '*/5 * * * *' or 'once:30s')" },
-                "prompt": { "type": "string", "description": "The prompt to execute on schedule" }
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "list", "delete"],
+                    "description": "Cron action to perform."
+                },
+                "id": { "type": "string", "description": "Cron job ID (required for delete)" },
+                "schedule": { "type": "string", "description": "Cron expression (e.g. '*/5 * * * *' or 'once:30s') (required for create)" },
+                "prompt": { "type": "string", "description": "The prompt to execute (required for create)" }
             },
-            "required": ["schedule", "prompt"]
+            "required": ["action"]
         })
     }
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
-        #[derive(Deserialize)]
-        struct Input {
-            schedule: String,
-            prompt: String,
-        }
-
-        let input: Input = match serde_json::from_value(input) {
-            Ok(i) => i,
-            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
+        let req: CronRequest = match serde_json::from_value(input) {
+            Ok(req) => req,
+            Err(err) => return ToolResult::error(format!("Invalid input: {}", err)),
         };
 
-        let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
-        let entry = CronEntry {
-            id: id.clone(),
-            schedule: input.schedule.clone(),
-            prompt: input.prompt.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            last_run: None,
-            run_count: 0,
-        };
-        CRON_REGISTRY.insert(id.clone(), entry);
+        match req.action {
+            CronAction::Create => {
+                let schedule = match req.schedule {
+                    Some(s) => s,
+                    None => return ToolResult::error("`schedule` is required for action `create`"),
+                };
+                let prompt = match req.prompt {
+                    Some(p) => p,
+                    None => return ToolResult::error("`prompt` is required for action `create`"),
+                };
+                let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+                let entry = CronEntry {
+                    id: id.clone(),
+                    schedule: schedule.clone(),
+                    prompt: prompt.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    last_run: None,
+                    run_count: 0,
+                };
+                CRON_REGISTRY.insert(id.clone(), entry);
 
-        ToolResult::success(format!(
-            "Cron job '{}' created: {} → {}",
-            id, input.schedule, input.prompt
-        ))
-    }
-}
-
-// ─── CronList ────────────────────────────────────────────────────────────────
-
-pub struct CronListTool;
-
-#[async_trait]
-impl Tool for CronListTool {
-    fn name(&self) -> &str {
-        "CronList"
-    }
-    fn description(&self) -> &str {
-        "List all scheduled cron jobs."
-    }
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::None
-    }
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Shell
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({"type": "object", "properties": {}, "required": []})
-    }
-
-    async fn execute(&self, _input: Value, _ctx: &ToolContext) -> ToolResult {
-        let entries = list_crons();
-        if entries.is_empty() {
-            return ToolResult::success("No cron jobs scheduled.");
-        }
-        let lines: Vec<String> = entries
-            .iter()
-            .map(|e| {
-                format!(
-                    "- [{}] {} → {} (runs: {})",
-                    e.id, e.schedule, e.prompt, e.run_count
-                )
-            })
-            .collect();
-        ToolResult::success(lines.join("\n"))
-    }
-}
-
-// ─── CronDelete ──────────────────────────────────────────────────────────────
-
-pub struct CronDeleteTool;
-
-#[async_trait]
-impl Tool for CronDeleteTool {
-    fn name(&self) -> &str {
-        "CronDelete"
-    }
-    fn description(&self) -> &str {
-        "Delete a scheduled cron job by ID."
-    }
-    fn permission_level(&self) -> PermissionLevel {
-        PermissionLevel::Execute
-    }
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Shell
-    }
-
-    fn input_schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": { "type": "string", "description": "Cron job ID to delete" }
-            },
-            "required": ["id"]
-        })
-    }
-
-    async fn execute(&self, input: Value, _ctx: &ToolContext) -> ToolResult {
-        #[derive(Deserialize)]
-        struct Input {
-            id: String,
-        }
-
-        let input: Input = match serde_json::from_value(input) {
-            Ok(i) => i,
-            Err(e) => return ToolResult::error(format!("Invalid input: {}", e)),
-        };
-
-        if CRON_REGISTRY.remove(&input.id).is_some() {
-            ToolResult::success(format!("Cron job '{}' deleted.", input.id))
-        } else {
-            ToolResult::error(format!("Cron job '{}' not found.", input.id))
+                ToolResult::success(format!(
+                    "Cron job '{}' created: {} → {}",
+                    id, schedule, prompt
+                ))
+            }
+            CronAction::List => {
+                let entries = list_crons();
+                if entries.is_empty() {
+                    return ToolResult::success("No cron jobs scheduled.");
+                }
+                let lines: Vec<String> = entries
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "- [{}] {} → {} (runs: {})",
+                            e.id, e.schedule, e.prompt, e.run_count
+                        )
+                    })
+                    .collect();
+                ToolResult::success(lines.join("\n"))
+            }
+            CronAction::Delete => {
+                let id = match req.id {
+                    Some(id) => id,
+                    None => return ToolResult::error("`id` is required for action `delete`"),
+                };
+                if CRON_REGISTRY.remove(&id).is_some() {
+                    ToolResult::success(format!("Cron job '{}' deleted.", id))
+                } else {
+                    ToolResult::error(format!("Cron job '{}' not found.", id))
+                }
+            }
         }
     }
 }
@@ -193,11 +160,12 @@ mod tests {
     #[tokio::test]
     async fn test_cron_lifecycle() {
         clear_crons();
+        let tool = CronTool;
 
-        let create = CronCreateTool;
-        let result = create
+        let result = tool
             .execute(
                 serde_json::json!({
+                    "action": "create",
                     "schedule": "*/5 * * * *",
                     "prompt": "Run tests"
                 }),
@@ -207,17 +175,15 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("created"));
 
-        let list = CronListTool;
-        let result = list.execute(serde_json::json!({}), &test_ctx()).await;
+        let result = tool.execute(serde_json::json!({"action": "list"}), &test_ctx()).await;
         assert!(result.content.contains("Run tests"));
 
         let entries = list_crons();
         assert_eq!(entries.len(), 1);
         let id = entries[0].id.clone();
 
-        let delete = CronDeleteTool;
-        let result = delete
-            .execute(serde_json::json!({"id": id}), &test_ctx())
+        let result = tool
+            .execute(serde_json::json!({"action": "delete", "id": id}), &test_ctx())
             .await;
         assert!(!result.is_error);
 

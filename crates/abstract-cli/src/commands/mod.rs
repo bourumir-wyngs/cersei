@@ -8,6 +8,7 @@ mod compact;
 mod config_cmd;
 mod cost;
 mod diff;
+mod effort;
 mod help;
 mod memory;
 mod model;
@@ -30,6 +31,9 @@ pub enum CommandAction {
     },
     SwitchReviewer {
         model: String,
+    },
+    SwitchEffort {
+        effort: u32,
     },
     ClearHistory,
     Compact,
@@ -67,6 +71,7 @@ impl CommandRegistry {
             "commit" => commit::run(config).await.map(|_| CommandAction::None),
             "review" => review::run(config).await,
             "reviewer" => model::run_reviewer(args, config).await,
+            "effort" => effort::run(args, config),
             "memory" | "mem" => memory::run(config).map(|_| CommandAction::None),
             "model" => model::run(args, config).await,
             "config" | "cfg" => config_cmd::run(args, config).map(|_| CommandAction::None),

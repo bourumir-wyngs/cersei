@@ -205,7 +205,14 @@ pub async fn run() -> anyhow::Result<()> {
             ConfigAction::Set { key, value } => {
                 config_set(&mut config, key, value)?;
                 config::save_to(&config, &config::project_config_path())?;
-                println!("Set {} = {}", key, value);
+                if key == "effort" {
+                    println!(
+                        "Set effort = {} (max_tokens = {})",
+                        config.effort, config.max_tokens
+                    );
+                } else {
+                    println!("Set {} = {}", key, value);
+                }
             }
         },
         Some(Commands::Memory { action }) => match action {
@@ -262,10 +269,10 @@ fn apply_cli_overrides(cli: &Cli, config: &mut config::AppConfig) {
         config.provider = p.clone();
     }
     if cli.fast {
-        config.effort = "low".into();
+        config::set_effort_budget(config, config::LOW_EFFORT_BUDGET);
     }
     if cli.max {
-        config.effort = "max".into();
+        config::set_effort_budget(config, config::MAX_EFFORT_BUDGET);
     }
     if !cli.fallback.is_empty() {
         config.fallback_models = cli.fallback.clone();
@@ -294,10 +301,15 @@ fn config_set(config: &mut config::AppConfig, key: &str, value: &str) -> anyhow:
         "model" => config.model = value.into(),
         "reviewer_model" => config.reviewer_model = value.into(),
         "provider" => config.provider = value.into(),
-        "effort" => config.effort = value.into(),
+        "effort" => {
+            let effort = config::parse_effort_budget(value).ok_or_else(|| {
+                anyhow::anyhow!("Invalid effort '{value}'. Use a number or low/medium/high/max.")
+            })?;
+            config::set_effort_budget(config, effort);
+        }
         "theme" => config.theme = value.into(),
         "max_turns" => config.max_turns = value.parse()?,
-        "max_tokens" => config.max_tokens = value.parse()?,
+        "max_tokens" => anyhow::bail!("max_tokens is derived automatically as effort * 4"),
         "auto_compact" => config.auto_compact = value.parse()?,
         "graph_memory" => config.graph_memory = value.parse()?,
         "permissions_mode" => config.permissions_mode = value.into(),

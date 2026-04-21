@@ -7,7 +7,8 @@
 //! 4. Environment variables     (ABSTRACT_MODEL, etc.)
 //! 5. CLI flags
 
-use serde::{Deserialize, Serialize};
+use serde::de;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
@@ -24,7 +25,11 @@ pub struct AppConfig {
     pub provider: String,
     pub max_turns: u32,
     pub max_tokens: u32,
-    pub effort: String,
+    #[serde(
+        default = "default_effort_budget",
+        deserialize_with = "deserialize_effort"
+    )]
+    pub effort: u32,
     pub output_style: String,
     pub theme: String,
     pub auto_compact: bool,
@@ -46,8 +51,8 @@ impl Default for AppConfig {
             reviewer_model: "google/gemini-3.1-pro-preview".into(),
             provider: "openai".into(),
             max_turns: 50,
-            max_tokens: 16384,
-            effort: "medium".into(),
+            max_tokens: max_tokens_for_effort(default_effort_budget()),
+            effort: default_effort_budget(),
             output_style: "default".into(),
             theme: "dark".into(),
             auto_compact: true,
@@ -153,6 +158,68 @@ fn sanitize_permissions_project_name(name: &str) -> String {
     }
 }
 
+pub const LOW_EFFORT_BUDGET: u32 = 1024;
+pub const MEDIUM_EFFORT_BUDGET: u32 = 4096;
+pub const HIGH_EFFORT_BUDGET: u32 = 8192;
+pub const MAX_EFFORT_BUDGET: u32 = 32768;
+
+fn default_effort_budget() -> u32 {
+    MEDIUM_EFFORT_BUDGET
+}
+
+pub fn max_tokens_for_effort(effort: u32) -> u32 {
+    effort.saturating_mul(4)
+}
+
+pub fn set_effort_budget(config: &mut AppConfig, effort: u32) {
+    config.effort = effort;
+    config.max_tokens = max_tokens_for_effort(effort);
+}
+
+fn apply_derived_values(config: &mut AppConfig) {
+    config.max_tokens = max_tokens_for_effort(config.effort);
+}
+
+pub fn parse_effort_budget(value: &str) -> Option<u32> {
+    match value.trim().to_lowercase().as_str() {
+        "low" | "min" => Some(LOW_EFFORT_BUDGET),
+        "medium" | "med" | "default" => Some(MEDIUM_EFFORT_BUDGET),
+        "high" => Some(HIGH_EFFORT_BUDGET),
+        "max" | "maximum" => Some(MAX_EFFORT_BUDGET),
+        other => other
+            .parse::<u32>()
+            .ok()
+            .filter(|budget| *budget > 0 && budget.checked_mul(4).is_some()),
+    }
+}
+
+pub fn effort_temperature(budget: u32) -> Option<f32> {
+    match budget {
+        LOW_EFFORT_BUDGET => Some(0.3),
+        MAX_EFFORT_BUDGET => Some(1.0),
+        _ => None,
+    }
+}
+
+fn deserialize_effort<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum EffortValue {
+        Number(u32),
+        String(String),
+    }
+
+    match EffortValue::deserialize(deserializer)? {
+        EffortValue::Number(n) if n > 0 => Ok(n),
+        EffortValue::Number(_) => Err(de::Error::custom("effort must be greater than zero")),
+        EffortValue::String(value) => parse_effort_budget(&value)
+            .ok_or_else(|| de::Error::custom(format!("invalid effort value '{value}'"))),
+    }
+}
+
 /// ~/.abstract/permissions_{project}.yaml
 pub fn permissions_path() -> PathBuf {
     let project_name = permissions_project_name();
@@ -177,6 +244,7 @@ pub fn load() -> AppConfig {
 
     // Layer 4: environment variables
     apply_env(&mut config);
+    apply_derived_values(&mut config);
 
     config
 }
@@ -243,7 +311,9 @@ fn apply_env(config: &mut AppConfig) {
         config.provider = v;
     }
     if let Ok(v) = std::env::var("ABSTRACT_EFFORT") {
-        config.effort = v;
+        if let Some(effort) = parse_effort_budget(&v) {
+            set_effort_budget(config, effort);
+        }
     }
     if let Ok(v) = std::env::var("ABSTRACT_THEME") {
         config.theme = v;
@@ -267,7 +337,9 @@ pub fn save_to(config: &AppConfig, path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = toml::to_string_pretty(config)?;
+    let mut config = config.clone();
+    apply_derived_values(&mut config);
+    let content = toml::to_string_pretty(&config)?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -303,9 +375,40 @@ mod tests {
     #[test]
     fn graph_db_path_uses_project_file_name() {
         initialize_permissions_project_name(Path::new("/tmp/cersei"), None);
-        assert_eq!(
-            graph_db_path(),
-            global_config_dir().join("cersei_graph.db")
-        );
+        assert_eq!(graph_db_path(), global_config_dir().join("cersei_graph.db"));
+    }
+
+    #[test]
+    fn deserializes_numeric_effort() {
+        let config: AppConfig = toml::from_str("effort = 12345").unwrap();
+        assert_eq!(config.effort, 12345);
+    }
+
+    #[test]
+    fn deserializes_legacy_string_effort() {
+        let config: AppConfig = toml::from_str("effort = \"high\"").unwrap();
+        assert_eq!(config.effort, HIGH_EFFORT_BUDGET);
+    }
+
+    #[test]
+    fn serializes_effort_as_number() {
+        let config = AppConfig::default();
+        let toml = toml::to_string(&config).unwrap();
+        assert!(toml.contains("effort = 4096"));
+    }
+
+    #[test]
+    fn derives_max_tokens_from_effort() {
+        let mut config: AppConfig = toml::from_str("effort = 8192\nmax_tokens = 123").unwrap();
+        apply_derived_values(&mut config);
+        assert_eq!(config.max_tokens, 32768);
+    }
+
+    #[test]
+    fn set_effort_budget_updates_max_tokens() {
+        let mut config = AppConfig::default();
+        set_effort_budget(&mut config, 12000);
+        assert_eq!(config.effort, 12000);
+        assert_eq!(config.max_tokens, 48000);
     }
 }

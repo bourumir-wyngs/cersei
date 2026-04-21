@@ -48,8 +48,7 @@ impl Tool for StructureTool {
     }
 
     fn description(&self) -> &str {
-        "Provide language specific structural outline of a file (built-in parser will run). \
-         Supports Rust, Vue, Svelte, JavaScript, TypeScript, Python."
+        "Provide a language-specific structural outline of a file (classes, functions, etc.). Use this to quickly map out the architecture and symbols of a file before deciding which parts to read or edit. Supports Rust, Python, JavaScript, TypeScript, Vue, Svelte."
     }
 
     fn permission_level(&self) -> PermissionLevel {

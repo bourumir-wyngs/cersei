@@ -230,39 +230,36 @@ async fn run() {
     }
 
     // ── 3. Task System ───────────────────────────────────────────────────
-    println!("  3. Task System (6 tools)");
-    println!("  ────────────────────────");
+    println!("  3. Task System (consolidated)");
+    println!("  ─────────────────────────────");
     {
         cersei_tools::tasks::clear_tasks();
+        let tool = cersei_tools::tasks::TasksTool;
 
         // Create
-        let create = cersei_tools::tasks::TaskCreateTool;
-        let r = create
-            .execute(serde_json::json!({"description": "Deploy staging"}), &ctx)
+        let r = tool
+            .execute(serde_json::json!({"action": "create", "description": "Deploy staging"}), &ctx)
             .await;
-        check!("TaskCreate succeeds", !r.is_error);
+        check!("Task.create succeeds", !r.is_error);
         let id = r.content.split('\'').nth(1).unwrap().to_string();
 
         // List
-        let list = cersei_tools::tasks::TaskListTool;
-        let r = list.execute(serde_json::json!({}), &ctx).await;
-        check!("TaskList shows task", r.content.contains("Deploy staging"));
+        let r = tool.execute(serde_json::json!({"action": "list"}), &ctx).await;
+        check!("Task.list shows task", r.content.contains("Deploy staging"));
 
         // Update to running
-        let update = cersei_tools::tasks::TaskUpdateTool;
-        update
-            .execute(serde_json::json!({"id": &id, "status": "running"}), &ctx)
+        tool.execute(serde_json::json!({"action": "update", "id": &id, "status": "running"}), &ctx)
             .await;
         let task = cersei_tools::tasks::get_task(&id).unwrap();
         check!(
-            "TaskUpdate sets running",
+            "Task.update sets running",
             task.status == cersei_tools::tasks::TaskStatus::Running
         );
 
         // Complete with output
-        update
-            .execute(
+        tool.execute(
                 serde_json::json!({
+                    "action": "update",
                     "id": &id, "status": "completed", "output": "Deployed to staging-v42"
                 }),
                 &ctx,
@@ -275,21 +272,18 @@ async fn run() {
         );
 
         // Get output
-        let output = cersei_tools::tasks::TaskOutputTool;
-        let r = output.execute(serde_json::json!({"id": &id}), &ctx).await;
+        let r = tool.execute(serde_json::json!({"action": "output", "id": &id}), &ctx).await;
         check!(
-            "TaskOutput returns result",
+            "Task.output returns result",
             r.content.contains("staging-v42")
         );
 
         // Get status
-        let get = cersei_tools::tasks::TaskGetTool;
-        let r = get.execute(serde_json::json!({"id": &id}), &ctx).await;
-        check!("TaskGet shows completed", r.content.contains("Completed"));
+        let r = tool.execute(serde_json::json!({"action": "get", "id": &id}), &ctx).await;
+        check!("Task.get shows completed", r.content.contains("Completed"));
 
         // Create second task and stop it
-        create
-            .execute(serde_json::json!({"description": "Run migrations"}), &ctx)
+        tool.execute(serde_json::json!({"action": "create", "description": "Run migrations"}), &ctx)
             .await;
         let tasks = cersei_tools::tasks::list_tasks();
         let second_id = tasks
@@ -298,12 +292,11 @@ async fn run() {
             .unwrap()
             .id
             .clone();
-        let stop = cersei_tools::tasks::TaskStopTool;
-        stop.execute(serde_json::json!({"id": &second_id}), &ctx)
+        tool.execute(serde_json::json!({"action": "stop", "id": &second_id}), &ctx)
             .await;
         let task = cersei_tools::tasks::get_task(&second_id).unwrap();
         check!(
-            "TaskStop stops task",
+            "Task.stop stops task",
             task.status == cersei_tools::tasks::TaskStatus::Stopped
         );
         println!();
@@ -371,18 +364,12 @@ async fn run() {
     {
         use cersei_agent::agent_tool::AgentTool;
         cersei_tools::tasks::clear_tasks();
+        let tool = cersei_tools::tasks::TasksTool;
 
         // Simulate coordinator creating tasks and spawning workers
-        let create = cersei_tools::tasks::TaskCreateTool;
-        create
-            .execute(serde_json::json!({"description": "Lint check"}), &ctx)
-            .await;
-        create
-            .execute(serde_json::json!({"description": "Test suite"}), &ctx)
-            .await;
-        create
-            .execute(serde_json::json!({"description": "Build release"}), &ctx)
-            .await;
+        tool.execute(serde_json::json!({"action": "create", "description": "Lint check"}), &ctx).await;
+        tool.execute(serde_json::json!({"action": "create", "description": "Test suite"}), &ctx).await;
+        tool.execute(serde_json::json!({"action": "create", "description": "Build release"}), &ctx).await;
 
         let tasks = cersei_tools::tasks::list_tasks();
         check!("3 tasks created", tasks.len() >= 3);
@@ -420,12 +407,11 @@ async fn run() {
         check!("All 3 workers completed", all_ok);
 
         // Mark tasks complete
-        let update = cersei_tools::tasks::TaskUpdateTool;
         for res_outer in results {
             if let Ok((id, tr)) = res_outer {
-                update
-                    .execute(
+                tool.execute(
                         serde_json::json!({
+                            "action": "update",
                             "id": id,
                             "status": "completed",
                             "output": &tr.content

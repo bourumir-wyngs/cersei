@@ -1,27 +1,26 @@
 //! Application state, agent construction, and lifecycle management.
 
+use crate::Cli;
 use crate::config::AppConfig;
 use crate::network_policy::CliNetworkPolicy;
 use crate::permissions::CliPermissionPolicy;
 use crate::prompt;
+use crate::render::ConsoleReviewRenderer;
 use crate::repl;
 use crate::reviewer;
 use crate::sessions;
 use crate::theme::Theme;
-use crate::render::ConsoleReviewRenderer;
 use crate::tools_config;
-use crate::Cli;
 
-use cersei_agent::effort::EffortLevel;
 use cersei_mcp::McpServerConfig;
 use cersei_memory::manager::MemoryManager;
+use cersei_tools::Extensions;
 use cersei_tools::file_history::FileHistory;
 use cersei_tools::network_policy::sandbox_warning;
 use cersei_tools::permissions::AllowAll;
-use cersei_tools::Extensions;
 use cersei_types::Message;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 
 /// Run the application (REPL or single-shot).
@@ -81,9 +80,8 @@ pub async fn run(cli: Cli, mut config: AppConfig) -> anyhow::Result<()> {
     config.model = resolved_model;
 
     // Show startup banner
-    let effort = EffortLevel::from_str(&config.effort);
     if !cli.json {
-        print_banner(&config, &session_id, &effort);
+        print_banner(&config, &session_id);
     }
 
     // Dispatch to REPL or single-shot
@@ -134,7 +132,6 @@ pub fn build_agent(
         cersei_provider::from_model_string(model_string).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let system_prompt = prompt::build_cli_system_prompt(config, memory_manager);
-    let effort = EffortLevel::from_str(&config.effort);
     let theme = Theme::from_name(&config.theme);
 
     let mcp_configs: Vec<McpServerConfig> = config
@@ -166,8 +163,12 @@ pub fn build_agent(
         .tool_extensions(tool_extensions.clone());
 
     if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
-        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new((*mem_arc).clone()));
-        builder = builder.tool(crate::memory_tools::MemoryStoreTool::new((*mem_arc).clone()));
+        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
+            (*mem_arc).clone(),
+        ));
+        builder = builder.tool(crate::memory_tools::MemoryStoreTool::new(
+            (*mem_arc).clone(),
+        ));
     }
 
     // Permission policy
@@ -179,10 +180,9 @@ pub fn build_agent(
             .network_policy(CliNetworkPolicy::new(&theme));
     }
 
-    // Effort level
-    let budget = effort.thinking_budget_tokens();
-    builder = builder.thinking_budget(budget);
-    if let Some(temp) = effort.temperature() {
+    // Effort budget
+    builder = builder.thinking_budget(config.effort);
+    if let Some(temp) = crate::config::effort_temperature(config.effort) {
         builder = builder.temperature(temp);
     }
 
@@ -215,7 +215,6 @@ pub fn build_reviewer_agent(
         cersei_provider::from_model_string(model_string).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let system_prompt = prompt::build_cli_reviewer_system_prompt(config, memory_manager);
-    let effort = EffortLevel::from_str(&config.effort);
     let theme = Theme::from_name(&config.theme);
 
     let mcp_configs: Vec<McpServerConfig> = config
@@ -262,7 +261,9 @@ pub fn build_reviewer_agent(
         .tool_extensions(tool_extensions.clone());
 
     if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
-        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new((*mem_arc).clone()));
+        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
+            (*mem_arc).clone(),
+        ));
     }
 
     if config.permissions_mode == "allow_all" {
@@ -273,9 +274,8 @@ pub fn build_reviewer_agent(
             .network_policy(CliNetworkPolicy::new(&theme));
     }
 
-    let budget = effort.thinking_budget_tokens();
-    builder = builder.thinking_budget(budget);
-    if let Some(temp) = effort.temperature() {
+    builder = builder.thinking_budget(config.effort);
+    if let Some(temp) = crate::config::effort_temperature(config.effort) {
         builder = builder.temperature(temp);
     }
 
@@ -308,7 +308,7 @@ fn build_memory_manager(config: &AppConfig) -> anyhow::Result<MemoryManager> {
     Ok(mm)
 }
 
-fn print_banner(config: &AppConfig, session_id: &str, effort: &EffortLevel) {
+fn print_banner(config: &AppConfig, session_id: &str) {
     let short_id = if session_id.len() > 8 {
         &session_id[..8]
     } else {
@@ -316,10 +316,10 @@ fn print_banner(config: &AppConfig, session_id: &str, effort: &EffortLevel) {
     };
 
     eprintln!(
-        "\x1b[36;1mcersei\x1b[0m \x1b[90mv{} | {} | {:?} effort | session {}\x1b[0m",
+        "\x1b[36;1mcersei\x1b[0m \x1b[90mv{} | {} | {} effort | session {}\x1b[0m",
         env!("CARGO_PKG_VERSION"),
         config.model,
-        effort,
+        config.effort,
         short_id,
     );
     eprintln!("\x1b[90mType /help for commands, Ctrl+C to cancel, Ctrl+C×2 to exit\x1b[0m\n");

@@ -22,7 +22,7 @@ impl Tool for XMultiReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read multiple files in one request by providing a list of Read inputs. The output is the joined Read outputs with file markers between them."
+        "Read multiple files in a single request. Highly recommended for gathering context from several related files efficiently, reducing the number of tool calls and conversational turns."
     }
 
     fn permission_level(&self) -> PermissionLevel {

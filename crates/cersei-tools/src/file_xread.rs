@@ -54,7 +54,7 @@ impl Tool for XReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the latest revision of a file."
+        "Read the latest revision of a file. Use this to examine specific sections of code or retrieve line tags for editing. For reading multiple files, use MultiRead for better efficiency."
     }
 
     fn permission_level(&self) -> PermissionLevel {

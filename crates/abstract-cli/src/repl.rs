@@ -12,16 +12,16 @@ use crate::reviewer;
 use crate::signals::SignalHandle;
 use crate::status::StatusLine;
 use crate::theme::Theme;
-use cersei::events::AgentEvent;
 use cersei::Agent;
+use cersei::events::AgentEvent;
 use cersei_memory::manager::MemoryManager;
 use cersei_memory::session_storage;
-use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_tools::Extensions;
 use cersei_tools::ReviewRequest;
+use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_types::{Message, Role};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 // ─── Recovery prompt ───────────────────────────────────────────────────────
@@ -156,7 +156,10 @@ pub async fn run_repl(
         } else {
             cersei_agent::compact::estimate_messages_tokens(&agent.messages())
         };
-        let prompt_str = format!("\x1b[90m{token_count}\x1b[0m\x1b[92m> \x1b[0m");
+        let prompt_str = format!(
+            "\x1b[90m{token_count} {}\x1b[0m\x1b[92m> \x1b[0m",
+            repl_config.effort
+        );
 
         let input = match input_reader.readline(&prompt_str) {
             Some(line) => line,
@@ -338,6 +341,48 @@ pub async fn run_repl(
                         repl_config.reviewer_model = model.clone();
                         reviewer_state.set_model(model.clone());
                         renderer.model_switched(&format!("reviewer {model}"));
+                        None
+                    }
+                    Ok(commands::CommandAction::SwitchEffort { effort }) => {
+                        let previous_effort = repl_config.effort;
+                        let previous_max_tokens = repl_config.max_tokens;
+                        let msgs = agent.messages();
+                        crate::config::set_effort_budget(&mut repl_config, effort);
+                        match app::build_agent(
+                            &current_model,
+                            &repl_config,
+                            memory_manager,
+                            &current_session_id,
+                            signal_handle.token(),
+                            Some(msgs),
+                            tool_extensions.clone(),
+                        ) {
+                            Ok((new_agent, resolved)) => {
+                                agent = new_agent;
+                                current_model =
+                                    if let Some((provider, _)) = current_model.split_once('/') {
+                                        format!("{provider}/{resolved}")
+                                    } else {
+                                        resolved.clone()
+                                    };
+                                repl_config.model = current_model.clone();
+                                if let Some((provider, _)) = current_model.split_once('/') {
+                                    repl_config.provider = provider.to_string();
+                                }
+                                status.set_model(&current_model);
+                                if !json_mode {
+                                    eprintln!(
+                                        "\x1b[90m  Effort set to {} thinking tokens (max_tokens {})\x1b[0m",
+                                        effort, repl_config.max_tokens
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                repl_config.effort = previous_effort;
+                                repl_config.max_tokens = previous_max_tokens;
+                                renderer.error(&format!("Effort switch failed: {e}"));
+                            }
+                        }
                         None
                     }
                     Err(e) => {

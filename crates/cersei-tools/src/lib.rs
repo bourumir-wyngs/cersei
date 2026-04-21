@@ -21,7 +21,6 @@ pub mod file_xwrite;
 pub mod git_tool;
 pub mod git_utils;
 pub mod glob_tool;
-pub mod grep_tool;
 pub mod list_directory;
 pub mod mysql_tool;
 pub mod network_policy;
@@ -519,8 +518,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_history_tool::FileHistoryTool),
         Box::new(review_tool::ReviewTool),
         Box::new(structure_tool::StructureTool),
-        Box::new(spreadsheet_tool::SpreadsheetInfoTool),
-        Box::new(spreadsheet_tool::SpreadsheetReadTool),
+        Box::new(spreadsheet_tool::SpreadSheetTool),
         Box::new(pdf_tool::PdfReadTool),
     ]
 }
@@ -543,8 +541,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_history_tool::FileHistoryTool),
         Box::new(review_tool::ReviewTool),
         Box::new(structure_tool::StructureTool),
-        Box::new(spreadsheet_tool::SpreadsheetInfoTool),
-        Box::new(spreadsheet_tool::SpreadsheetReadTool),
+        Box::new(spreadsheet_tool::SpreadSheetTool),
         Box::new(pdf_tool::PdfReadTool),
     ]
 }
@@ -581,15 +578,7 @@ pub fn web() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(web_fetch::WebFetchTool),
         Box::new(web_search::WebSearchTool),
-        Box::new(browser_tool::BrowserWindowTool),
-        Box::new(browser_tool::BrowserNavigateTool),
-        Box::new(browser_tool::BrowserConsoleTool),
-        Box::new(browser_tool::BrowserDomTool),
-        Box::new(browser_tool::BrowserClickTool),
-        Box::new(browser_tool::BrowserInputTool),
-        Box::new(browser_tool::BrowserNetworkTool),
-        Box::new(browser_tool::BrowserCssTool),
-        Box::new(browser_tool::BrowserStorageTool),
+        Box::new(browser_tool::BrowserTool),
     ]
 }
 
@@ -605,9 +594,7 @@ pub fn planning() -> Vec<Box<dyn Tool>> {
 /// Scheduling tools: Cron (Create/List/Delete), Sleep, RemoteTrigger.
 pub fn scheduling() -> Vec<Box<dyn Tool>> {
     vec![
-        Box::new(cron::CronCreateTool),
-        Box::new(cron::CronListTool),
-        Box::new(cron::CronDeleteTool),
+        Box::new(cron::CronTool),
         Box::new(sleep::SleepTool),
         Box::new(remote_trigger::RemoteTriggerTool),
     ]
@@ -617,12 +604,7 @@ pub fn scheduling() -> Vec<Box<dyn Tool>> {
 pub fn orchestration() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(send_message::SendMessageTool),
-        Box::new(tasks::TaskCreateTool),
-        Box::new(tasks::TaskGetTool),
-        Box::new(tasks::TaskUpdateTool),
-        Box::new(tasks::TaskListTool),
-        Box::new(tasks::TaskStopTool),
-        Box::new(tasks::TaskOutputTool),
+        Box::new(tasks::TasksTool),
         Box::new(worktree::EnterWorktreeTool),
         Box::new(worktree::ExitWorktreeTool),
     ]
