@@ -7,6 +7,13 @@ use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
 
+static READ_COUNTER_REGISTRY: once_cell::sync::Lazy<dashmap::DashMap<String, usize>> =
+    once_cell::sync::Lazy::new(dashmap::DashMap::new);
+
+pub fn clear_read_counters(session_id: &str) {
+    READ_COUNTER_REGISTRY.remove(session_id);
+}
+
 pub struct XReadTool;
 
 /// Public alias preserved for downstream imports.
@@ -45,6 +52,9 @@ pub struct XReadRequest {
     /// filters the selection to matching lines plus `before`/`after` context.
     #[serde(default)]
     pub search: Option<String>,
+    /// Internal flag to suppress the MultiRead nudge when called from MultiRead.
+    #[serde(default)]
+    pub suppress_nudge: Option<bool>,
 }
 
 #[async_trait]
@@ -201,7 +211,20 @@ impl Tool for XReadTool {
             (content, selected.lines.len())
         };
 
-        ToolResult::success(content).with_metadata(serde_json::json!({
+        let mut final_content = content;
+        if !req.suppress_nudge.unwrap_or(false) {
+            let read_count = {
+                let mut entry = READ_COUNTER_REGISTRY.entry(ctx.session_id.clone()).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+
+            if read_count >= 3 && read_count % 3 == 0 {
+                final_content.push_str("\n\nNOTE: You have called Read multiple times in this session. For better efficiency, consider using MultiRead to gather context from multiple files in a single request.");
+            }
+        }
+
+        ToolResult::success(final_content).with_metadata(serde_json::json!({
             "file_path": head.file.path.display().to_string(),
             "current_version": head.current_version,
             "line_count": head.file.content.len(),

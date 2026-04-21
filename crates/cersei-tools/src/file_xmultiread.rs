@@ -63,7 +63,8 @@ impl Tool for XMultiReadTool {
         let mut outputs = Vec::with_capacity(req.requests.len());
         let mut metadata = Vec::with_capacity(req.requests.len());
 
-        for request in req.requests {
+        for mut request in req.requests {
+            request.suppress_nudge = Some(true);
             let file_path = request.file_path.clone();
             let result = match serde_json::to_value(&request) {
                 Ok(input) => read_tool.execute(input, ctx).await,
