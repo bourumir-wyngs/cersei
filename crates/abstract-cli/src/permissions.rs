@@ -56,6 +56,15 @@ pub(crate) struct PersistedPermissionRule {
     pub(crate) allow_read: Vec<String>,
 }
 
+impl PersistedPermissionRule {
+    fn is_valid(&self) -> bool {
+        self.tool
+            .as_deref()
+            .is_some_and(|tool| !tool.trim().is_empty())
+            || !self.regex.trim().is_empty()
+    }
+}
+
 type PersistedPermissions = Vec<PersistedPermissionRule>;
 
 pub(crate) fn command_line_from_request(request: &PermissionRequest) -> String {
@@ -595,7 +604,23 @@ fn load_persisted_file() -> PersistedPermissions {
 
 fn load_persisted_file_from(path: &Path) -> PersistedPermissions {
     match std::fs::read_to_string(path) {
-        Ok(s) => serde_saphyr::from_str::<PersistedPermissions>(&s).unwrap_or_default(),
+        Ok(s) => match serde_saphyr::from_str::<PersistedPermissions>(&s) {
+            Ok(rules) => rules
+                .into_iter()
+                .filter(|rule| {
+                    if rule.is_valid() {
+                        true
+                    } else {
+                        eprintln!(
+                            "Ignoring invalid persisted permission rule in {}: expected at least one of 'tool' or non-empty 'regex'",
+                            path.display()
+                        );
+                        false
+                    }
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        },
         Err(_) => Vec::new(),
     }
 }
@@ -1429,5 +1454,19 @@ mod tests {
 "#;
         let result: Result<PersistedPermissions, _> = serde_saphyr::from_str(yaml);
         assert!(result.is_ok(), "Deserialization should succeed if 'regex' field is present: {:?}", result.err());
+    }
+
+    #[test]
+    fn invalid_rule_without_tool_or_regex_is_ignored() {
+        let yaml = r#"
+- allow: true
+  network: false
+"#;
+        let path = temp_permissions_path();
+        std::fs::write(&path, yaml).unwrap();
+
+        let rules = load_persisted_file_from(&path);
+
+        assert!(rules.is_empty());
     }
 }

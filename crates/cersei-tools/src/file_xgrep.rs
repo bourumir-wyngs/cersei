@@ -9,6 +9,13 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+static GREP_COUNTER_REGISTRY: once_cell::sync::Lazy<dashmap::DashMap<String, usize>> =
+    once_cell::sync::Lazy::new(dashmap::DashMap::new);
+
+pub fn clear_grep_counters(session_id: &str) {
+    GREP_COUNTER_REGISTRY.remove(session_id);
+}
+
 pub struct XGrepTool;
 
 /// Public alias preserved for downstream imports.
@@ -19,7 +26,7 @@ struct SearchFileResult {
     match_indices: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct XGrepRequest {
     pub pattern: String,
     pub path: String,
@@ -33,6 +40,9 @@ pub struct XGrepRequest {
     pub after: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Internal flag to suppress the MultiGrep nudge when called from MultiGrep.
+    #[serde(default)]
+    pub suppress_nudge: Option<bool>,
 }
 
 #[async_trait]
@@ -151,6 +161,7 @@ impl Tool for XGrepTool {
                     .into_iter()
                     .map(|line| format_output_line(&searched.file.path, line)),
                 );
+                match_count += remaining;
                 truncated = true;
                 break;
             }
@@ -163,17 +174,33 @@ impl Tool for XGrepTool {
             );
         }
 
-        if hits.is_empty() {
-            ToolResult::success("No matches found.")
+        let mut content = if hits.is_empty() {
+            "No matches found.".to_string()
         } else if truncated {
-            ToolResult::success(format!(
+            format!(
                 "{}\n\n[more matches found, capped to {}]",
                 hits.join("\n"),
                 limit
-            ))
+            )
         } else {
-            ToolResult::success(hits.join("\n"))
+            hits.join("\n")
+        };
+
+        if !req.suppress_nudge.unwrap_or(false) {
+            let grep_count = {
+                let mut entry = GREP_COUNTER_REGISTRY
+                    .entry(ctx.session_id.clone())
+                    .or_insert(0);
+                *entry += 1;
+                *entry
+            };
+
+            if grep_count >= 3 && grep_count % 3 == 0 {
+                content.push_str("\n\nNOTE: You have called Grep multiple times in this session. For better efficiency, consider using MultiGrep to perform multiple searches in a single request.");
+            }
         }
+
+        ToolResult::success(content)
     }
 }
 

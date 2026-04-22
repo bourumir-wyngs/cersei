@@ -1,6 +1,7 @@
 //! cersei-tools: Tool trait, built-in tool implementations, and permission system.
 
 pub mod ask_user;
+pub mod audit_tool;
 pub mod bash;
 pub mod bash_classifier;
 pub mod browser_tool;
@@ -14,6 +15,7 @@ pub mod file_history_tool;
 pub mod file_tool;
 pub mod file_xedit;
 pub mod file_xgrep;
+pub mod file_xmultigrep;
 pub mod file_xmultiread;
 pub mod file_xread;
 pub mod file_xrevert;
@@ -24,11 +26,10 @@ pub mod glob_tool;
 pub mod list_directory;
 pub mod mysql_tool;
 pub mod network_policy;
-pub mod spreadsheet_tool;
-pub mod pdf_tool;
 pub mod notebook_edit;
 pub mod npm_tool;
 pub mod npx_tool;
+pub mod pdf_tool;
 pub mod permissions;
 pub mod plan_mode;
 pub mod postgres_tool;
@@ -42,6 +43,7 @@ mod shell_sandbox;
 pub mod skill_tool;
 pub mod skills;
 pub mod sleep;
+pub mod spreadsheet_tool;
 pub mod structure_tool;
 pub mod synthetic_output;
 pub mod tasks;
@@ -513,6 +515,7 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xrevert::XRevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(file_xgrep::XGrepTool),
+        Box::new(file_xmultigrep::XMultiGrepTool),
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
@@ -536,6 +539,7 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xrevert::XRevertTool),
         Box::new(glob_tool::GlobTool),
         Box::new(file_xgrep::XGrepTool),
+        Box::new(file_xmultigrep::XMultiGrepTool),
         Box::new(list_directory::ListDirectoryTool),
         Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
@@ -573,12 +577,13 @@ pub fn testing() -> Vec<Box<dyn Tool>> {
     ]
 }
 
-/// Web tools: WebFetch, WebSearch, and local browser automation.
+/// Web tools: WebFetch, WebSearch, local browser automation, and Audit.
 pub fn web() -> Vec<Box<dyn Tool>> {
     vec![
         Box::new(web_fetch::WebFetchTool),
         Box::new(web_search::WebSearchTool),
         Box::new(browser_tool::BrowserTool),
+        Box::new(audit_tool::AuditTool),
     ]
 }
 
