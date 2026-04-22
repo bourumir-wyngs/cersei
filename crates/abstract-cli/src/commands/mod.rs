@@ -25,6 +25,7 @@ pub enum CommandAction {
     None,
     RunReviewer {
         diff: String,
+        hint: String,
     },
     SwitchAgent {
         model: String,
@@ -69,7 +70,7 @@ impl CommandRegistry {
             "compact" => compact::run(config).map(|_| CommandAction::Compact),
             "cost" => cost::run(session_id).map(|_| CommandAction::None),
             "commit" => commit::run(config).await.map(|_| CommandAction::None),
-            "review" => review::run(config).await,
+            "review" => review::run(args, config).await,
             "reviewer" => model::run_reviewer(args, config).await,
             "effort" => effort::run(args, config),
             "memory" | "mem" => memory::run(config).map(|_| CommandAction::None),

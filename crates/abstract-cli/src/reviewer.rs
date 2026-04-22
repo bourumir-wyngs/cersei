@@ -140,8 +140,13 @@ impl ReviewExecutor for CliReviewerExecutor {
 }
 
 fn build_review_prompt(request: &ReviewRequest) -> String {
+    let hint_line = if request.hint.is_empty() {
+        String::new()
+    } else {
+        format!(" User instruction: {}", request.hint)
+    };
     format!(
-        "Review this {} from another agent's work. Focus on major defects, unsafe code, and suspicious behavior.\n\n{}",
+        "Review this {} from another agent's work. Focus on major defects, unsafe code, and suspicious behavior.{hint_line}\n\n{}",
         request.source.label(),
         request.diff.as_str()
     )

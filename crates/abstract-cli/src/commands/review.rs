@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use anyhow::{bail, Context};
 use std::process::Command;
 
-pub async fn run(config: &AppConfig) -> anyhow::Result<CommandAction> {
+pub async fn run(args: &str, config: &AppConfig) -> anyhow::Result<CommandAction> {
     let diff = match git_diff(config)? {
         Some(diff) => diff,
         None => {
@@ -12,7 +12,10 @@ pub async fn run(config: &AppConfig) -> anyhow::Result<CommandAction> {
         }
     };
 
-    Ok(CommandAction::RunReviewer { diff })
+    Ok(CommandAction::RunReviewer {
+        diff,
+        hint: args.trim().to_string(),
+    })
 }
 
 fn git_diff(config: &AppConfig) -> anyhow::Result<Option<String>> {
@@ -50,12 +53,28 @@ mod tests {
     fn run_reviewer_action_contains_full_diff() {
         let action = CommandAction::RunReviewer {
             diff: "diff --git a/a.rs b/a.rs\n+hello\n".to_string(),
+            hint: String::new(),
         };
 
         match action {
-            CommandAction::RunReviewer { diff } => {
+            CommandAction::RunReviewer { diff, .. } => {
                 assert!(diff.contains("diff --git a/a.rs b/a.rs"));
                 assert!(diff.contains("+hello"));
+            }
+            _ => panic!("unexpected action"),
+        }
+    }
+
+    #[test]
+    fn run_reviewer_action_carries_hint() {
+        let action = CommandAction::RunReviewer {
+            diff: "some diff".to_string(),
+            hint: "focus on abc.rs".to_string(),
+        };
+
+        match action {
+            CommandAction::RunReviewer { hint, .. } => {
+                assert_eq!(hint, "focus on abc.rs");
             }
             _ => panic!("unexpected action"),
         }

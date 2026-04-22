@@ -172,6 +172,8 @@ impl ReviewSource {
 pub struct ReviewRequest {
     pub diff: String,
     pub source: ReviewSource,
+    /// Free-form user instruction appended to the review prompt (e.g. "focus on abc.rs").
+    pub hint: String,
 }
 
 impl ReviewRequest {
@@ -179,6 +181,7 @@ impl ReviewRequest {
         Self {
             diff,
             source: ReviewSource::CheckpointDiff,
+            hint: String::new(),
         }
     }
 
@@ -186,7 +189,13 @@ impl ReviewRequest {
         Self {
             diff,
             source: ReviewSource::GitDiff,
+            hint: String::new(),
         }
+    }
+
+    pub fn with_hint(mut self, hint: String) -> Self {
+        self.hint = hint;
+        self
     }
 }
 

@@ -185,10 +185,13 @@ pub async fn run_repl(
                     .await
                 {
                     Ok(commands::CommandAction::None) => None,
-                    Ok(commands::CommandAction::RunReviewer { diff }) => {
+                    Ok(commands::CommandAction::RunReviewer { diff, hint }) => {
                         match reviewer::review_service(tool_extensions) {
                             Some(service) => {
-                                match service.review(ReviewRequest::git_diff(diff)).await {
+                                match service
+                                    .review(ReviewRequest::git_diff(diff).with_hint(hint))
+                                    .await
+                                {
                                     Ok(response) => {
                                         renderer.external_review(
                                             &response.reviewer_model,
