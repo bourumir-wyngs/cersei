@@ -522,7 +522,7 @@ fn cmd_log(
             &oid.to_string()[..12],
             author.name.to_str_lossy(),
             author.email.to_str_lossy(),
-            fmt_time(author.time.seconds),
+            fmt_time(author.time().map_err(|e| e.to_string())?.seconds),
             msg.title.to_str_lossy(),
         ));
     }
@@ -558,7 +558,7 @@ fn cmd_show(
         author.email.to_str_lossy(),
         committer.name.to_str_lossy(),
         committer.email.to_str_lossy(),
-        fmt_time(committer.time.seconds),
+        fmt_time(committer.time().map_err(|e| e.to_string())?.seconds),
         msg.title.to_str_lossy(),
     );
     for line in full_body.lines() {
@@ -692,7 +692,7 @@ fn cmd_diff_worktree(
     use std::collections::HashSet;
 
     let work_dir = repo
-        .work_dir()
+        .workdir()
         .ok_or("bare repositories have no working tree")?
         .to_path_buf();
 
@@ -899,7 +899,7 @@ fn cmd_status(repo: &gix::Repository) -> Result<String, String> {
     use std::collections::HashSet;
 
     let work_dir = repo
-        .work_dir()
+        .workdir()
         .ok_or("bare repositories have no working tree")?
         .to_path_buf();
 

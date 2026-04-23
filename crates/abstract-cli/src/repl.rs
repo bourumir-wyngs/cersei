@@ -23,6 +23,7 @@ use cersei_types::{Message, Role};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use chrono::Local;
 
 // ─── Recovery prompt ───────────────────────────────────────────────────────
 
@@ -411,6 +412,7 @@ pub async fn run_repl(
             let result = run_agent_streaming(
                 &agent,
                 &prompt,
+                &prompt_str,
                 &mut renderer,
                 &mut status,
                 json_mode,
@@ -536,7 +538,7 @@ pub async fn run_single_shot(
 
     running.store(true, Ordering::Relaxed);
     let result =
-        run_agent_streaming(&agent, prompt, &mut renderer, &mut status, json_mode, true).await;
+        run_agent_streaming(&agent, prompt, "", &mut renderer, &mut status, json_mode, true).await;
     running.store(false, Ordering::Relaxed);
 
     match result {
@@ -548,11 +550,19 @@ pub async fn run_single_shot(
     }
 }
 
+fn print_handover_waiting_banner(prompt: &str) {
+    let timestamp = Local::now().format("%H:%M:%S");
+    eprintln!("\x1b[32m*************** {timestamp} ***************\x1b[0m");
+    eprintln!("{prompt}");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
 /// Core event loop: stream agent events and render them.
 /// Returns Ok(()) on success or Err(error_message) on failure.
 async fn run_agent_streaming(
     agent: &Agent,
     prompt: &str,
+    input_prompt: &str,
     renderer: &mut StreamRenderer,
     status: &mut StatusLine,
     json_mode: bool,
@@ -604,6 +614,11 @@ async fn run_agent_streaming(
             AgentEvent::CompactStart { reason, .. } => {
                 if !json_mode {
                     eprintln!("\x1b[90m  Compacting context ({:?})...\x1b[0m", reason);
+                }
+            }
+            AgentEvent::SessionSaved { .. } => {
+                if !json_mode {
+                    print_handover_waiting_banner(input_prompt);
                 }
             }
             AgentEvent::CompactEnd {

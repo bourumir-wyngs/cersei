@@ -18,6 +18,8 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 const END_TURN_SUMMARY_PROMPT: &str = "Briefly summarize your progress, results, and next steps.";
+const AUTO_RECALL_LIMIT: usize = 3;
+
 
 fn log_turn_handoff_to_human(reason: &str, summary_missing: bool, summary_prompt_sent: bool) {
     let timestamp = chrono::Local::now().to_rfc3339();
@@ -95,6 +97,60 @@ fn assistant_message_has_progress_summary(message: &Message) -> bool {
         }
     }
     matches >= 2
+}
+
+fn should_auto_recall_from_prompt(prompt: &str) -> bool {
+    let bytes = prompt.as_bytes();
+    let needle = b"again";
+
+    bytes
+        .windows(needle.len())
+        .enumerate()
+        .any(|(idx, window)| {
+            if !window.iter().zip(needle.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b)) {
+                return false;
+            }
+
+            let before_ok = idx
+                .checked_sub(1)
+                .and_then(|i| bytes.get(i))
+                .is_none_or(|b| !b.is_ascii_alphabetic());
+            let after_ok = bytes
+                .get(idx + needle.len())
+                .is_none_or(|b| !b.is_ascii_alphabetic());
+
+            before_ok && after_ok
+        })
+}
+
+async fn inject_auto_recalled_memories(agent: &Agent, prompt: &str) -> Result<()> {
+    if !should_auto_recall_from_prompt(prompt) {
+        return Ok(());
+    }
+
+    let Some(memory) = &agent.memory else {
+        return Ok(());
+    };
+
+    let recalled = memory.search(prompt, AUTO_RECALL_LIMIT).await?;
+    if recalled.is_empty() {
+        return Ok(());
+    }
+
+    let mut note = String::from(
+        "Relevant recalled memories triggered by the user's use of the word 'again':\n"
+    );
+    for (idx, entry) in recalled.iter().enumerate() {
+        note.push_str(&format!(
+            "{}. [{}] {}\n",
+            idx + 1,
+            entry.source,
+            entry.content
+        ));
+    }
+
+    agent.messages.lock().push(Message::system(note.trim_end()));
+    Ok(())
 }
 
 // ─── Thinking block stripping ────────────────────────────────────────────────
@@ -264,6 +320,8 @@ pub async fn run_agent_streaming(
             }
         }
     } // end session load guard
+
+    inject_auto_recalled_memories(agent, prompt).await?;
 
     // Add user prompt
     agent.messages.lock().push(Message::user(prompt));
@@ -856,6 +914,16 @@ mod tests {
             self.checks.fetch_add(1, Ordering::SeqCst);
             PermissionDecision::Allow
         }
+    }
+
+    #[test]
+    fn auto_recall_trigger_matches_whole_word_case_insensitively() {
+        assert!(should_auto_recall_from_prompt("please check again"));
+        assert!(should_auto_recall_from_prompt("Again, this broke"));
+        assert!(should_auto_recall_from_prompt("(AGAIN)?"));
+        assert!(!should_auto_recall_from_prompt("This is against expectations"));
+        assert!(!should_auto_recall_from_prompt("bargain"));
+        assert!(!should_auto_recall_from_prompt("A gain of confidence"));
     }
 
     struct PreflightTool {
