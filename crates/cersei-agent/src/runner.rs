@@ -493,6 +493,10 @@ pub async fn run_agent_streaming(
 
         // Process stream events
         while let Some(event) = rx.recv().await {
+            // Check cancellation during streaming
+            if agent.cancel_token.is_cancelled() {
+                return Err(CerseiError::Cancelled);
+            }
             match &event {
                 StreamEvent::TextDelta { text, .. } => {
                     let _ = event_tx.send(AgentEvent::TextDelta(text.clone())).await;
@@ -614,6 +618,11 @@ pub async fn run_agent_streaming(
                 let mut result_blocks: Vec<ContentBlock> = Vec::new();
 
                 for (tool_id, tool_name, tool_input) in tool_use_blocks {
+                    // Check cancellation before each tool execution
+                    if agent.cancel_token.is_cancelled() {
+                        return Err(CerseiError::Cancelled);
+                    }
+
                     let _ = event_tx
                         .send(AgentEvent::ToolStart {
                             name: tool_name.clone(),

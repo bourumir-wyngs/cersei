@@ -791,12 +791,23 @@ fn save_persisted_file_to(path: &Path, persisted: &PersistedPermissions) {
 }
 
 fn read_permission_char(valid_chars: &str) -> char {
-    use crossterm::event::{self, Event, KeyCode, KeyEvent};
+    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
     use crossterm::terminal;
 
     if terminal::enable_raw_mode().is_ok() {
         let result = loop {
-            if let Ok(Event::Key(KeyEvent { code, .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) = event::read()
+            {
+                // Ctrl-C: exit raw mode and raise SIGINT so the signal handler
+                // can cancel the running agent turn.
+                if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                    let _ = terminal::disable_raw_mode();
+                    eprintln!();
+                    unsafe { libc::raise(libc::SIGINT) };
+                    return 'n';
+                }
                 break match code {
                     KeyCode::Char(c) => {
                         if valid_chars.contains(c) {

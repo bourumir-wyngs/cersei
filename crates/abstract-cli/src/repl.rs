@@ -100,12 +100,21 @@ fn prompt_recovery(current_model: &str, config: &AppConfig) -> Recovery {
 }
 
 fn read_choice() -> String {
-    use crossterm::event::{self, Event, KeyCode, KeyEvent};
+    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
     use crossterm::terminal;
 
     if terminal::enable_raw_mode().is_ok() {
         let result = loop {
-            if let Ok(Event::Key(KeyEvent { code, .. })) = event::read() {
+            if let Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) = event::read()
+            {
+                // Ctrl-C: exit raw mode and return empty to skip recovery.
+                if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                    let _ = terminal::disable_raw_mode();
+                    eprintln!();
+                    return String::new();
+                }
                 break match code {
                     KeyCode::Char(c) => c.to_string(),
                     KeyCode::Enter => String::new(),
@@ -436,7 +445,18 @@ pub async fn run_repl(
                     signal_handle.reset();
 
                     if err_msg.trim() == "Cancelled" {
-                        let msgs = agent.messages();
+                        let mut msgs = agent.messages();
+
+                        // Remove trailing assistant message with orphaned ToolUse blocks
+                        // (no matching ToolResult was added before cancellation)
+                        if msgs.last().map(|m| m.role == Role::Assistant && m.has_tool_use()).unwrap_or(false) {
+                            msgs.pop();
+                        }
+
+                        // Tell the agent the user cancelled
+                        msgs.push(Message::user(
+                            "User manually stopped (cancelled) your current operations. Be ready for new instructions",
+                        ));
                         match app::build_agent(
                             &current_model,
                             &repl_config,
