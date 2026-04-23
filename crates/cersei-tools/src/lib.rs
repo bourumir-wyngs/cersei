@@ -481,8 +481,6 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     tools.extend(data());
     tools.extend(vcs());
     tools.extend(planning());
-    tools.extend(scheduling());
-    tools.extend(orchestration());
     tools.push(Box::new(ask_user::AskUserQuestionTool));
     // SyntheticOutput is intentionally excluded from the default set — it's for SDK/coordinator
     // sessions only. Add it explicitly via AgentBuilder::tool() when needed.
@@ -526,7 +524,6 @@ pub fn filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xgrep::XGrepTool),
         Box::new(file_xmultigrep::XMultiGrepTool),
         Box::new(list_directory::ListDirectoryTool),
-        Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
         Box::new(review_tool::ReviewTool),
         Box::new(structure_tool::StructureTool),
@@ -550,7 +547,6 @@ fn default_filesystem() -> Vec<Box<dyn Tool>> {
         Box::new(file_xgrep::XGrepTool),
         Box::new(file_xmultigrep::XMultiGrepTool),
         Box::new(list_directory::ListDirectoryTool),
-        Box::new(notebook_edit::NotebookEditTool),
         Box::new(file_history_tool::FileHistoryTool),
         Box::new(review_tool::ReviewTool),
         Box::new(structure_tool::StructureTool),

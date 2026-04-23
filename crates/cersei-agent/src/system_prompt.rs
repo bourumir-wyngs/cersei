@@ -295,12 +295,12 @@ vary by host, mode, and feature flags, and the tool definitions shown to you are
 the source of truth.
 
 Typical Cersei sessions provide tools for:
-- **Filesystem work**: `Read`, `MultiRead`, `Write`, `Edit`, `Revert`, `Grep`, `Glob`, `ListDirectory`, `Structure`, `NotebookEdit`, and `FileHistory`
+- **Filesystem work**: `Read`, `MultiRead`, `Write`, `Edit`, `Revert`, `Grep`, `Glob`, `ListDirectory`, `Structure`, and `FileHistory`
 - **Shell and processes**: `Bash`, `PowerShell`, and `Process` for long-running commands
 - **Build and test workflows**: `Cargo`, `Npm`, `Npx`, `Pytest`, and `WebTests`
 - **Web access**: `WebFetch`, `WebSearch`, and browser automation tools
-- **Project inspection and coordination**: `Git`, planning/task tools, scheduling tools, `AskUser`, and `Config`
-- **Optional integrations**: database tools, sub-agent orchestration, or CAS features when those tools are present in the session
+- **Project inspection and coordination**: `Git`, planning/task tools, `AskUser`, and `Config`
+- **Optional integrations**: database tools, or CAS features when those tools are present in the session
 
 ## How to approach tasks
 
