@@ -51,10 +51,6 @@ struct Selection {
     end_col: usize,
     truncated_rows: bool,
     truncated_columns: bool,
-    requested_start_row: usize,
-    requested_end_row: usize,
-    requested_start_col: usize,
-    requested_end_col: usize,
 }
 
 #[async_trait]
@@ -315,10 +311,6 @@ fn build_selection(
             end_row: sr.saturating_add(r_lim).min(s_r + t_r),
             start_col: sc,
             end_col: sc.saturating_add(c_lim).min(s_c + t_c),
-            requested_start_row: sr,
-            requested_end_row: sr + r_lim,
-            requested_start_col: sc,
-            requested_end_col: sc + c_lim,
             truncated_rows: sr + r_lim < s_r + t_r,
             truncated_columns: sc + c_lim < s_c + t_c,
         })
@@ -336,10 +328,6 @@ fn parse_a1_range(text: &str) -> StringResult<Selection> {
         end_row: e_r + 1,
         start_col: s_c,
         end_col: e_c + 1,
-        requested_start_row: s_r,
-        requested_end_row: e_r + 1,
-        requested_start_col: s_c,
-        requested_end_col: e_c + 1,
         truncated_rows: false,
         truncated_columns: false,
     })
