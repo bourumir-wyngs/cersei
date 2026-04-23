@@ -51,6 +51,7 @@ rustpython-parser = { workspace = true }
 cargo_metadata = "0.19"
 calamine = "0.31"
 pdf-extract = "0.7"
+bollard = "0.17"
 
 [features]
 cas = ["giacrs"]
