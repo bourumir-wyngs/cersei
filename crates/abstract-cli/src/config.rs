@@ -422,12 +422,12 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     }
     if !overlay.fallback_models.is_empty() {
         base.fallback_models = overlay.fallback_models;
-    if !overlay.model_tools.is_empty() {
+    }
+    if overlay.model_tools != AppConfig::default().model_tools {
         base.model_tools = overlay.model_tools;
     }
-    if !overlay.reviewer_tools.is_empty() {
+    if overlay.reviewer_tools != AppConfig::default().reviewer_tools {
         base.reviewer_tools = overlay.reviewer_tools;
-    }
     }
     if !overlay.mcp_servers.is_empty() {
         base.mcp_servers = overlay.mcp_servers;
@@ -646,6 +646,10 @@ working_dir = "/definitely/not/the/runtime/workdir"
         let content = std::fs::read_to_string(path).unwrap();
         assert!(!content.contains("working_dir"));
         assert!(content.contains("model: gpt-5.4"));
+        assert!(content.contains("model_tools:"));
+        assert!(content.contains("reviewer_tools:"));
+        assert!(content.contains("MemoryRecall"));
+        assert!(content.contains("MemoryStore"));
     }
 
     #[test]
@@ -661,6 +665,8 @@ working_dir = "/definitely/not/the/runtime/workdir"
         assert!(!content.contains("working_dir"));
         assert!(content.contains("model = \"gpt-5.4\""));
         assert!(content.contains("effort = 4096"));
+        assert!(content.contains("model_tools = ["));
+        assert!(content.contains("reviewer_tools = ["));
     }
 
     #[test]
@@ -696,6 +702,8 @@ working_dir = "/definitely/not/the/runtime/workdir"
         assert!(content.contains("model: global-model"));
         assert!(content.contains("theme: light"));
         assert!(content.contains("permissions_mode: accept-edits"));
+        assert!(content.contains("model_tools:"));
+        assert!(content.contains("reviewer_tools:"));
         assert!(!content.contains("working_dir"));
 
         match previous_home {
