@@ -271,6 +271,10 @@ fn change_preview(changes: &[SyncChange], max_lines: usize) -> Vec<String> {
     preview
 }
 
+fn line_content_eq_ignoring_trailing_whitespace(left: &str, right: &str) -> bool {
+    left.trim_end() == right.trim_end()
+}
+
 fn make_tagged_diff(old: &XFile, new: &XFile) -> String {
     let old_tags: std::collections::HashSet<&str> =
         old.content.iter().map(|line| line.tag.as_str()).collect();
@@ -289,7 +293,7 @@ fn make_tagged_diff(old: &XFile, new: &XFile) -> String {
     while old_idx < old.content.len() || new_idx < new.content.len() {
         match (old.content.get(old_idx), new.content.get(new_idx)) {
             (Some(old_line), Some(new_line)) if old_line.tag == new_line.tag => {
-                if old_line.content != new_line.content {
+                if !line_content_eq_ignoring_trailing_whitespace(&old_line.content, &new_line.content) {
                     lines.push(format!("-{}\t{}", old_line.tag, old_line.content));
                     lines.push(format!("+{}\t{}", new_line.tag, new_line.content));
                 }
@@ -305,8 +309,10 @@ fn make_tagged_diff(old: &XFile, new: &XFile) -> String {
                 new_idx += 1;
             }
             (Some(old_line), Some(new_line)) => {
-                lines.push(format!("-{}\t{}", old_line.tag, old_line.content));
-                lines.push(format!("+{}\t{}", new_line.tag, new_line.content));
+                if !line_content_eq_ignoring_trailing_whitespace(&old_line.content, &new_line.content) {
+                    lines.push(format!("-{}\t{}", old_line.tag, old_line.content));
+                    lines.push(format!("+{}\t{}", new_line.tag, new_line.content));
+                }
                 old_idx += 1;
                 new_idx += 1;
             }
@@ -413,7 +419,7 @@ mod tests {
     use super::*;
     use crate::permissions::AllowAll;
     use crate::xfile_storage::{
-        clear_session_xfile_storage, ensure_loaded, store_written_text, try_get_head,
+        XLine, clear_session_xfile_storage, ensure_loaded, store_written_text, try_get_head,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -530,6 +536,34 @@ mod tests {
         assert!(payload
             .diff
             .contains(&format!("+{}\tgamma", head.file.content[2].tag)));
+    }
+
+    #[test]
+    fn tagged_diff_ignores_trailing_whitespace_only_changes() {
+        let tag = "same-tag".to_string();
+        let old = XFile {
+            path: PathBuf::from("sample.txt"),
+            exists: true,
+            content: vec![XLine {
+                tag: tag.clone(),
+                line_number: 1,
+                content: "#[test]".to_string(),
+            }],
+        };
+        let new = XFile {
+            path: PathBuf::from("sample.txt"),
+            exists: true,
+            content: vec![XLine {
+                tag,
+                line_number: 1,
+                content: "#[test]   ".to_string(),
+            }],
+        };
+
+        let diff = make_tagged_diff(&old, &new);
+        assert!(diff.contains("(no textual changes)"));
+        assert!(!diff.contains("-same-tag\t#[test]"));
+        assert!(!diff.contains("+same-tag\t#[test]   "));
     }
 
     #[tokio::test]
