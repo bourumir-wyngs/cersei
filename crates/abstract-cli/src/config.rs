@@ -39,6 +39,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub fallback_models: Vec<String>,
     #[serde(default)]
+    pub model_tools: Vec<String>,
+    #[serde(default)]
+    pub reviewer_tools: Vec<String>,
+    #[serde(default)]
     pub mcp_servers: Vec<McpServerEntry>,
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
@@ -60,6 +64,8 @@ impl Default for AppConfig {
             permissions_mode: "interactive".into(),
             working_dir: current_dir_fallback(),
             fallback_models: Vec::new(),
+            model_tools: default_model_tools(),
+            reviewer_tools: default_reviewer_tools(),
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
         }
@@ -80,6 +86,82 @@ pub struct McpServerEntry {
 pub struct HookEntry {
     pub event: String,
     pub command: String,
+}
+
+fn default_model_tools() -> Vec<String> {
+    vec![
+        // Files/code
+        "Read".to_string(),
+        "MultiRead".to_string(),
+        "Write".to_string(),
+        "Edit".to_string(),
+        "File".to_string(),
+        "Revert".to_string(),
+        "Glob".to_string(),
+        "Grep".to_string(),
+        "MultiGrep".to_string(),
+        "ListDirectory".to_string(),
+        "FileHistory".to_string(),
+        "Structure".to_string(),
+        // Review/planning
+        "Review".to_string(),
+        "EnterPlanMode".to_string(),
+        "ExitPlanMode".to_string(),
+        "TodoWrite".to_string(),
+        // Shell/process
+        "Bash".to_string(),
+        "PowerShell".to_string(),
+        "Process".to_string(),
+        // Build/test
+        "Npm".to_string(),
+        "Npx".to_string(),
+        "Cargo".to_string(),
+        "Pytest".to_string(),
+        "Web_tests".to_string(),
+        "Wasm_tests".to_string(),
+        // Web/browser
+        "WebFetch".to_string(),
+        "WebSearch".to_string(),
+        "Browser".to_string(),
+        // Docs/data
+        "SpreadSheet".to_string(),
+        "PdfRead".to_string(),
+        // Security/audit
+        "Audit".to_string(),
+        // Databases
+        "MySql".to_string(),
+        "PostgreSql".to_string(),
+        // Git
+        "Git".to_string(),
+        // Config/user interaction
+        "AskUserQuestion".to_string(),
+        "Config".to_string(),
+        // Docker
+        "DockerAssistant".to_string(),
+        "DockerExec".to_string(),
+        // Math/CAS
+        "CAS".to_string(),
+        // Memory
+        "MemoryRecall".to_string(),
+        "MemoryStore".to_string(),
+    ]
+}
+
+fn default_reviewer_tools() -> Vec<String> {
+    vec![
+        // Files/code
+        "Read".to_string(),
+        "MultiRead".to_string(),
+        "Glob".to_string(),
+        "Grep".to_string(),
+        "ListDirectory".to_string(),
+        "FileHistory".to_string(),
+        "Structure".to_string(),
+        // Git
+        "Git".to_string(),
+        // Memory
+        "MemoryRecall".to_string(),
+    ]
 }
 
 fn current_dir_fallback() -> PathBuf {
@@ -340,6 +422,12 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     }
     if !overlay.fallback_models.is_empty() {
         base.fallback_models = overlay.fallback_models;
+    if !overlay.model_tools.is_empty() {
+        base.model_tools = overlay.model_tools;
+    }
+    if !overlay.reviewer_tools.is_empty() {
+        base.reviewer_tools = overlay.reviewer_tools;
+    }
     }
     if !overlay.mcp_servers.is_empty() {
         base.mcp_servers = overlay.mcp_servers;

@@ -148,9 +148,17 @@ pub fn build_agent(
     // Seed Extensions with FileHistory so FileHistoryTool works out of the box.
     tool_extensions.insert(FileHistory::new());
 
+    let selected_tools: std::collections::HashSet<&str> =
+        config.model_tools.iter().map(String::as_str).collect();
+
     let mut builder = cersei::Agent::builder()
         .provider(provider)
-        .tools(cersei_tools::all())
+        .tools(
+            cersei_tools::all()
+                .into_iter()
+                .filter(|tool| selected_tools.contains(tool.name()))
+                .collect(),
+        )
         .system_prompt(system_prompt)
         .model(&resolved_model)
         .max_turns(config.max_turns)
@@ -163,12 +171,16 @@ pub fn build_agent(
         .tool_extensions(tool_extensions.clone());
 
     if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
-        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
-            (*mem_arc).clone(),
-        ));
-        builder = builder.tool(crate::memory_tools::MemoryStoreTool::new(
-            (*mem_arc).clone(),
-        ));
+        if config.model_tools.iter().any(|tool| tool == "MemoryRecall") {
+            builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
+                (*mem_arc).clone(),
+            ));
+        }
+        if config.model_tools.iter().any(|tool| tool == "MemoryStore") {
+            builder = builder.tool(crate::memory_tools::MemoryStoreTool::new(
+                (*mem_arc).clone(),
+            ));
+        }
     }
 
     // Permission policy
@@ -240,19 +252,18 @@ pub fn build_reviewer_agent(
         xfile_session_id.to_string(),
     ));
 
+    let selected_tools: std::collections::HashSet<&str> =
+        config.reviewer_tools.iter().map(String::as_str).collect();
+
     let mut review_tools: Vec<Box<dyn cersei_tools::Tool>> = cersei_tools::all()
         .into_iter()
-        .filter(|tool| {
-            matches!(
-                tool.name(),
-                "Read" | "MultiRead" | "Glob" | "Grep" | "ListDirectory" | "Structure" | "Git"
-            )
-        })
+        .filter(|tool| selected_tools.contains(tool.name()))
         .collect();
-    review_tools.push(Box::new(
-        cersei_tools::file_history_tool::ReadOnlyFileHistoryTool,
-    ));
-
+    if selected_tools.contains("FileHistory") {
+        review_tools.push(Box::new(
+            cersei_tools::file_history_tool::ReadOnlyFileHistoryTool,
+        ));
+    }
     let mut builder = cersei::Agent::builder()
         .provider(provider)
         .tools(review_tools)
@@ -268,11 +279,12 @@ pub fn build_reviewer_agent(
         .tool_extensions(tool_extensions.clone());
 
     if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
-        builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
-            (*mem_arc).clone(),
-        ));
+        if config.reviewer_tools.iter().any(|tool| tool == "MemoryRecall") {
+            builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
+                (*mem_arc).clone(),
+            ));
+        }
     }
-
     if config.permissions_mode == "allow_all" {
         builder = builder.permission_policy(AllowAll);
     } else {

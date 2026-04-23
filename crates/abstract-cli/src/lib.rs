@@ -315,6 +315,16 @@ fn config_set(config: &mut config::AppConfig, key: &str, value: &str) -> anyhow:
     match key {
         "model" => config.model = value.into(),
         "reviewer_model" => config.reviewer_model = value.into(),
+        "model_tools" => config.model_tools = value
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        "reviewer_tools" => config.reviewer_tools = value
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         "provider" => config.provider = value.into(),
         "effort" => {
             let effort = config::parse_effort_budget(value).ok_or_else(|| {
