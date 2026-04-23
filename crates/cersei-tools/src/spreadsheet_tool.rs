@@ -64,7 +64,7 @@ impl Tool for SpreadSheetTool {
     }
 
     fn description(&self) -> &str {
-        "Inspect or read spreadsheet files (Excel, OpenDocument). Use `info` for metadata/sheets, and `read` to extract cell data."
+        "Inspect or read spreadsheet files (Excel, OpenDocument). Use `info` for metadata/sheets, and `read` to extract cell data from arbitrary sheets or rectangular ranges."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -83,9 +83,11 @@ impl Tool for SpreadSheetTool {
                 "file_path": { "type": "string", "description": "Path to spreadsheet." },
                 "include_ranges": { "type": "boolean", "description": "Include used-range in info." },
                 "sheet_name": { "type": "string", "description": "Sheet to read (defaults to first)." },
-                "range": { "type": "string", "description": "Range to read, e.g. 'A1:D20'." },
-                "start_row": { "type": "integer", "description": "Start row for read." },
-                "limit": { "type": "integer", "description": "Row limit for read (default 20)." },
+                "range": { "type": "string", "description": "A1 range to read, e.g. 'A1:D20'. Supports arbitrary rectangular or square sections." },
+                "start_row": { "type": "integer", "description": "1-based start row (1 = first row of sheet). Used when `range` is not provided." },
+                "limit": { "type": "integer", "description": "Maximum rows to read (default 20)." },
+                "start_col": { "type": "integer", "description": "1-based start column (1 = first column). Used when `range` is not provided." },
+                "col_limit": { "type": "integer", "description": "Maximum columns to read (default 64)." },
                 "format": { "type": "string", "enum": ["markdown", "csv"], "description": "Output format." }
             },
             "required": ["action", "file_path"]
@@ -178,6 +180,7 @@ async fn execute_read(req: SpreadSheetRequest, ctx: &ToolContext) -> ToolResult 
     };
 
     let sheet_start = range.start().unwrap_or((0, 0));
+    let s_r = sheet_start.0 as usize;
     let rows: Vec<Vec<String>> = range
         .rows()
         .skip(sel.start_row.saturating_sub(sheet_start.0 as usize))
@@ -201,8 +204,8 @@ async fn execute_read(req: SpreadSheetRequest, ctx: &ToolContext) -> ToolResult 
         "Spreadsheet: {}\nSheet: {}\nRows: {}..{}\n\n{}",
         path.display(),
         name,
-        sel.start_row,
-        sel.end_row,
+        sel.start_row - s_r + 1,
+        sel.end_row - s_r,
         rendered
     );
     ToolResult::success(out)
@@ -305,8 +308,8 @@ fn build_selection(
         b.truncated_columns = b.end_col < u_c;
         Ok(b)
     } else {
-        let sr = s_row.unwrap_or(s_r).max(s_r);
-        let sc = s_col.unwrap_or(s_c).max(s_c);
+        let sr = s_row.map(|r| s_r + r.saturating_sub(1)).unwrap_or(s_r).max(s_r);
+        let sc = s_col.map(|c| s_c + c.saturating_sub(1)).unwrap_or(s_c).max(s_c);
         Ok(Selection {
             start_row: sr,
             end_row: sr.saturating_add(r_lim).min(s_r + t_r),
@@ -434,5 +437,53 @@ mod tests {
             .await;
         assert!(!res.is_error);
         assert!(res.content.contains("Sheets: 2"));
+    }
+
+    #[tokio::test]
+    async fn test_spreadsheet_read_named_sheet_and_range() {
+        let tool = SpreadSheetTool;
+        let res = tool
+            .execute(
+                json!({
+                    "action": "read",
+                    "file_path": "tests/fixtures/Spreadsheet.xlsx",
+                    "sheet_name": "Sheet2",
+                    "range": "A1:B2",
+                    "format": "csv"
+                }),
+                &test_ctx(),
+            )
+            .await;
+        assert!(!res.is_error);
+        assert!(res.content.contains("Sheet: Sheet2"));
+        assert!(res.content.contains("Rows: 1..2"));
+        assert!(res.content.contains("Table two,"));
+        assert!(res.content.contains("x,y"));
+    }
+
+    #[tokio::test]
+    async fn test_spreadsheet_read_square_section_with_start_row_and_col() {
+        let tool = SpreadSheetTool;
+        let res = tool
+            .execute(
+                json!({
+                    "action": "read",
+                    "file_path": "tests/fixtures/Spreadsheet.xlsx",
+                    "sheet_name": "Sheet1",
+                    "start_row": 2,
+                    "start_col": 2,
+                    "limit": 2,
+                    "col_limit": 2,
+                    "format": "csv"
+                }),
+                &test_ctx(),
+            )
+            .await;
+        assert!(!res.is_error);
+        assert!(res.content.contains("Sheet: Sheet1"));
+        assert!(res.content.contains("Rows: 2..3"));
+        assert!(res.content.contains("b,c"));
+        assert!(res.content.contains("2,4"));
+        assert!(!res.content.contains("Name"));
     }
 }
