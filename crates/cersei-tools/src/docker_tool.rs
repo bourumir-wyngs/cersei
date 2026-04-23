@@ -63,48 +63,25 @@ impl Tool for DockerAssistantTool {
     fn input_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "get_containers" },
-                        "all": { "type": "boolean", "description": "Include stopped containers" }
-                    },
-                    "required": ["action"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform: get_containers, inspect_container, get_logs, get_images, get_networks, get_volumes"
                 },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "inspect_container" },
-                        "container_id": { "type": "string" }
-                    },
-                    "required": ["action", "container_id"]
+                "container_id": {
+                    "type": "string",
+                    "description": "Container ID or name. Required for inspect_container and get_logs."
                 },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "get_logs" },
-                        "container_id": { "type": "string" },
-                        "tail": { "type": "integer", "description": "Number of lines (default 100)" }
-                    },
-                    "required": ["action", "container_id"]
+                "all": {
+                    "type": "boolean",
+                    "description": "Include stopped containers. Used with get_containers."
                 },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "get_images" }
-                    },
-                    "required": ["action"]
-                },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "get_networks" }
-                    },
-                    "required": ["action"]
-                },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "get_volumes" }
-                    },
-                    "required": ["action"]
-                },
-            ]
+                "tail": {
+                    "type": "integer",
+                    "description": "Number of recent log lines to fetch (default 100). Used with get_logs."
+                }
+            },
+            "required": ["action"]
         })
     }
 

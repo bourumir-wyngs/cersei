@@ -51,38 +51,26 @@ impl Tool for DockerExecTool {
     fn input_schema(&self) -> Value {
         serde_json::json!({
             "type": "object",
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "exec" },
-                        "container_id": { "type": "string" },
-                        "cmd": { "type": "array", "items": { "type": "string" } },
-                        "workdir": { "type": "string" }
-                    },
-                    "required": ["action", "container_id", "cmd"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Action to perform: exec, restart_container, stop_container, start_container"
                 },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "restart_container" },
-                        "container_id": { "type": "string" }
-                    },
-                    "required": ["action", "container_id"]
+                "container_id": {
+                    "type": "string",
+                    "description": "Container ID or name. Required for all actions."
                 },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "stop_container" },
-                        "container_id": { "type": "string" }
-                    },
-                    "required": ["action", "container_id"]
+                "cmd": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Command to run inside the container. Required for exec."
                 },
-                {
-                    "properties": {
-                        "action": { "type": "string", "const": "start_container" },
-                        "container_id": { "type": "string" }
-                    },
-                    "required": ["action", "container_id"]
+                "workdir": {
+                    "type": "string",
+                    "description": "Working directory inside the container. Optional, used with exec."
                 }
-            ]
+            },
+            "required": ["action", "container_id"]
         })
     }
 
