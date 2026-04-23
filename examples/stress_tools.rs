@@ -66,7 +66,10 @@ async fn run() {
             &format!("all() returns {} tools", all.len()),
             all.len() >= 20
         );
-        check!(&format!("filesystem() = {} tools", fs.len()), fs.len() >= 10);
+        check!(
+            &format!("filesystem() = {} tools", fs.len()),
+            fs.len() >= 10
+        );
         check!(&format!("shell() = {} tools", sh.len()), sh.len() >= 2);
         check!(&format!("web() = {} tools", web.len()), web.len() >= 2);
         check!(
@@ -315,7 +318,9 @@ async fn run() {
             .await;
         check!("Cron.create succeeds", !r.is_error);
 
-        let r = tool.execute(serde_json::json!({"action": "list"}), &ctx).await;
+        let r = tool
+            .execute(serde_json::json!({"action": "list"}), &ctx)
+            .await;
         check!(
             "Cron.list shows entry",
             r.content.contains("Check build status")
@@ -323,7 +328,8 @@ async fn run() {
 
         let entries = cersei_tools::cron::list_crons();
         let id = entries[0].id.clone();
-        tool.execute(serde_json::json!({"action": "delete", "id": id}), &ctx).await;
+        tool.execute(serde_json::json!({"action": "delete", "id": id}), &ctx)
+            .await;
         check!(
             "Cron.delete removes entry",
             cersei_tools::cron::list_crons().is_empty()
@@ -504,10 +510,12 @@ async fn run() {
         let start = std::time::Instant::now();
         for _ in 0..iters {
             std::fs::write(&test_file, "Hello, world!\nLine 2\n").unwrap();
-            let r_read = read.execute(
-                serde_json::json!({"file_path": test_file.display().to_string()}),
-                &ctx,
-            ).await;
+            let r_read = read
+                .execute(
+                    serde_json::json!({"file_path": test_file.display().to_string()}),
+                    &ctx,
+                )
+                .await;
             let tag = r_read.content.split_whitespace().next().unwrap();
 
             edit.execute(

@@ -175,7 +175,9 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("created"));
 
-        let result = tool.execute(serde_json::json!({"action": "list"}), &test_ctx()).await;
+        let result = tool
+            .execute(serde_json::json!({"action": "list"}), &test_ctx())
+            .await;
         assert!(result.content.contains("Run tests"));
 
         let entries = list_crons();
@@ -183,7 +185,10 @@ mod tests {
         let id = entries[0].id.clone();
 
         let result = tool
-            .execute(serde_json::json!({"action": "delete", "id": id}), &test_ctx())
+            .execute(
+                serde_json::json!({"action": "delete", "id": id}),
+                &test_ctx(),
+            )
             .await;
         assert!(!result.is_error);
 

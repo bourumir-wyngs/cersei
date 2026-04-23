@@ -227,7 +227,9 @@ async fn execute_open(req: BrowserRequest, ctx: &ToolContext) -> ToolResult {
 async fn execute_status(ctx: &ToolContext) -> ToolResult {
     let browser_config = browser_config_from_context(ctx);
     match current_browser_page(ctx).await {
-        Some((session, page)) => success_json(browser_status_value(&session, &page, &browser_config).await),
+        Some((session, page)) => {
+            success_json(browser_status_value(&session, &page, &browser_config).await)
+        }
         None => success_json(browser_closed_value(&browser_config)),
     }
 }
@@ -286,8 +288,19 @@ async fn execute_dom(req: BrowserRequest, ctx: &ToolContext) -> ToolResult {
     let all = req.all.unwrap_or(false);
 
     if field == DomField::ComputedStyle {
-        match computed_style_value(&page, &selector, req.property.as_deref(), req.properties.as_deref(), all, req.limit).await {
-            Ok(value) => success_json(serde_json::json!({ "selector": selector, "field": field, "value": value })),
+        match computed_style_value(
+            &page,
+            &selector,
+            req.property.as_deref(),
+            req.properties.as_deref(),
+            all,
+            req.limit,
+        )
+        .await
+        {
+            Ok(value) => success_json(
+                serde_json::json!({ "selector": selector, "field": field, "value": value }),
+            ),
             Err(err) => ToolResult::error(err),
         }
     } else if all {
@@ -302,14 +315,18 @@ async fn execute_dom(req: BrowserRequest, ctx: &ToolContext) -> ToolResult {
                 Err(err) => return ToolResult::error(err),
             }
         }
-        success_json(serde_json::json!({ "selector": selector, "field": field, "matches": items.len(), "items": items }))
+        success_json(
+            serde_json::json!({ "selector": selector, "field": field, "matches": items.len(), "items": items }),
+        )
     } else {
         let element = match page.find_element(selector.clone()).await {
             Ok(element) => element,
             Err(err) => return ToolResult::error(format!("Failed to query DOM: {err}")),
         };
         match dom_field_value(&element, field, req.property.as_deref()).await {
-            Ok(value) => success_json(serde_json::json!({ "selector": selector, "field": field, "value": value })),
+            Ok(value) => success_json(
+                serde_json::json!({ "selector": selector, "field": field, "value": value }),
+            ),
             Err(err) => ToolResult::error(err),
         }
     }
@@ -380,17 +397,30 @@ async fn execute_network(req: BrowserRequest, ctx: &ToolContext) -> ToolResult {
     let all_entries = session.network_entries.lock().clone();
     let mut entries: Vec<&NetworkEntry> = all_entries.iter().collect();
 
-    if let Some(ref filter) = req.url_filter { entries.retain(|e| e.url.contains(filter)); }
+    if let Some(ref filter) = req.url_filter {
+        entries.retain(|e| e.url.contains(filter));
+    }
     if let Some(ref rt) = req.resource_type {
         let rt_lc = rt.to_ascii_lowercase();
-        entries.retain(|e| e.resource_type.as_ref().map(|t| t.to_ascii_lowercase() == rt_lc).unwrap_or(false));
+        entries.retain(|e| {
+            e.resource_type
+                .as_ref()
+                .map(|t| t.to_ascii_lowercase() == rt_lc)
+                .unwrap_or(false)
+        });
     }
-    if let Some(ref filter) = req.status_filter { entries.retain(|e| matches_status_filter(e.status, filter)); }
-    if req.failed_only.unwrap_or(false) { entries.retain(|e| e.error_text.is_some()); }
+    if let Some(ref filter) = req.status_filter {
+        entries.retain(|e| matches_status_filter(e.status, filter));
+    }
+    if req.failed_only.unwrap_or(false) {
+        entries.retain(|e| e.error_text.is_some());
+    }
 
     entries.reverse();
     let total = entries.len();
-    if let Some(limit) = req.limit { entries.truncate(limit); }
+    if let Some(limit) = req.limit {
+        entries.truncate(limit);
+    }
 
     success_json(serde_json::json!({
         "entries": entries.into_iter().cloned().collect::<Vec<_>>(),
@@ -410,7 +440,9 @@ async fn execute_css(req: BrowserRequest, ctx: &ToolContext) -> ToolResult {
         Err(err) => return ToolResult::error(err),
     };
     match css_matched_rules(&page, &selector).await {
-        Ok(value) => success_json(serde_json::json!({ "selector": selector, "matched_rules": value })),
+        Ok(value) => {
+            success_json(serde_json::json!({ "selector": selector, "matched_rules": value }))
+        }
         Err(err) => ToolResult::error(err),
     }
 }
@@ -432,12 +464,17 @@ async fn execute_storage(req: BrowserRequest, ctx: &ToolContext) -> ToolResult {
                     .filter(|c| req.name.as_ref().map(|n| c.name == *n).unwrap_or(true))
                     .map(|c| serde_json::json!({ "name": c.name, "value": c.value, "domain": c.domain, "path": c.path, "expires": c.expires }))
                     .collect();
-                success_json(serde_json::json!({ "storage": "cookies", "count": items.len(), "items": items }))
+                success_json(
+                    serde_json::json!({ "storage": "cookies", "count": items.len(), "items": items }),
+                )
             }
             Err(err) => ToolResult::error(format!("Failed to get cookies: {err}")),
         },
         StorageType::LocalStorage | StorageType::SessionStorage => {
-            let obj = match storage_type { StorageType::LocalStorage => "localStorage", _ => "sessionStorage" };
+            let obj = match storage_type {
+                StorageType::LocalStorage => "localStorage",
+                _ => "sessionStorage",
+            };
             let script = if let Some(ref name) = req.name {
                 format!("() => {{ const val = {obj}.getItem({}); return val === null ? null : {{ key: {}, value: val }}; }}", serde_json::to_string(name).unwrap(), serde_json::to_string(name).unwrap())
             } else {
@@ -549,7 +586,8 @@ async fn css_matched_rules(page: &Page, selector: &str) -> BrowserResult<Value> 
             return rules;
         }}"#
     );
-    page.evaluate(script.as_str()).await
+    page.evaluate(script.as_str())
+        .await
         .map_err(|e| e.to_string())?
         .into_value::<Value>()
         .map_err(|e| e.to_string())
@@ -565,7 +603,9 @@ async fn ensure_browser_page(
 
     let existing_page = session.page.read().clone();
     if let Some(page) = existing_page {
-        if let Some(url) = requested_url { navigate_page(&page, url).await?; }
+        if let Some(url) = requested_url {
+            navigate_page(&page, url).await?;
+        }
         drop(guard);
         return Ok((session, page));
     }
@@ -582,9 +622,14 @@ async fn ensure_browser_page(
     let (browser, mut handler) = Browser::launch(config).await.map_err(|e| e.to_string())?;
     let handler_task = tokio::spawn(async move { while let Some(_) = handler.next().await {} });
 
-    let page = browser.new_page("about:blank").await.map_err(|e| e.to_string())?;
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .map_err(|e| e.to_string())?;
     page.enable_log().await.map_err(|e| e.to_string())?;
-    page.execute(cdp_network::EnableParams::default()).await.map_err(|e| e.to_string())?;
+    page.execute(cdp_network::EnableParams::default())
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut tasks = vec![handler_task];
     tasks.extend(spawn_page_listener_tasks(page.clone(), session.clone()).await?);
@@ -595,7 +640,9 @@ async fn ensure_browser_page(
     *session.profile_dir.lock() = Some(profile_dir);
     *session.tasks.lock() = tasks;
 
-    if let Some(url) = requested_url.or(browser_config.url.as_deref()) { navigate_page(&page, url).await?; }
+    if let Some(url) = requested_url.or(browser_config.url.as_deref()) {
+        navigate_page(&page, url).await?;
+    }
     drop(guard);
     Ok((session, page))
 }
@@ -610,11 +657,19 @@ async fn require_browser_page(ctx: &ToolContext) -> BrowserResult<(Arc<BrowserSe
 async fn current_browser_page(ctx: &ToolContext) -> Option<(Arc<BrowserSession>, Page)> {
     let session = browser_session(&ctx.session_id);
     let page = session.page.read().clone()?;
-    if page.url().await.is_ok() { Some((session, page)) } else { clear_stale_browser_session(&ctx.session_id).await; None }
+    if page.url().await.is_ok() {
+        Some((session, page))
+    } else {
+        clear_stale_browser_session(&ctx.session_id).await;
+        None
+    }
 }
 
 fn browser_config_from_context(ctx: &ToolContext) -> BrowserToolConfig {
-    ctx.extensions.get::<ToolsConfig>().and_then(|c| c.browser.clone()).unwrap_or_default()
+    ctx.extensions
+        .get::<ToolsConfig>()
+        .and_then(|c| c.browser.clone())
+        .unwrap_or_default()
 }
 
 async fn clear_stale_browser_session(session_id: &str) {
@@ -643,78 +698,159 @@ async fn close_browser_session(session_id: &str) -> BrowserResult<String> {
 }
 
 fn abort_session_tasks(session: &BrowserSession) {
-    for task in session.tasks.lock().drain(..) { task.abort(); }
+    for task in session.tasks.lock().drain(..) {
+        task.abort();
+    }
 }
 
-async fn spawn_page_listener_tasks(page: Page, session: Arc<BrowserSession>) -> BrowserResult<Vec<tokio::task::JoinHandle<()>>> {
-    let mut console_events = page.event_listener::<EventConsoleApiCalled>().await.map_err(|e| e.to_string())?;
+async fn spawn_page_listener_tasks(
+    page: Page,
+    session: Arc<BrowserSession>,
+) -> BrowserResult<Vec<tokio::task::JoinHandle<()>>> {
+    let mut console_events = page
+        .event_listener::<EventConsoleApiCalled>()
+        .await
+        .map_err(|e| e.to_string())?;
     let s1 = session.clone();
-    let t1 = tokio::spawn(async move { while let Some(e) = console_events.next().await { push_log_entry(&s1, console_event_to_entry(e.as_ref())); } });
+    let t1 = tokio::spawn(async move {
+        while let Some(e) = console_events.next().await {
+            push_log_entry(&s1, console_event_to_entry(e.as_ref()));
+        }
+    });
 
-    let mut log_events = page.event_listener::<EventEntryAdded>().await.map_err(|e| e.to_string())?;
+    let mut log_events = page
+        .event_listener::<EventEntryAdded>()
+        .await
+        .map_err(|e| e.to_string())?;
     let s2 = session.clone();
-    let t2 = tokio::spawn(async move { while let Some(e) = log_events.next().await { push_log_entry(&s2, log_event_to_entry(e.as_ref())); } });
+    let t2 = tokio::spawn(async move {
+        while let Some(e) = log_events.next().await {
+            push_log_entry(&s2, log_event_to_entry(e.as_ref()));
+        }
+    });
 
-    let mut request_events = page.event_listener::<EventRequestWillBeSent>().await.map_err(|e| e.to_string())?;
+    let mut request_events = page
+        .event_listener::<EventRequestWillBeSent>()
+        .await
+        .map_err(|e| e.to_string())?;
     let s3 = session.clone();
-    let t3 = tokio::spawn(async move { while let Some(e) = request_events.next().await {
-        let rid = e.request_id.inner().clone();
-        if should_track_request_as_active(&e.request.url) { s3.active_request_ids.lock().insert(rid.clone()); }
-        push_network_entry(&s3, NetworkEntry {
-            request_id: rid, sequence: s3.next_network_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            url: e.request.url.clone(), method: e.request.method.clone(), resource_type: e.r#type.as_ref().map(|t| t.as_ref().to_string()),
-            status: None, status_text: None, mime_type: None, response_headers: None, error_text: None, timestamp: *e.timestamp.inner(), encoded_data_length: None,
-        });
-    }});
+    let t3 = tokio::spawn(async move {
+        while let Some(e) = request_events.next().await {
+            let rid = e.request_id.inner().clone();
+            if should_track_request_as_active(&e.request.url) {
+                s3.active_request_ids.lock().insert(rid.clone());
+            }
+            push_network_entry(
+                &s3,
+                NetworkEntry {
+                    request_id: rid,
+                    sequence: s3
+                        .next_network_sequence
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    url: e.request.url.clone(),
+                    method: e.request.method.clone(),
+                    resource_type: e.r#type.as_ref().map(|t| t.as_ref().to_string()),
+                    status: None,
+                    status_text: None,
+                    mime_type: None,
+                    response_headers: None,
+                    error_text: None,
+                    timestamp: *e.timestamp.inner(),
+                    encoded_data_length: None,
+                },
+            );
+        }
+    });
 
-    let mut response_events = page.event_listener::<EventResponseReceived>().await.map_err(|e| e.to_string())?;
+    let mut response_events = page
+        .event_listener::<EventResponseReceived>()
+        .await
+        .map_err(|e| e.to_string())?;
     let s4 = session.clone();
-    let t4 = tokio::spawn(async move { while let Some(e) = response_events.next().await {
-        let rid = e.request_id.inner().clone();
-        let mut entries = s4.network_entries.lock();
-        if let Some(entry) = entries.iter_mut().rev().find(|en| en.request_id == rid && en.status.is_none() && en.error_text.is_none()) {
-            entry.url = e.response.url.clone(); entry.status = Some(e.response.status); entry.status_text = Some(e.response.status_text.clone());
-            entry.mime_type = Some(e.response.mime_type.clone()); entry.response_headers = Some(e.response.headers.inner().clone());
-            entry.encoded_data_length = Some(e.response.encoded_data_length); entry.timestamp = entry.timestamp.max(*e.timestamp.inner());
-        }
-    }});
+    let t4 =
+        tokio::spawn(async move {
+            while let Some(e) = response_events.next().await {
+                let rid = e.request_id.inner().clone();
+                let mut entries = s4.network_entries.lock();
+                if let Some(entry) = entries.iter_mut().rev().find(|en| {
+                    en.request_id == rid && en.status.is_none() && en.error_text.is_none()
+                }) {
+                    entry.url = e.response.url.clone();
+                    entry.status = Some(e.response.status);
+                    entry.status_text = Some(e.response.status_text.clone());
+                    entry.mime_type = Some(e.response.mime_type.clone());
+                    entry.response_headers = Some(e.response.headers.inner().clone());
+                    entry.encoded_data_length = Some(e.response.encoded_data_length);
+                    entry.timestamp = entry.timestamp.max(*e.timestamp.inner());
+                }
+            }
+        });
 
-    let mut finished_events = page.event_listener::<EventLoadingFinished>().await.map_err(|e| e.to_string())?;
+    let mut finished_events = page
+        .event_listener::<EventLoadingFinished>()
+        .await
+        .map_err(|e| e.to_string())?;
     let s5 = session.clone();
-    let t5 = tokio::spawn(async move { while let Some(e) = finished_events.next().await {
-        let rid = e.request_id.inner().clone();
-        let ts = *e.timestamp.inner();
-        let mut entries = s5.network_entries.lock();
-        if let Some(entry) = entries.iter_mut().rev().find(|en| en.request_id == rid && en.error_text.is_none()) {
-            entry.encoded_data_length = Some(e.encoded_data_length); entry.timestamp = entry.timestamp.max(ts);
+    let t5 = tokio::spawn(async move {
+        while let Some(e) = finished_events.next().await {
+            let rid = e.request_id.inner().clone();
+            let ts = *e.timestamp.inner();
+            let mut entries = s5.network_entries.lock();
+            if let Some(entry) = entries
+                .iter_mut()
+                .rev()
+                .find(|en| en.request_id == rid && en.error_text.is_none())
+            {
+                entry.encoded_data_length = Some(e.encoded_data_length);
+                entry.timestamp = entry.timestamp.max(ts);
+            }
+            drop(entries);
+            mark_network_completion(&s5, &rid, ts);
         }
-        drop(entries);
-        mark_network_completion(&s5, &rid, ts);
-    }});
+    });
 
-    let mut failed_events = page.event_listener::<EventLoadingFailed>().await.map_err(|e| e.to_string())?;
+    let mut failed_events = page
+        .event_listener::<EventLoadingFailed>()
+        .await
+        .map_err(|e| e.to_string())?;
     let s6 = session;
-    let t6 = tokio::spawn(async move { while let Some(e) = failed_events.next().await {
-        let rid = e.request_id.inner().clone();
-        let ts = *e.timestamp.inner();
-        let mut entries = s6.network_entries.lock();
-        if let Some(entry) = entries.iter_mut().rev().find(|en| en.request_id == rid && en.error_text.is_none()) {
-            entry.error_text = Some(e.error_text.clone()); entry.timestamp = entry.timestamp.max(ts);
+    let t6 = tokio::spawn(async move {
+        while let Some(e) = failed_events.next().await {
+            let rid = e.request_id.inner().clone();
+            let ts = *e.timestamp.inner();
+            let mut entries = s6.network_entries.lock();
+            if let Some(entry) = entries
+                .iter_mut()
+                .rev()
+                .find(|en| en.request_id == rid && en.error_text.is_none())
+            {
+                entry.error_text = Some(e.error_text.clone());
+                entry.timestamp = entry.timestamp.max(ts);
+            }
+            drop(entries);
+            mark_network_completion(&s6, &rid, ts);
         }
-        drop(entries);
-        mark_network_completion(&s6, &rid, ts);
-    }});
+    });
 
     Ok(vec![t1, t2, t3, t4, t5, t6])
 }
 
-async fn browser_status_value(session: &BrowserSession, page: &Page, config: &BrowserToolConfig) -> Value {
+async fn browser_status_value(
+    session: &BrowserSession,
+    page: &Page,
+    config: &BrowserToolConfig,
+) -> Value {
     let url = page.url().await.ok().flatten();
     let title = evaluate_string(page, "document.title").await.ok();
     serde_json::json!({ "browser_open": true, "url": url, "title": title, "console_entry_count": session.log_entries.lock().len(), "configured_url": config.url, "notes": config.notes })
 }
 
-async fn browser_window_open_value(session: &BrowserSession, page: &Page, config: &BrowserToolConfig, req_url: Option<&str>) -> Value {
+async fn browser_window_open_value(
+    session: &BrowserSession,
+    page: &Page,
+    config: &BrowserToolConfig,
+    req_url: Option<&str>,
+) -> Value {
     let url = page.url().await.ok().flatten();
     serde_json::json!({ "browser_open": true, "message": "Browser open. Use navigate, dom, click, input, console, etc.", "url": url, "requested_url": req_url, "configured_url": config.url, "window": { "width": config.window.width, "height": config.window.height }, "notes": config.notes, "console_entry_count": session.log_entries.lock().len() })
 }
@@ -731,13 +867,25 @@ async fn navigate_page(page: &Page, raw_url: &str) -> BrowserResult<()> {
 
 fn normalize_browser_url(raw: &str) -> BrowserResult<String> {
     let t = raw.trim();
-    if t.is_empty() { return Err("Empty URL".into()); }
-    if t.eq_ignore_ascii_case("about:blank") { return Ok("about:blank".into()); }
-    let candidate = if t.contains("://") { t.to_string() } else { format!("http://{t}") };
+    if t.is_empty() {
+        return Err("Empty URL".into());
+    }
+    if t.eq_ignore_ascii_case("about:blank") {
+        return Ok("about:blank".into());
+    }
+    let candidate = if t.contains("://") {
+        t.to_string()
+    } else {
+        format!("http://{t}")
+    };
     let url = Url::parse(&candidate).map_err(|e| e.to_string())?;
-    if !matches!(url.scheme(), "http" | "https") { return Err("Localhost http(s) only".into()); }
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Localhost http(s) only".into());
+    }
     let host = url.host_str().ok_or("No host")?;
-    if !is_local_browser_host(host) { return Err("Localhost only".into()); }
+    if !is_local_browser_host(host) {
+        return Err("Localhost only".into());
+    }
     Ok(url.to_string())
 }
 
@@ -747,67 +895,184 @@ fn is_local_browser_host(host: &str) -> bool {
 }
 
 async fn evaluate_string(page: &Page, exp: &str) -> BrowserResult<String> {
-    page.evaluate(exp).await.map_err(|e| e.to_string())?.into_value::<String>().map_err(|e| e.to_string())
+    page.evaluate(exp)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_value::<String>()
+        .map_err(|e| e.to_string())
 }
 
 async fn clear_element_value(page: &Page, selector: &str) -> BrowserResult<()> {
     let sel = serde_json::to_string(selector).unwrap();
     let script = format!("() => {{ const el = document.querySelector({sel}); if (el && 'value' in el) {{ el.value = ''; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }} }}");
-    page.evaluate(script.as_str()).await.map_err(|e| e.to_string())?;
+    page.evaluate(script.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-async fn dom_field_value(el: &Element, field: DomField, prop: Option<&str>) -> BrowserResult<Value> {
+async fn dom_field_value(
+    el: &Element,
+    field: DomField,
+    prop: Option<&str>,
+) -> BrowserResult<Value> {
     match field {
-        DomField::InnerText => Ok(el.inner_text().await.map_err(|e| e.to_string())?.map(Value::String).unwrap_or(Value::Null)),
-        DomField::InnerHtml => Ok(el.inner_html().await.map_err(|e| e.to_string())?.map(Value::String).unwrap_or(Value::Null)),
-        DomField::OuterHtml => Ok(el.outer_html().await.map_err(|e| e.to_string())?.map(Value::String).unwrap_or(Value::Null)),
-        DomField::Attributes => Ok(flat_attributes_to_json(el.attributes().await.map_err(|e| e.to_string())?)),
-        DomField::Value => Ok(el.property("value").await.map_err(|e| e.to_string())?.unwrap_or(Value::Null)),
+        DomField::InnerText => Ok(el
+            .inner_text()
+            .await
+            .map_err(|e| e.to_string())?
+            .map(Value::String)
+            .unwrap_or(Value::Null)),
+        DomField::InnerHtml => Ok(el
+            .inner_html()
+            .await
+            .map_err(|e| e.to_string())?
+            .map(Value::String)
+            .unwrap_or(Value::Null)),
+        DomField::OuterHtml => Ok(el
+            .outer_html()
+            .await
+            .map_err(|e| e.to_string())?
+            .map(Value::String)
+            .unwrap_or(Value::Null)),
+        DomField::Attributes => Ok(flat_attributes_to_json(
+            el.attributes().await.map_err(|e| e.to_string())?,
+        )),
+        DomField::Value => Ok(el
+            .property("value")
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or(Value::Null)),
         DomField::Property => {
             let p = prop.ok_or("Property name required")?;
-            Ok(el.property(p).await.map_err(|e| e.to_string())?.ok_or("Property not found")?)
+            Ok(el
+                .property(p)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("Property not found")?)
         }
         _ => Err("Invalid field".into()),
     }
 }
 
-async fn computed_style_value(page: &Page, selector: &str, prop: Option<&str>, props: Option<&[String]>, all: bool, limit: Option<usize>) -> BrowserResult<Value> {
+async fn computed_style_value(
+    page: &Page,
+    selector: &str,
+    prop: Option<&str>,
+    props: Option<&[String]>,
+    all: bool,
+    limit: Option<usize>,
+) -> BrowserResult<Value> {
     let sel = serde_json::to_string(selector).unwrap();
     let p_list = serde_json::to_string(&resolve_computed_style_properties(prop, props)).unwrap();
     let lim = limit.unwrap_or(usize::MAX);
-    let script = format!(r#"() => {{
+    let script = format!(
+        r#"() => {{
         const sel = {sel}; const props = {p_list}; const lim = {lim};
         const pick = (el) => {{ const s = getComputedStyle(el); const v = {{}}; for (const n of props) v[n] = s.getPropertyValue(n).trim(); return v; }};
         if ({all}) return Array.from(document.querySelectorAll(sel)).slice(0, lim).map(pick);
         const el = document.querySelector(sel); if (!el) throw new Error("Not found"); return pick(el);
-    }}"#);
-    page.evaluate(script.as_str()).await.map_err(|e| e.to_string())?.into_value::<Value>().map_err(|e| e.to_string())
+    }}"#
+    );
+    page.evaluate(script.as_str())
+        .await
+        .map_err(|e| e.to_string())?
+        .into_value::<Value>()
+        .map_err(|e| e.to_string())
 }
 
 fn resolve_computed_style_properties(prop: Option<&str>, props: Option<&[String]>) -> Vec<String> {
-    if let Some(p) = props { if !p.is_empty() { return p.to_vec(); } }
-    if let Some(p) = prop { if !p.trim().is_empty() { return vec![p.to_string()]; } }
-    DEFAULT_COMPUTED_STYLE_PROPERTIES.iter().map(|p| p.to_string()).collect()
+    if let Some(p) = props {
+        if !p.is_empty() {
+            return p.to_vec();
+        }
+    }
+    if let Some(p) = prop {
+        if !p.trim().is_empty() {
+            return vec![p.to_string()];
+        }
+    }
+    DEFAULT_COMPUTED_STYLE_PROPERTIES
+        .iter()
+        .map(|p| p.to_string())
+        .collect()
 }
 
 fn flat_attributes_to_json(attrs: Vec<String>) -> Value {
     let mut map = serde_json::Map::new();
-    for chunk in attrs.chunks(2) { if chunk.len() == 2 { map.insert(chunk[0].clone(), Value::String(chunk[1].clone())); } }
+    for chunk in attrs.chunks(2) {
+        if chunk.len() == 2 {
+            map.insert(chunk[0].clone(), Value::String(chunk[1].clone()));
+        }
+    }
     Value::Object(map)
 }
 
 fn console_event_to_entry(e: &EventConsoleApiCalled) -> BrowserLogEntry {
-    BrowserLogEntry { source: "console".into(), level: e.r#type.as_ref().to_string(), text: remote_objects_to_text(&e.args), timestamp: *e.timestamp.inner(), url: e.stack_trace.as_ref().and_then(|s| s.call_frames.first()).map(|f| f.url.clone()), line_number: e.stack_trace.as_ref().and_then(|s| s.call_frames.first()).map(|f| f.line_number) }
+    BrowserLogEntry {
+        source: "console".into(),
+        level: e.r#type.as_ref().to_string(),
+        text: remote_objects_to_text(&e.args),
+        timestamp: *e.timestamp.inner(),
+        url: e
+            .stack_trace
+            .as_ref()
+            .and_then(|s| s.call_frames.first())
+            .map(|f| f.url.clone()),
+        line_number: e
+            .stack_trace
+            .as_ref()
+            .and_then(|s| s.call_frames.first())
+            .map(|f| f.line_number),
+    }
 }
 
 fn log_event_to_entry(e: &EventEntryAdded) -> BrowserLogEntry {
-    BrowserLogEntry { source: e.entry.source.as_ref().to_string(), level: e.entry.level.as_ref().to_string(), text: if let Some(a) = &e.entry.args { if a.is_empty() { e.entry.text.clone() } else { remote_objects_to_text(a) } } else { e.entry.text.clone() }, timestamp: *e.entry.timestamp.inner(), url: e.entry.url.clone(), line_number: e.entry.line_number }
+    BrowserLogEntry {
+        source: e.entry.source.as_ref().to_string(),
+        level: e.entry.level.as_ref().to_string(),
+        text: if let Some(a) = &e.entry.args {
+            if a.is_empty() {
+                e.entry.text.clone()
+            } else {
+                remote_objects_to_text(a)
+            }
+        } else {
+            e.entry.text.clone()
+        },
+        timestamp: *e.entry.timestamp.inner(),
+        url: e.entry.url.clone(),
+        line_number: e.entry.line_number,
+    }
 }
 
-fn remote_objects_to_text(args: &[RemoteObject]) -> String { args.iter().map(remote_object_to_text).collect::<Vec<_>>().join(" ") }
-fn remote_object_to_text(v: &RemoteObject) -> String { if let Some(j) = &v.value { if let Some(s) = j.as_str() { return s.to_string(); } return j.to_string(); } if let Some(t) = &v.unserializable_value { return t.as_ref().to_string(); } if let Some(t) = &v.description { return t.clone(); } v.r#type.as_ref().to_string() }
-fn success_json(v: Value) -> ToolResult { match serde_json::to_string_pretty(&v) { Ok(j) => ToolResult::success(j), Err(e) => ToolResult::error(e.to_string()) } }
+fn remote_objects_to_text(args: &[RemoteObject]) -> String {
+    args.iter()
+        .map(remote_object_to_text)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+fn remote_object_to_text(v: &RemoteObject) -> String {
+    if let Some(j) = &v.value {
+        if let Some(s) = j.as_str() {
+            return s.to_string();
+        }
+        return j.to_string();
+    }
+    if let Some(t) = &v.unserializable_value {
+        return t.as_ref().to_string();
+    }
+    if let Some(t) = &v.description {
+        return t.clone();
+    }
+    v.r#type.as_ref().to_string()
+}
+fn success_json(v: Value) -> ToolResult {
+    match serde_json::to_string_pretty(&v) {
+        Ok(j) => ToolResult::success(j),
+        Err(e) => ToolResult::error(e.to_string()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -815,8 +1080,14 @@ mod tests {
 
     #[test]
     fn test_normalize_browser_url_restricted_to_localhost() {
-        assert_eq!(normalize_browser_url("http://localhost:8080").unwrap(), "http://localhost:8080/");
-        assert_eq!(normalize_browser_url("app.localhost").unwrap(), "http://app.localhost/");
+        assert_eq!(
+            normalize_browser_url("http://localhost:8080").unwrap(),
+            "http://localhost:8080/"
+        );
+        assert_eq!(
+            normalize_browser_url("app.localhost").unwrap(),
+            "http://app.localhost/"
+        );
         assert!(normalize_browser_url("https://google.com").is_err());
     }
 }

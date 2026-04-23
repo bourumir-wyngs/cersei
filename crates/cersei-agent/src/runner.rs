@@ -20,7 +20,6 @@ use tokio::sync::mpsc;
 const END_TURN_SUMMARY_PROMPT: &str = "Briefly summarize your progress, results, and next steps.";
 const AUTO_RECALL_LIMIT: usize = 3;
 
-
 fn log_turn_handoff_to_human(reason: &str, summary_missing: bool, summary_prompt_sent: bool) {
     let timestamp = chrono::Local::now().to_rfc3339();
     println!(
@@ -107,7 +106,11 @@ fn should_auto_recall_from_prompt(prompt: &str) -> bool {
         .windows(needle.len())
         .enumerate()
         .any(|(idx, window)| {
-            if !window.iter().zip(needle.iter()).all(|(a, b)| a.eq_ignore_ascii_case(b)) {
+            if !window
+                .iter()
+                .zip(needle.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+            {
                 return false;
             }
 
@@ -138,7 +141,7 @@ async fn inject_auto_recalled_memories(agent: &Agent, prompt: &str) -> Result<()
     }
 
     let mut note = String::from(
-        "Relevant recalled memories triggered by the user's use of the word 'again':\n"
+        "Relevant recalled memories triggered by the user's use of the word 'again':\n",
     );
     for (idx, entry) in recalled.iter().enumerate() {
         note.push_str(&format!(
@@ -921,7 +924,9 @@ mod tests {
         assert!(should_auto_recall_from_prompt("please check again"));
         assert!(should_auto_recall_from_prompt("Again, this broke"));
         assert!(should_auto_recall_from_prompt("(AGAIN)?"));
-        assert!(!should_auto_recall_from_prompt("This is against expectations"));
+        assert!(!should_auto_recall_from_prompt(
+            "This is against expectations"
+        ));
         assert!(!should_auto_recall_from_prompt("bargain"));
         assert!(!should_auto_recall_from_prompt("A gain of confidence"));
     }

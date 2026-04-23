@@ -2188,7 +2188,9 @@ requests = {version = "^2.31.0", extras = ["security"]}
     fn test_exclude_patterns() {
         fn matches(pattern: &str, component: &str) -> bool {
             let pat = pattern.trim_end_matches("/**").trim_end_matches("/*");
-            glob::Pattern::new(pat).map(|p| p.matches(component)).unwrap_or(false)
+            glob::Pattern::new(pat)
+                .map(|p| p.matches(component))
+                .unwrap_or(false)
         }
         assert!(matches(".venv", ".venv"));
         assert!(matches(".venv/**", ".venv"));

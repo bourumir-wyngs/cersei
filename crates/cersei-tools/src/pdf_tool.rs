@@ -139,7 +139,11 @@ impl Tool for PdfReadTool {
         };
         let selected_chars = selected.chars().count();
 
-        let search = req.search.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let search = req
+            .search
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         let mut output = if let Some(pattern) = search {
             let regex = match Regex::new(pattern) {
                 Ok(regex) => regex,
@@ -163,7 +167,10 @@ impl Tool for PdfReadTool {
             };
         }
 
-        let limit = req.max_chars.unwrap_or(DEFAULT_MAX_CHARS).min(MAX_CHARS_LIMIT);
+        let limit = req
+            .max_chars
+            .unwrap_or(DEFAULT_MAX_CHARS)
+            .min(MAX_CHARS_LIMIT);
         let output_chars = output.chars().count();
         let truncated = truncate_chars(&output, limit);
         let was_truncated = limit < output_chars;
@@ -237,7 +244,10 @@ fn resolve_pdf_path(ctx: &ToolContext, file_path: &str) -> StringResult<PathBuf>
 }
 
 fn normalize_pdf_text(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n").trim().to_string()
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
 }
 
 fn select_text_range(
@@ -261,7 +271,10 @@ fn select_text_range(
 
     let end = if let Some(end) = end {
         if end < start {
-            return Err(format!("End offset {} must be greater than or equal to start {}.", end, start));
+            return Err(format!(
+                "End offset {} must be greater than or equal to start {}.",
+                end, start
+            ));
         }
         end.min(total_chars)
     } else if let Some(length) = length {
@@ -416,9 +429,21 @@ mod tests {
             .await;
 
         assert!(!with_context.is_error, "{}", with_context.content);
-        assert!(with_context.content.contains("one"), "{}", with_context.content);
-        assert!(with_context.content.contains("two"), "{}", with_context.content);
-        assert!(with_context.content.contains("three"), "{}", with_context.content);
+        assert!(
+            with_context.content.contains("one"),
+            "{}",
+            with_context.content
+        );
+        assert!(
+            with_context.content.contains("two"),
+            "{}",
+            with_context.content
+        );
+        assert!(
+            with_context.content.contains("three"),
+            "{}",
+            with_context.content
+        );
 
         let without_context = tool
             .execute(

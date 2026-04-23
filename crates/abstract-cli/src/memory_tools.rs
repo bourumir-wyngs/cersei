@@ -1,9 +1,9 @@
-use cersei_tools::{Tool, ToolContext, PermissionLevel, ToolResult};
-use serde::Deserialize;
-use serde_json::Value;
 use async_trait::async_trait;
 use cersei_memory::manager::MemoryManager;
 use cersei_memory::memdir::MemoryType;
+use cersei_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
+use serde::Deserialize;
+use serde_json::Value;
 use std::sync::Arc;
 
 pub struct MemoryRecallTool {
@@ -18,7 +18,9 @@ impl MemoryRecallTool {
 
 #[async_trait]
 impl Tool for MemoryRecallTool {
-    fn name(&self) -> &str { "MemoryRecall" }
+    fn name(&self) -> &str {
+        "MemoryRecall"
+    }
     fn description(&self) -> &str {
         "Recall relevant memories using the graph memory system. This tool is always available without permission approval. Use this to find prior project conventions, debugging steps, or user preferences."
     }
@@ -48,16 +50,16 @@ impl Tool for MemoryRecallTool {
         };
 
         let results = self.manager.recall(&input.query, input.limit.unwrap_or(5));
-        
+
         if results.is_empty() {
             return ToolResult::success("No matching memories found.");
         }
-        
+
         let mut out = String::new();
         for (i, mem) in results.iter().enumerate() {
             out.push_str(&format!("Memory {}:\n{}\n\n", i + 1, mem));
         }
-        
+
         ToolResult::success(out.trim().to_string())
     }
 }
@@ -74,7 +76,9 @@ impl MemoryStoreTool {
 
 #[async_trait]
 impl Tool for MemoryStoreTool {
-    fn name(&self) -> &str { "MemoryStore" }
+    fn name(&self) -> &str {
+        "MemoryStore"
+    }
     fn description(&self) -> &str {
         "Store a durable memory. This tool is always available without permission approval. Use this to remember important project facts, recurring issues, or user preferences. Only stores when the graph feature is active."
     }
@@ -112,7 +116,9 @@ impl Tool for MemoryStoreTool {
         if let Some(id) = self.manager.store_memory(&input.content, mem_type, conf) {
             ToolResult::success(format!("Successfully stored memory. ID: {}", id))
         } else {
-            ToolResult::success("Failed to store memory (graph backend might be disabled or unavailable).")
+            ToolResult::success(
+                "Failed to store memory (graph backend might be disabled or unavailable).",
+            )
         }
     }
 }

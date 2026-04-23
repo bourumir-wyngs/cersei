@@ -1,8 +1,7 @@
 //! Application state, agent construction, and lifecycle management.
 
-use crate::Cli;
 use crate::config::AppConfig;
-use crate::network_policy::CliNetworkPolicy;
+use crate::network_policy::{CliNetworkPolicy, PromptNetworkState};
 use crate::permissions::CliPermissionPolicy;
 use crate::prompt;
 use crate::render::ConsoleReviewRenderer;
@@ -11,16 +10,17 @@ use crate::reviewer;
 use crate::sessions;
 use crate::theme::Theme;
 use crate::tools_config;
+use crate::Cli;
 
 use cersei_mcp::McpServerConfig;
 use cersei_memory::manager::MemoryManager;
-use cersei_tools::Extensions;
 use cersei_tools::file_history::FileHistory;
 use cersei_tools::network_policy::sandbox_warning;
 use cersei_tools::permissions::AllowAll;
+use cersei_tools::Extensions;
 use cersei_types::Message;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Run the application (REPL or single-shot).
@@ -175,9 +175,16 @@ pub fn build_agent(
     if config.permissions_mode == "allow_all" {
         builder = builder.permission_policy(AllowAll);
     } else {
+        let prompt_network_state = Arc::new(PromptNetworkState::default());
         builder = builder
-            .permission_policy(CliPermissionPolicy::new(&theme))
-            .network_policy(CliNetworkPolicy::new(&theme));
+            .permission_policy(CliPermissionPolicy::with_network_prompt_state(
+                &theme,
+                prompt_network_state.clone(),
+            ))
+            .network_policy(CliNetworkPolicy::with_prompt_state(
+                &theme,
+                prompt_network_state,
+            ));
     }
 
     // Effort budget
@@ -269,9 +276,16 @@ pub fn build_reviewer_agent(
     if config.permissions_mode == "allow_all" {
         builder = builder.permission_policy(AllowAll);
     } else {
+        let prompt_network_state = Arc::new(PromptNetworkState::default());
         builder = builder
-            .permission_policy(CliPermissionPolicy::new(&theme))
-            .network_policy(CliNetworkPolicy::new(&theme));
+            .permission_policy(CliPermissionPolicy::with_network_prompt_state(
+                &theme,
+                prompt_network_state.clone(),
+            ))
+            .network_policy(CliNetworkPolicy::with_prompt_state(
+                &theme,
+                prompt_network_state,
+            ));
     }
 
     builder = builder.thinking_budget(config.effort);

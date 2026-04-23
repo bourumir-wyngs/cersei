@@ -90,7 +90,9 @@ impl CliReviewerExecutor {
 #[async_trait::async_trait]
 impl ReviewExecutor for CliReviewerExecutor {
     async fn review(&self, request: ReviewRequest) -> Result<ReviewResponse, String> {
-        let console_renderer = self.tool_extensions.get::<crate::render::ConsoleReviewRenderer>();
+        let console_renderer = self
+            .tool_extensions
+            .get::<crate::render::ConsoleReviewRenderer>();
         let reviewer_model = self.state.model();
         let reviewer_session_id = self.state.session_id();
         let xfile_session_id = self.state.xfile_session_id();

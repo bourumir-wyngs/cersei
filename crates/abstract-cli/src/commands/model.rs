@@ -369,8 +369,8 @@ fn is_chat_completions_compatible(provider_id: &str, model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_providers, fallback_models, is_chat_completions_compatible,
-        model_index, normalize_provider_model_id, run_reviewer, selected_provider_id, CommandAction,
+        display_providers, fallback_models, is_chat_completions_compatible, model_index,
+        normalize_provider_model_id, run_reviewer, selected_provider_id, CommandAction,
     };
     use crate::config::AppConfig;
     use cersei_provider::registry;

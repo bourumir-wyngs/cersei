@@ -17,6 +17,7 @@ use crossterm::style::{Attribute, Print, ResetColor, SetAttribute, SetForeground
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 #[cfg(test)]
 use crate::permissions::{match_persisted_rule_for_request_in, PersistedPermissionRule};
@@ -27,16 +28,85 @@ const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
 pub struct CliNetworkPolicy {
     session_allowed: Mutex<HashSet<String>>,
     session_denied: Mutex<HashSet<String>>,
+    prompt_state: Arc<PromptNetworkState>,
     theme: Theme,
 }
 
 impl CliNetworkPolicy {
-    pub fn new(theme: &Theme) -> Self {
+    pub fn with_prompt_state(theme: &Theme, prompt_state: Arc<PromptNetworkState>) -> Self {
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             session_denied: Mutex::new(HashSet::new()),
+            prompt_state,
             theme: theme.clone(),
         }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct PromptNetworkState {
+    allow_once: Mutex<HashSet<String>>,
+    block_once: Mutex<HashSet<String>>,
+    block_session_commands: Mutex<HashSet<String>>,
+    block_session_tools: Mutex<HashSet<String>>,
+}
+
+impl PromptNetworkState {
+    pub(crate) fn allow_command_once(&self, command: &str) {
+        let command = command.to_string();
+        self.block_once.lock().remove(&command);
+        self.allow_once.lock().insert(command);
+    }
+
+    pub(crate) fn block_command_once(&self, command: &str) {
+        let command = command.to_string();
+        self.allow_once.lock().remove(&command);
+        self.block_once.lock().insert(command);
+    }
+
+    pub(crate) fn block_command_for_session(&self, command: &str) {
+        self.block_session_commands
+            .lock()
+            .insert(command.to_string());
+    }
+
+    pub(crate) fn block_tool_for_session(&self, tool_name: &str) {
+        self.block_session_tools
+            .lock()
+            .insert(normalize_tool_name(tool_name));
+    }
+
+    fn take_decision(
+        &self,
+        tool_name: &str,
+        command: &str,
+        requested: NetworkAccess,
+    ) -> Option<NetworkDecision> {
+        if requested == NetworkAccess::Blocked {
+            return Some(NetworkDecision::Allow(NetworkAccess::Blocked));
+        }
+
+        if self.allow_once.lock().remove(command) {
+            return Some(NetworkDecision::Allow(requested));
+        }
+
+        if self.block_once.lock().remove(command) {
+            return Some(NetworkDecision::Allow(NetworkAccess::Blocked));
+        }
+
+        if self
+            .block_session_tools
+            .lock()
+            .contains(&normalize_tool_name(tool_name))
+        {
+            return Some(NetworkDecision::Allow(NetworkAccess::Blocked));
+        }
+
+        if self.block_session_commands.lock().contains(command) {
+            return Some(NetworkDecision::Allow(NetworkAccess::Blocked));
+        }
+
+        None
     }
 }
 
@@ -48,6 +118,13 @@ impl NetworkPolicy for CliNetworkPolicy {
         command: &str,
         requested: NetworkAccess,
     ) -> NetworkDecision {
+        if let Some(decision) = self
+            .prompt_state
+            .take_decision(tool_name, command, requested)
+        {
+            return decision;
+        }
+
         if let Some(decision) = matched_network_decision(command, requested) {
             return decision;
         }
@@ -211,6 +288,10 @@ fn read_char() -> char {
     }
 }
 
+fn normalize_tool_name(tool_name: &str) -> String {
+    tool_name.to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +348,33 @@ mod tests {
 
         assert_eq!(
             matched_network_decision_in(&rules, "cargo build", NetworkAccess::Full),
+            Some(NetworkDecision::Allow(NetworkAccess::Blocked))
+        );
+    }
+
+    #[test]
+    fn prompt_state_allows_network_once_before_session_block() {
+        let state = PromptNetworkState::default();
+        state.block_tool_for_session("Npm");
+        state.allow_command_once("npm install");
+
+        assert_eq!(
+            state.take_decision("Npm", "npm install", NetworkAccess::Full),
+            Some(NetworkDecision::Allow(NetworkAccess::Full))
+        );
+        assert_eq!(
+            state.take_decision("Npm", "npm install", NetworkAccess::Full),
+            Some(NetworkDecision::Allow(NetworkAccess::Blocked))
+        );
+    }
+
+    #[test]
+    fn prompt_state_blocks_command_for_session() {
+        let state = PromptNetworkState::default();
+        state.block_command_for_session("cargo test");
+
+        assert_eq!(
+            state.take_decision("Cargo", "cargo test", NetworkAccess::Local),
             Some(NetworkDecision::Allow(NetworkAccess::Blocked))
         );
     }

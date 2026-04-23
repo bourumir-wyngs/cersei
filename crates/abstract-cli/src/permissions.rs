@@ -4,6 +4,7 @@
 //! reloaded on every permission check.
 
 use crate::config;
+use crate::network_policy::PromptNetworkState;
 use crate::theme::Theme;
 use cersei_tools::network_policy::NetworkAccess;
 use cersei_tools::permissions::{PermissionDecision, PermissionPolicy, PermissionRequest};
@@ -15,6 +16,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const MAX_REVIEW_PREVIEW_LINES: usize = 5;
 const MAX_REVIEW_PREVIEW_CHARS: usize = 512;
@@ -31,6 +33,7 @@ pub struct CliPermissionPolicy {
     session_scopes_allowed: Mutex<HashSet<SessionPermissionScope>>,
     /// Permission scopes denied for the entire session.
     session_scopes_denied: Mutex<HashSet<SessionPermissionScope>>,
+    network_prompt_state: Arc<PromptNetworkState>,
     theme: Theme,
 }
 
@@ -134,7 +137,10 @@ pub(crate) fn match_persisted_rule_for_request_in<'a>(
             return false;
         }
 
-        let tool_matches = rule.tool.as_deref().is_none_or(|tool| tool.eq_ignore_ascii_case(tool_name));
+        let tool_matches = rule
+            .tool
+            .as_deref()
+            .is_none_or(|tool| tool.eq_ignore_ascii_case(tool_name));
         let regex_matches = if rule.regex.is_empty() {
             true
         } else {
@@ -148,13 +154,17 @@ pub(crate) fn match_persisted_rule_for_request_in<'a>(
 }
 
 fn request_uses_network(request: &PermissionRequest) -> bool {
+    requested_network_access(request) != NetworkAccess::Blocked
+}
+
+fn requested_network_access(request: &PermissionRequest) -> NetworkAccess {
     match request.tool_name.as_str() {
         "Cargo" | "Npm" | "Npx" | "Bash" | "bash" | "Process" | "PowerShell" => {
             let network = request
                 .tool_input
                 .get("network")
                 .and_then(|value| value.as_str());
-            NetworkAccess::from_input(network) != NetworkAccess::Blocked
+            NetworkAccess::from_input(network)
         }
         "Wasm_tests" | "wasm_tests" => {
             let tools_config = cersei_tools::global_tools_config();
@@ -163,9 +173,9 @@ fn request_uses_network(request: &PermissionRequest) -> bool {
                 .as_ref()
                 .and_then(|config| config.network.as_deref())
                 .unwrap_or("none");
-            NetworkAccess::from_input(Some(yaml_network)) != NetworkAccess::Blocked
+            NetworkAccess::from_input(Some(yaml_network))
         }
-        _ => false,
+        _ => NetworkAccess::Blocked,
     }
 }
 
@@ -190,11 +200,19 @@ pub(crate) fn register_command_line(command_line: &str) {
 
 impl CliPermissionPolicy {
     pub fn new(theme: &Theme) -> Self {
+        Self::with_network_prompt_state(theme, Arc::new(PromptNetworkState::default()))
+    }
+
+    pub fn with_network_prompt_state(
+        theme: &Theme,
+        network_prompt_state: Arc<PromptNetworkState>,
+    ) -> Self {
         Self {
             session_allowed: Mutex::new(HashSet::new()),
             session_denied: Mutex::new(HashSet::new()),
             session_scopes_allowed: Mutex::new(HashSet::new()),
             session_scopes_denied: Mutex::new(HashSet::new()),
+            network_prompt_state,
             theme: theme.clone(),
         }
     }
@@ -218,6 +236,48 @@ impl CliPermissionPolicy {
     fn deny_scope_for_session(&self, scope: SessionPermissionScope) {
         self.session_scopes_denied.lock().insert(scope);
     }
+
+    fn allow_requested_network_once(
+        &self,
+        request: &PermissionRequest,
+        command_line: &str,
+        session_scope: Option<SessionPermissionScope>,
+    ) {
+        self.network_prompt_state.allow_command_once(command_line);
+        if session_scope.is_some() {
+            self.network_prompt_state
+                .block_tool_for_session(&request.tool_name);
+        }
+    }
+
+    fn block_requested_network_once_or_scope(
+        &self,
+        request: &PermissionRequest,
+        command_line: &str,
+        session_scope: Option<SessionPermissionScope>,
+    ) {
+        if session_scope.is_some() {
+            self.network_prompt_state
+                .block_tool_for_session(&request.tool_name);
+        } else {
+            self.network_prompt_state.block_command_once(command_line);
+        }
+    }
+
+    fn block_requested_network_for_session(
+        &self,
+        request: &PermissionRequest,
+        command_line: &str,
+        session_scope: Option<SessionPermissionScope>,
+    ) {
+        if session_scope.is_some() {
+            self.network_prompt_state
+                .block_tool_for_session(&request.tool_name);
+        } else {
+            self.network_prompt_state
+                .block_command_for_session(command_line);
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -229,12 +289,16 @@ impl PermissionPolicy for CliPermissionPolicy {
 
         let command_line = command_line_from_request(request);
         let persisted = load_persisted_file();
-        let request_uses_network = request_uses_network(request);
+        let requested_network = requested_network_access(request);
+        let request_uses_network = requested_network != NetworkAccess::Blocked;
         let session_scope = Self::session_scope_for_request(request);
 
-        if let Some(rule) =
-            match_persisted_rule_for_request_in(&persisted, &request.tool_name, &command_line, request_uses_network)
-        {
+        if let Some(rule) = match_persisted_rule_for_request_in(
+            &persisted,
+            &request.tool_name,
+            &command_line,
+            request_uses_network,
+        ) {
             return if rule.allow {
                 PermissionDecision::Allow
             } else {
@@ -305,6 +369,18 @@ impl PermissionPolicy for CliPermissionPolicy {
                     Print("\n"),
                 );
             }
+            if request_uses_network {
+                let _ = execute!(
+                    io::stderr(),
+                    SetForegroundColor(self.theme.dim),
+                    Print(format!(
+                        "  {}",
+                        permission_network_notice(requested_network, session_scope)
+                    )),
+                    ResetColor,
+                    Print("\n"),
+                );
+            }
             if let Some(preview) = &preview {
                 let _ = execute!(
                     io::stderr(),
@@ -321,13 +397,32 @@ impl PermissionPolicy for CliPermissionPolicy {
                 ResetColor,
                 Print("\n"),
                 SetForegroundColor(self.theme.permission_accent),
-                Print(permission_prompt_choices(session_scope)),
+                Print(permission_prompt_choices(
+                    session_scope,
+                    request_uses_network
+                )),
                 ResetColor,
             );
             let _ = io::stderr().flush();
 
-            match read_permission_char(valid_permission_chars(session_scope)) {
+            match read_permission_char(valid_permission_chars(session_scope, request_uses_network))
+            {
                 'y' | 'Y' | '\n' => {
+                    if request_uses_network {
+                        self.block_requested_network_once_or_scope(
+                            request,
+                            &command_line,
+                            session_scope,
+                        );
+                    }
+                    if let Some(scope) = session_scope {
+                        self.allow_scope_for_session(scope);
+                        return PermissionDecision::AllowForSession;
+                    }
+                    return PermissionDecision::AllowOnce;
+                }
+                'k' | 'K' => {
+                    self.allow_requested_network_once(request, &command_line, session_scope);
                     if let Some(scope) = session_scope {
                         self.allow_scope_for_session(scope);
                         return PermissionDecision::AllowForSession;
@@ -335,6 +430,13 @@ impl PermissionPolicy for CliPermissionPolicy {
                     return PermissionDecision::AllowOnce;
                 }
                 's' | 'S' => {
+                    if request_uses_network {
+                        self.block_requested_network_for_session(
+                            request,
+                            &command_line,
+                            session_scope,
+                        );
+                    }
                     if let Some(scope) = session_scope {
                         self.allow_scope_for_session(scope);
                         return PermissionDecision::AllowForSession;
@@ -410,27 +512,80 @@ impl SessionPermissionScope {
     }
 }
 
-fn permission_prompt_choices(scope: Option<SessionPermissionScope>) -> &'static str {
-    match scope {
-        Some(
-            SessionPermissionScope::WriteWorkspace
-            | SessionPermissionScope::Pytest
-            | SessionPermissionScope::WebTests
-            | SessionPermissionScope::WasmTests,
+fn permission_prompt_choices(
+    scope: Option<SessionPermissionScope>,
+    uses_network: bool,
+) -> &'static str {
+    match (scope, uses_network) {
+        (
+            Some(
+                SessionPermissionScope::WriteWorkspace
+                | SessionPermissionScope::Pytest
+                | SessionPermissionScope::WebTests
+                | SessionPermissionScope::WasmTests,
+            ),
+            true,
+        ) => "  [Y]es  Networ[K]  [N]o  n[E]ver  Deny e[X]plaining  [R]egister ",
+        (
+            Some(
+                SessionPermissionScope::WriteWorkspace
+                | SessionPermissionScope::Pytest
+                | SessionPermissionScope::WebTests
+                | SessionPermissionScope::WasmTests,
+            ),
+            false,
         ) => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister ",
-        None => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister ",
+        (None, true) => {
+            "  [Y]es  Networ[K]  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "
+        }
+        (None, false) => "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister ",
     }
 }
 
-fn valid_permission_chars(scope: Option<SessionPermissionScope>) -> &'static str {
-    match scope {
-        Some(
-            SessionPermissionScope::WriteWorkspace
-            | SessionPermissionScope::Pytest
-            | SessionPermissionScope::WebTests
-            | SessionPermissionScope::WasmTests,
+fn valid_permission_chars(
+    scope: Option<SessionPermissionScope>,
+    uses_network: bool,
+) -> &'static str {
+    match (scope, uses_network) {
+        (
+            Some(
+                SessionPermissionScope::WriteWorkspace
+                | SessionPermissionScope::Pytest
+                | SessionPermissionScope::WebTests
+                | SessionPermissionScope::WasmTests,
+            ),
+            true,
+        ) => "yYkKnNeErRxX",
+        (
+            Some(
+                SessionPermissionScope::WriteWorkspace
+                | SessionPermissionScope::Pytest
+                | SessionPermissionScope::WebTests
+                | SessionPermissionScope::WasmTests,
+            ),
+            false,
         ) => "yYnNeErRxX",
-        None => "yYnNeErRsExX",
+        (None, true) => "yYkKnNeErRsSxX",
+        (None, false) => "yYnNeErRsSxX",
+    }
+}
+
+fn permission_network_notice(
+    requested_network: NetworkAccess,
+    scope: Option<SessionPermissionScope>,
+) -> String {
+    let access_label = match requested_network {
+        NetworkAccess::Full => "full network",
+        NetworkAccess::Local => "local network",
+        NetworkAccess::Blocked => "no network",
+    };
+
+    if scope.is_some() {
+        format!("[Y] runs without network. Networ[K] also enables {access_label} for this run.")
+    } else {
+        format!(
+            "[Y] and [S] run without network. Networ[K] also enables {access_label} for this run."
+        )
     }
 }
 
@@ -547,7 +702,8 @@ fn permission_preview(request: &PermissionRequest, command_line: &str) -> Option
             | "Npx"
             | "Pytest"
             | "web_tests"
-            | "Wasm_tests" | "wasm_tests"
+            | "Wasm_tests"
+            | "wasm_tests"
     );
 
     if direct_command {
@@ -1070,14 +1226,13 @@ mod tests {
             allow_read: Vec::new(),
         }];
 
-        let matched = match_persisted_rule_for_request_in(
-            &rules,
-            "Wasm_tests",
-            "cargo build",
-            true,
-        );
+        let matched =
+            match_persisted_rule_for_request_in(&rules, "Wasm_tests", "cargo build", true);
 
-        assert_eq!(matched.map(|rule| (rule.tool.clone(), rule.allow)), Some((None, true)));
+        assert_eq!(
+            matched.map(|rule| (rule.tool.clone(), rule.allow)),
+            Some((None, true))
+        );
     }
 
     #[test]
@@ -1090,14 +1245,12 @@ mod tests {
             allow_read: Vec::new(),
         }];
 
-        let matched = match_persisted_rule_for_request_in(
-            &rules,
-            "Cargo",
-            "cargo build",
-            true,
-        );
+        let matched = match_persisted_rule_for_request_in(&rules, "Cargo", "cargo build", true);
 
-        assert_eq!(matched.map(|rule| (rule.tool.clone(), rule.allow)), Some((None, true)));
+        assert_eq!(
+            matched.map(|rule| (rule.tool.clone(), rule.allow)),
+            Some((None, true))
+        );
     }
 
     #[test]
@@ -1118,7 +1271,6 @@ mod tests {
             Some("Write workspace")
         );
     }
-
 
     #[test]
     fn wasm_tests_uses_yaml_network_setting_when_defined() {
@@ -1233,7 +1385,10 @@ mod tests {
             Some("Pytest")
         );
         assert_eq!(
-            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
+            permission_prompt_choices(
+                CliPermissionPolicy::session_scope_for_request(&request),
+                request_uses_network(&request),
+            ),
             "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
         );
     }
@@ -1256,7 +1411,10 @@ mod tests {
             Some("Web tests")
         );
         assert_eq!(
-            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
+            permission_prompt_choices(
+                CliPermissionPolicy::session_scope_for_request(&request),
+                request_uses_network(&request),
+            ),
             "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
         );
     }
@@ -1310,7 +1468,10 @@ mod tests {
             Some("Wasm tests")
         );
         assert_eq!(
-            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
+            permission_prompt_choices(
+                CliPermissionPolicy::session_scope_for_request(&request),
+                request_uses_network(&request),
+            ),
             "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [R]egister "
         );
     }
@@ -1426,8 +1587,11 @@ mod tests {
             Some(SessionPermissionScope::WriteWorkspace)
         ));
         assert_eq!(
-            permission_prompt_choices(CliPermissionPolicy::session_scope_for_request(&request)),
-            "  [Y]es  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "
+            permission_prompt_choices(
+                CliPermissionPolicy::session_scope_for_request(&request),
+                request_uses_network(&request),
+            ),
+            "  [Y]es  Networ[K]  [N]o  n[E]ver  Deny e[X]plaining  [S]ession  [R]egister "
         );
     }
 
@@ -1438,7 +1602,11 @@ mod tests {
   allow: true
 "#;
         let result: Result<PersistedPermissions, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_ok(), "Deserialization should succeed even if 'regex' field is missing: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Deserialization should succeed even if 'regex' field is missing: {:?}",
+            result.err()
+        );
         let rules = result.unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].tool, Some("Read".into()));
@@ -1453,7 +1621,11 @@ mod tests {
   regex: ""
 "#;
         let result: Result<PersistedPermissions, _> = serde_saphyr::from_str(yaml);
-        assert!(result.is_ok(), "Deserialization should succeed if 'regex' field is present: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Deserialization should succeed if 'regex' field is present: {:?}",
+            result.err()
+        );
     }
 
     #[test]

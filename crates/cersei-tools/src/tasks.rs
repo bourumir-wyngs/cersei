@@ -120,7 +120,9 @@ impl Tool for TasksTool {
             TasksAction::Create => {
                 let description = match req.description {
                     Some(d) => d,
-                    None => return ToolResult::error("`description` is required for action `create`"),
+                    None => {
+                        return ToolResult::error("`description` is required for action `create`")
+                    }
                 };
                 let id = uuid::Uuid::new_v4().to_string()[..8].to_string();
                 let now = chrono::Utc::now().to_rfc3339();
@@ -247,41 +249,53 @@ mod tests {
 
         // Create
         let r = tool
-            .execute(serde_json::json!({"action": "create", "description": "Run tests"}), &ctx)
+            .execute(
+                serde_json::json!({"action": "create", "description": "Run tests"}),
+                &ctx,
+            )
             .await;
         assert!(!r.is_error);
         let id = r.content.split('\'').nth(1).unwrap().to_string();
 
         // List
-        let r = tool.execute(serde_json::json!({"action": "list"}), &ctx).await;
+        let r = tool
+            .execute(serde_json::json!({"action": "list"}), &ctx)
+            .await;
         assert!(r.content.contains("Run tests"));
 
         // Update to running
-        tool.execute(serde_json::json!({"action": "update", "id": &id, "status": "running"}), &ctx)
-            .await;
+        tool.execute(
+            serde_json::json!({"action": "update", "id": &id, "status": "running"}),
+            &ctx,
+        )
+        .await;
         assert_eq!(get_task(&id).unwrap().status, TaskStatus::Running);
 
         // Update with output
         tool.execute(
-                serde_json::json!({
-                    "action": "update",
-                    "id": &id,
-                    "status": "completed",
-                    "output": "All 42 tests passed"
-                }),
-                &ctx,
-            )
-            .await;
+            serde_json::json!({
+                "action": "update",
+                "id": &id,
+                "status": "completed",
+                "output": "All 42 tests passed"
+            }),
+            &ctx,
+        )
+        .await;
         let task = get_task(&id).unwrap();
         assert_eq!(task.status, TaskStatus::Completed);
         assert_eq!(task.output.as_deref(), Some("All 42 tests passed"));
 
         // Get output
-        let r = tool.execute(serde_json::json!({"action": "output", "id": &id}), &ctx).await;
+        let r = tool
+            .execute(serde_json::json!({"action": "output", "id": &id}), &ctx)
+            .await;
         assert!(r.content.contains("42 tests passed"));
 
         // Get status
-        let r = tool.execute(serde_json::json!({"action": "get", "id": &id}), &ctx).await;
+        let r = tool
+            .execute(serde_json::json!({"action": "get", "id": &id}), &ctx)
+            .await;
         assert!(r.content.contains("Completed"));
     }
 
@@ -294,11 +308,15 @@ mod tests {
 
         let tool = TasksTool;
         let r = tool
-            .execute(serde_json::json!({"action": "create", "description": "Long task"}), &ctx)
+            .execute(
+                serde_json::json!({"action": "create", "description": "Long task"}),
+                &ctx,
+            )
             .await;
         let id = r.content.split('\'').nth(1).unwrap().to_string();
 
-        tool.execute(serde_json::json!({"action": "stop", "id": &id}), &ctx).await;
+        tool.execute(serde_json::json!({"action": "stop", "id": &id}), &ctx)
+            .await;
         assert_eq!(get_task(&id).unwrap().status, TaskStatus::Stopped);
     }
 }
