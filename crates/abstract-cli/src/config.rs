@@ -1,11 +1,12 @@
-//! TOML configuration with layered loading.
+//! Configuration with layered loading.
 //!
-//! Priority (lowest → highest):
+//! Priority (lowest -> highest):
 //! 1. Hardcoded defaults
-//! 2. ~/.abstract/config.toml  (user global)
-//! 3. .abstract/config.toml    (project local)
-//! 4. Environment variables     (ABSTRACT_MODEL, etc.)
-//! 5. CLI flags
+//! 2. ~/.abstract/config.toml           (legacy global)
+//! 3. .abstract/config.toml             (legacy project local)
+//! 4. ~/.abstract/config_{project}.yaml (scoped project settings)
+//! 5. Environment variables             (ABSTRACT_MODEL, etc.)
+//! 6. CLI flags
 
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -14,8 +15,6 @@ use std::sync::{LazyLock, RwLock};
 
 static PERMISSIONS_PROJECT_NAME: LazyLock<RwLock<Option<String>>> =
     LazyLock::new(|| RwLock::new(None));
-
-// ─── Config structs ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -35,6 +34,7 @@ pub struct AppConfig {
     pub auto_compact: bool,
     pub graph_memory: bool,
     pub permissions_mode: String,
+    #[serde(skip_serializing, skip_deserializing, default = "current_dir_fallback")]
     pub working_dir: PathBuf,
     #[serde(default)]
     pub fallback_models: Vec<String>,
@@ -58,7 +58,7 @@ impl Default for AppConfig {
             auto_compact: true,
             graph_memory: true,
             permissions_mode: "interactive".into(),
-            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            working_dir: current_dir_fallback(),
             fallback_models: Vec::new(),
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
@@ -82,7 +82,9 @@ pub struct HookEntry {
     pub command: String,
 }
 
-// ─── Config directories ────────────────────────────────────────────────────
+fn current_dir_fallback() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
 
 /// ~/.abstract/
 pub fn global_config_dir() -> PathBuf {
@@ -91,11 +93,13 @@ pub fn global_config_dir() -> PathBuf {
         .join(".abstract")
 }
 
+fn project_config_dir_in(start_dir: &Path) -> PathBuf {
+    start_dir.join(".abstract")
+}
+
 /// .abstract/ in the current project
 pub fn project_config_dir() -> PathBuf {
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".abstract")
+    project_config_dir_in(&current_dir_fallback())
 }
 
 /// ~/.abstract/config.toml
@@ -103,9 +107,14 @@ pub fn global_config_path() -> PathBuf {
     global_config_dir().join("config.toml")
 }
 
-/// .abstract/config.toml
+/// .abstract/config.toml in the given project
+pub fn legacy_project_config_path(start_dir: &Path) -> PathBuf {
+    project_config_dir_in(start_dir).join("config.toml")
+}
+
+/// ~/.abstract/config_{project}.yaml
 pub fn project_config_path() -> PathBuf {
-    project_config_dir().join("config.toml")
+    global_config_dir().join(format!("config_{}.yaml", permissions_project_name()))
 }
 
 /// ~/.abstract/history
@@ -130,8 +139,7 @@ fn permissions_project_name() -> String {
         return project_name;
     }
 
-    let start_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    derive_permissions_project_name(&start_dir, None)
+    derive_permissions_project_name(&current_dir_fallback(), None)
 }
 
 fn derive_permissions_project_name(start_dir: &Path, explicit_name: Option<&str>) -> String {
@@ -226,27 +234,44 @@ pub fn permissions_path() -> PathBuf {
     global_config_dir().join(format!("permissions_{project_name}.yaml"))
 }
 
-// ─── Loading ───────────────────────────────────────────────────────────────
+/// Load config for a specific project root.
+pub fn load_for_dir(start_dir: &Path) -> AppConfig {
+    let global_path = global_config_path();
+    let legacy_project_path = legacy_project_config_path(start_dir);
+    let scoped_project_path = project_config_path();
 
-/// Load config with layered merging.
-pub fn load() -> AppConfig {
+    load_from_paths(
+        &[
+            global_path.as_path(),
+            legacy_project_path.as_path(),
+            scoped_project_path.as_path(),
+        ],
+        true,
+    )
+}
+
+fn load_from_paths(paths: &[&Path], apply_env_overrides: bool) -> AppConfig {
     let mut config = AppConfig::default();
 
-    // Layer 2: global config
-    if let Some(loaded) = load_toml_file(&global_config_path()) {
-        merge(&mut config, loaded);
+    for path in paths {
+        if let Some(loaded) = load_config_file(path) {
+            merge(&mut config, loaded);
+        }
     }
 
-    // Layer 3: project config
-    if let Some(loaded) = load_toml_file(&project_config_path()) {
-        merge(&mut config, loaded);
+    if apply_env_overrides {
+        apply_env(&mut config);
     }
-
-    // Layer 4: environment variables
-    apply_env(&mut config);
     apply_derived_values(&mut config);
-
     config
+}
+
+fn load_config_file(path: &Path) -> Option<AppConfig> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("toml") => load_toml_file(path),
+        Some("yaml") | Some("yml") => load_yaml_file(path),
+        _ => None,
+    }
 }
 
 fn load_toml_file(path: &Path) -> Option<AppConfig> {
@@ -254,8 +279,12 @@ fn load_toml_file(path: &Path) -> Option<AppConfig> {
     toml::from_str(&content).ok()
 }
 
+fn load_yaml_file(path: &Path) -> Option<AppConfig> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_saphyr::from_str(&content).ok()
+}
+
 fn merge(base: &mut AppConfig, overlay: AppConfig) {
-    // Only override non-default values
     if overlay.model != AppConfig::default().model {
         base.model = overlay.model;
     }
@@ -332,14 +361,28 @@ fn apply_env(config: &mut AppConfig) {
     }
 }
 
-/// Save config to a TOML file.
+fn storage_value(config: &AppConfig) -> anyhow::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(config)?;
+    if let Some(map) = value.as_object_mut() {
+        map.remove("working_dir");
+    }
+    Ok(value)
+}
+
+/// Save config to a TOML or YAML file based on its extension.
 pub fn save_to(config: &AppConfig, path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let mut config = config.clone();
     apply_derived_values(&mut config);
-    let content = toml::to_string_pretty(&config)?;
+    let value = storage_value(&config)?;
+    let content = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("toml") => toml::to_string_pretty(&value)?,
+        Some("yaml") | Some("yml") => serde_saphyr::to_string(&value)?,
+        Some(other) => anyhow::bail!("Unsupported config format: {other}"),
+        None => anyhow::bail!("Config path must include a file extension"),
+    };
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -410,5 +453,105 @@ mod tests {
         set_effort_budget(&mut config, 12000);
         assert_eq!(config.effort, 12000);
         assert_eq!(config.max_tokens, 48000);
+    }
+
+    #[test]
+    fn load_from_paths_merges_legacy_and_scoped_configs_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = tmp.path().join("global.toml");
+        let project = tmp.path().join("project.toml");
+        let scoped = tmp.path().join("scoped.yaml");
+
+        std::fs::write(
+            &global,
+            r#"
+model = "global-model"
+theme = "light"
+max_turns = 11
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            r#"
+model = "project-model"
+provider = "anthropic"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &scoped,
+            r#"
+model: scoped-model
+fallback_models:
+  - google/gemini-3-flash-preview
+"#,
+        )
+        .unwrap();
+
+        let config = load_from_paths(
+            &[global.as_path(), project.as_path(), scoped.as_path()],
+            false,
+        );
+
+        assert_eq!(config.model, "scoped-model");
+        assert_eq!(config.theme, "light");
+        assert_eq!(config.provider, "anthropic");
+        assert_eq!(
+            config.fallback_models,
+            vec!["google/gemini-3-flash-preview".to_string()]
+        );
+        assert_eq!(config.max_turns, 11);
+    }
+
+    #[test]
+    fn load_from_paths_ignores_persisted_working_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+model = "override"
+working_dir = "/definitely/not/the/runtime/workdir"
+"#,
+        )
+        .unwrap();
+
+        let config = load_from_paths(&[path.as_path()], false);
+        assert_eq!(config.model, "override");
+        assert_ne!(
+            config.working_dir,
+            PathBuf::from("/definitely/not/the/runtime/workdir")
+        );
+    }
+
+    #[test]
+    fn save_to_yaml_omits_working_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.yaml");
+        let mut config = AppConfig::default();
+        config.working_dir = PathBuf::from("/tmp/private-workdir");
+
+        save_to(&config, &path).unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(!content.contains("working_dir"));
+        assert!(content.contains("model: gpt-5.4"));
+    }
+
+    #[test]
+    fn save_to_toml_omits_working_dir_and_keeps_toml_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut config = AppConfig::default();
+        config.working_dir = PathBuf::from("/tmp/private-workdir");
+
+        save_to(&config, &path).unwrap();
+
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(!content.contains("working_dir"));
+        assert!(content.contains("model = \"gpt-5.4\""));
+        assert!(content.contains("effort = 4096"));
     }
 }

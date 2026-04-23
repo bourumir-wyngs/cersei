@@ -449,7 +449,11 @@ pub async fn run_repl(
 
                         // Remove trailing assistant message with orphaned ToolUse blocks
                         // (no matching ToolResult was added before cancellation)
-                        if msgs.last().map(|m| m.role == Role::Assistant && m.has_tool_use()).unwrap_or(false) {
+                        if msgs
+                            .last()
+                            .map(|m| m.role == Role::Assistant && m.has_tool_use())
+                            .unwrap_or(false)
+                        {
                             msgs.pop();
                         }
 

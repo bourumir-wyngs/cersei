@@ -161,7 +161,6 @@ impl Tool for XGrepTool {
                     .into_iter()
                     .map(|line| format_output_line(&searched.file.path, line)),
                 );
-                match_count += remaining;
                 truncated = true;
                 break;
             }

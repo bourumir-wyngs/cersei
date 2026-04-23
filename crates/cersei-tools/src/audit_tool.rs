@@ -876,7 +876,7 @@ fn discover_packages(
     // Parse each lockfile
     let mut sources: Vec<DiscoveredSource> = Vec::new();
 
-    for (path, eco) in found {
+    for (path, _eco) in found {
         let rel = path
             .strip_prefix(base)
             .map(|p| p.to_string_lossy().into_owned())

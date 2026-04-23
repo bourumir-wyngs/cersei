@@ -292,7 +292,6 @@ impl PermissionPolicy for CliPermissionPolicy {
         let requested_network = requested_network_access(request);
         let request_uses_network = requested_network != NetworkAccess::Blocked;
         let session_scope = Self::session_scope_for_request(request);
-
         if let Some(rule) = match_persisted_rule_for_request_in(
             &persisted,
             &request.tool_name,

@@ -15,7 +15,6 @@ mod model;
 mod resume;
 mod review;
 mod rollback;
-mod save;
 
 use crate::config::AppConfig;
 

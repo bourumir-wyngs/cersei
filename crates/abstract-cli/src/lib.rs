@@ -21,6 +21,7 @@ mod theme;
 mod tools_config;
 
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
@@ -167,8 +168,9 @@ pub enum McpAction {
 
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let startup_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    config::initialize_permissions_project_name(&startup_dir, cli.project.as_deref());
+    let startup_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project_dir = resolve_project_dir(&startup_dir, cli.directory.as_deref());
+    config::initialize_permissions_project_name(&project_dir, cli.project.as_deref());
 
     if cli.verbose {
         tracing_subscriber::fmt()
@@ -180,8 +182,8 @@ pub async fn run() -> anyhow::Result<()> {
             .init();
     }
 
-    let mut config = config::load();
-    apply_cli_overrides(&cli, &mut config);
+    let mut config = config::load_for_dir(&project_dir);
+    apply_cli_overrides(&cli, &mut config, &project_dir);
 
     match &cli.command {
         Some(Commands::Init) => init::run()?,
@@ -200,7 +202,7 @@ pub async fn run() -> anyhow::Result<()> {
         },
         Some(Commands::Config { action }) => match action {
             ConfigAction::Show => {
-                println!("{}", toml::to_string_pretty(&config)?);
+                println!("{}", serde_saphyr::to_string(&config)?);
             }
             ConfigAction::Set { key, value } => {
                 config_set(&mut config, key, value)?;
@@ -261,7 +263,22 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn apply_cli_overrides(cli: &Cli, config: &mut config::AppConfig) {
+fn resolve_project_dir(startup_dir: &Path, cli_directory: Option<&str>) -> PathBuf {
+    match cli_directory {
+        Some(dir) => {
+            let path = PathBuf::from(dir);
+            if path.is_absolute() {
+                path
+            } else {
+                startup_dir.join(path)
+            }
+        }
+        None => startup_dir.to_path_buf(),
+    }
+}
+
+fn apply_cli_overrides(cli: &Cli, config: &mut config::AppConfig, project_dir: &Path) {
+    config.working_dir = project_dir.to_path_buf();
     if let Some(m) = &cli.model {
         config.model = resolve_model_alias(m);
     }
@@ -279,9 +296,6 @@ fn apply_cli_overrides(cli: &Cli, config: &mut config::AppConfig) {
     }
     if cli.no_permissions {
         config.permissions_mode = "allow_all".into();
-    }
-    if let Some(dir) = &cli.directory {
-        config.working_dir = std::path::PathBuf::from(dir);
     }
 }
 
@@ -316,4 +330,36 @@ fn config_set(config: &mut config::AppConfig, key: &str, value: &str) -> anyhow:
         _ => anyhow::bail!("Unknown config key: {key}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_project_dir_uses_startup_dir_when_override_is_missing() {
+        let startup_dir = Path::new("/tmp/start");
+        assert_eq!(
+            resolve_project_dir(startup_dir, None),
+            PathBuf::from("/tmp/start")
+        );
+    }
+
+    #[test]
+    fn resolve_project_dir_resolves_relative_override_from_startup_dir() {
+        let startup_dir = Path::new("/tmp/start");
+        assert_eq!(
+            resolve_project_dir(startup_dir, Some("nested/project")),
+            PathBuf::from("/tmp/start/nested/project")
+        );
+    }
+
+    #[test]
+    fn resolve_project_dir_preserves_absolute_override() {
+        let startup_dir = Path::new("/tmp/start");
+        assert_eq!(
+            resolve_project_dir(startup_dir, Some("/srv/repo")),
+            PathBuf::from("/srv/repo")
+        );
+    }
 }
