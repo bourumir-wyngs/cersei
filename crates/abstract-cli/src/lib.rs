@@ -184,6 +184,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut config = config::load_for_dir(&project_dir);
     apply_cli_overrides(&cli, &mut config, &project_dir);
+    config::ensure_project_config_exists(&project_dir)?;
 
     match &cli.command {
         Some(Commands::Init) => init::run()?,

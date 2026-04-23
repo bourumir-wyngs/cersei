@@ -250,6 +250,26 @@ pub fn load_for_dir(start_dir: &Path) -> AppConfig {
     )
 }
 
+pub fn ensure_project_config_exists(start_dir: &Path) -> anyhow::Result<()> {
+    let path = project_config_path();
+    if path.exists() {
+        return Ok(());
+    }
+
+    let global_path = global_config_path();
+    let legacy_project_path = legacy_project_config_path(start_dir);
+    let config = load_from_paths(
+        &[
+            global_path.as_path(),
+            legacy_project_path.as_path(),
+            path.as_path(),
+        ],
+        false,
+    );
+
+    save_to(&config, &path)
+}
+
 fn load_from_paths(paths: &[&Path], apply_env_overrides: bool) -> AppConfig {
     let mut config = AppConfig::default();
 
@@ -553,5 +573,46 @@ working_dir = "/definitely/not/the/runtime/workdir"
         assert!(!content.contains("working_dir"));
         assert!(content.contains("model = \"gpt-5.4\""));
         assert!(content.contains("effort = 4096"));
+    }
+
+    #[test]
+    fn ensure_project_config_exists_creates_scoped_yaml_from_merged_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(".abstract")).unwrap();
+
+        let global_dir = home.join(".abstract");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::write(
+            global_dir.join("config.toml"),
+            "model = \"global-model\"\npermissions_mode = \"accept-edits\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".abstract").join("config.toml"),
+            "theme = \"light\"\n",
+        )
+        .unwrap();
+
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        initialize_permissions_project_name(&project, None);
+
+        ensure_project_config_exists(&project).unwrap();
+
+        let scoped = global_config_dir().join("config_project.yaml");
+        assert!(scoped.exists());
+        let content = std::fs::read_to_string(scoped).unwrap();
+        assert!(content.contains("model: global-model"));
+        assert!(content.contains("theme: light"));
+        assert!(content.contains("permissions_mode: accept-edits"));
+        assert!(!content.contains("working_dir"));
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }
