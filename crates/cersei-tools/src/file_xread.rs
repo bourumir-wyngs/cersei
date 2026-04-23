@@ -1,14 +1,15 @@
 //! Read tool: session-scoped tagged file reads backed by XFileStorage.
 
 use super::*;
-use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, xfile_session_id, XFile, XLine};
 use crate::pdf_tool::is_pdf_path;
+use crate::xfile_storage::{ensure_loaded, resolve_xfile_path, xfile_session_id, XFile, XLine};
 use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
 
 static READ_COUNTER_REGISTRY: once_cell::sync::Lazy<dashmap::DashMap<String, usize>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
+const DEFAULT_READ_LIMIT: usize = 100;
 
 pub fn clear_read_counters(session_id: &str) {
     READ_COUNTER_REGISTRY.remove(session_id);
@@ -45,10 +46,10 @@ pub struct XReadRequest {
     pub before: Option<usize>,
     #[serde(default)]
     pub after: Option<usize>,
-    #[serde(default)]
-    pub length: Option<usize>,
+    #[serde(default, alias = "length")]
+    pub limit: Option<usize>,
     /// Optional Rust `regex` pattern. When set and non-empty, Read first selects
-    /// lines using the normal range/windowing rules (ignoring `length`), then
+    /// lines using the normal range/windowing rules (ignoring `limit`), then
     /// filters the selection to matching lines plus `before`/`after` context.
     #[serde(default)]
     pub search: Option<String>,
@@ -64,7 +65,7 @@ impl Tool for XReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read the latest revision of a file. Use this to examine specific sections of code or retrieve line tags for editing. For reading multiple files, use MultiRead for better efficiency."
+        "Read the latest revision of a file. Open-ended reads return up to 100 lines by default. Use this to examine specific sections of code or retrieve line tags for editing. For reading multiple files, use MultiRead for better efficiency."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -101,14 +102,14 @@ impl Tool for XReadTool {
                     "minimum": 0,
                     "description": "Optional number of additional lines to include after `end_tag`, or after `start_tag` when `end_tag` is omitted."
                 },
-                "length": {
+                "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional absolute limit on the number of lines to return. The read starts at the calculated position (based on start_tag/before and end_tag/after) and stops when this many lines have been returned."
+                    "description": "Optional maximum number of lines to return. Defaults to 100 when `end_tag` is not set. Ignored when `end_tag` is set."
                 },
                 "search": {
                     "type": "string",
-                    "description": "Optional Rust `regex` pattern. If set and non-empty, Read will first compute the normal selection (ignoring `length`), then include only matching lines plus `before`/`after` context, separating match groups with `---------------`. Finally, `length` is applied to the resulting output."
+                    "description": "Optional Rust `regex` pattern. If set and non-empty, Read will first compute the normal selection (ignoring `limit`), then include only matching lines plus `before`/`after` context, separating match groups with `---------------`. Finally, `limit` is applied to the resulting output unless `end_tag` is set."
                 }
             },
             "required": ["file_path"]
@@ -127,10 +128,12 @@ impl Tool for XReadTool {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty());
+        let effective_limit = if req.end_tag.is_some() {
+            None
+        } else {
+            Some(req.limit.unwrap_or(DEFAULT_READ_LIMIT))
+        };
 
-        if search.is_none() && req.end_tag.is_some() && req.length.is_some() {
-            return ToolResult::error("Read accepts either `end_tag` or `length`, not both.");
-        }
         let path = resolve_xfile_path(ctx, &req.file_path);
         if is_pdf_path(&path) {
             return ToolResult::error("Use PdfRead tool to read this format");
@@ -162,7 +165,11 @@ impl Tool for XReadTool {
             req.end_tag.as_deref(),
             before,
             after,
-            if search.is_some() { None } else { req.length },
+            if search.is_some() {
+                None
+            } else {
+                effective_limit
+            },
         ) {
             Ok(lines) => lines,
             Err(err) => return ToolResult::error(err),
@@ -184,9 +191,15 @@ impl Tool for XReadTool {
             if output_lines.is_empty() {
                 ("No matches found.".to_string(), 0)
             } else {
-                if let Some(limit) = req.length {
+                let mut limit_note = None;
+                if let Some(limit) = effective_limit {
                     if output_lines.len() > limit {
+                        let truncated = output_lines.len() - limit;
                         output_lines.truncate(limit);
+                        limit_note = Some(format!(
+                            "Output truncated by {} line(s). Set `limit` field to return more lines if needed.",
+                            truncated
+                        ));
                     }
                 }
 
@@ -195,7 +208,12 @@ impl Tool for XReadTool {
                     .filter(|line| matches!(line, ReadOutputLine::Content(_)))
                     .count();
 
-                (render_output_lines(&output_lines), selected_count)
+                let mut content = render_output_lines(&output_lines);
+                if let Some(note) = limit_note {
+                    content.push_str("\n\n");
+                    content.push_str(&note);
+                }
+                (content, selected_count)
             }
         } else {
             let mut content = render_xlines(&selected.lines);
@@ -204,7 +222,7 @@ impl Tool for XReadTool {
                     content.push_str("\n\n");
                 }
                 content.push_str(&format!(
-                    "File truncated, {} lines remaining, next line tag {}",
+                    "File truncated, {} lines remaining, next line tag {}. Set `limit` field to return more lines if needed.",
                     selected.remaining_lines, next_tag
                 ));
             }
@@ -214,7 +232,9 @@ impl Tool for XReadTool {
         let mut final_content = content;
         if !req.suppress_nudge.unwrap_or(false) {
             let read_count = {
-                let mut entry = READ_COUNTER_REGISTRY.entry(ctx.session_id.clone()).or_insert(0);
+                let mut entry = READ_COUNTER_REGISTRY
+                    .entry(ctx.session_id.clone())
+                    .or_insert(0);
                 *entry += 1;
                 *entry
             };
@@ -278,7 +298,7 @@ fn select_lines<'a>(
     end_tag: Option<&str>,
     before: Option<usize>,
     after: Option<usize>,
-    length: Option<usize>,
+    limit: Option<usize>,
 ) -> std::result::Result<ReadSelection<'a>, String> {
     if file.content.is_empty() {
         if let Some(start_tag) = start_tag {
@@ -353,8 +373,8 @@ fn select_lines<'a>(
     };
 
     let range_len = range_end - range_start + 1;
-    let actual_len = if let Some(length) = length {
-        range_len.min(length)
+    let actual_len = if let Some(limit) = limit {
+        range_len.min(limit)
     } else {
         range_len
     };
@@ -443,7 +463,7 @@ mod tests {
         assert_eq!(schema["properties"]["end_tag"]["type"], "string");
         assert_eq!(schema["properties"]["before"]["minimum"], 0);
         assert_eq!(schema["properties"]["after"]["minimum"], 0);
-        assert_eq!(schema["properties"]["length"]["minimum"], 1);
+        assert_eq!(schema["properties"]["limit"]["minimum"], 1);
     }
 
     #[test]
@@ -503,7 +523,6 @@ mod tests {
         assert!(result.is_error);
         assert_eq!(result.content, "Use PdfRead tool to read this format");
     }
-
 
     #[tokio::test]
     async fn xread_search_filters_lines_without_requiring_start_tag() {
@@ -572,7 +591,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xread_search_applies_length_to_final_output() {
+    async fn xread_search_applies_limit_to_final_output() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-search-limit-{}", Uuid::new_v4());
         clear_session_xfile_storage(&session_id);
@@ -591,19 +610,23 @@ mod tests {
                     "search": "foo",
                     "before": 1,
                     "after": 1,
-                    "length": 2
+                    "limit": 2
                 }),
                 &test_ctx(tmp.path(), &session_id),
             )
             .await;
 
         assert!(!result.is_error, "{}", result.content);
-        assert_eq!(result.content.lines().count(), 2);
+        assert!(result.content.contains("\tzero"));
+        assert!(result.content.contains("\tfoo one"));
+        assert!(result
+            .content
+            .contains("Set `limit` field to return more lines if needed."));
         assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 2);
     }
 
     #[tokio::test]
-    async fn xread_search_allows_end_tag_and_length_together() {
+    async fn xread_search_ignores_limit_when_end_tag_is_set() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-search-range-{}", Uuid::new_v4());
         clear_session_xfile_storage(&session_id);
@@ -622,7 +645,7 @@ mod tests {
                     "start_tag": head.file.content[0].tag,
                     "end_tag": head.file.content[3].tag,
                     "search": "foo|bar",
-                    "length": 3
+                    "limit": 1
                 }),
                 &test_ctx(tmp.path(), &session_id),
             )
@@ -875,7 +898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xread_length_without_start_tag_reads_from_beginning_of_file() {
+    async fn xread_limit_without_start_tag_reads_from_beginning_of_file() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-test-{}", Uuid::new_v4());
         clear_session_xfile_storage(&session_id);
@@ -891,7 +914,7 @@ mod tests {
             .execute(
                 serde_json::json!({
                     "file_path": path.display().to_string(),
-                    "length": 2
+                    "limit": 2
                 }),
                 &test_ctx(tmp.path(), &session_id),
             )
@@ -902,7 +925,7 @@ mod tests {
         assert!(result.content.contains("\ttwo"));
         assert!(!result.content.contains("\tthree"));
         assert!(result.content.contains(&format!(
-            "File truncated, 2 lines remaining, next line tag {}",
+            "File truncated, 2 lines remaining, next line tag {}. Set `limit` field to return more lines if needed.",
             head.file.content[2].tag
         )));
         assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 2);
@@ -939,12 +962,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xread_rejects_end_tag_and_length_together() {
+    async fn xread_ignores_limit_when_end_tag_is_set() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-test-{}", Uuid::new_v4());
         clear_session_xfile_storage(&session_id);
         let path = tmp.path().join("range.txt");
-        let head = store_written_text(&session_id, &path, "one\ntwo\n");
+        let head = store_written_text(&session_id, &path, "one\ntwo\nthree\n");
         tokio::fs::write(&path, &head.rendered_content)
             .await
             .unwrap();
@@ -955,18 +978,18 @@ mod tests {
                 serde_json::json!({
                     "file_path": path.display().to_string(),
                     "start_tag": head.file.content[0].tag,
-                    "end_tag": head.file.content[1].tag,
-                    "length": 1
+                    "end_tag": head.file.content[2].tag,
+                    "limit": 1
                 }),
                 &test_ctx(tmp.path(), &session_id),
             )
             .await;
 
-        assert!(result.is_error);
-        assert_eq!(
-            result.content,
-            "Read accepts either `end_tag` or `length`, not both."
-        );
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("\tone"));
+        assert!(result.content.contains("\ttwo"));
+        assert!(result.content.contains("\tthree"));
+        assert!(!result.content.contains("File truncated,"));
     }
 
     #[tokio::test]
@@ -1163,7 +1186,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xread_with_length_limit() {
+    async fn xread_with_explicit_limit() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-test-{}", Uuid::new_v4());
         clear_session_xfile_storage(&session_id);
@@ -1181,7 +1204,7 @@ mod tests {
                     "start_tag": head.file.content[0].tag,
                     "before": 1,
                     "after": 2,
-                    "length": 3
+                    "limit": 3
                 }),
                 &test_ctx(tmp.path(), &session_id),
             )
@@ -1197,7 +1220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn xread_reports_next_tag_when_length_truncates_output() {
+    async fn xread_reports_next_tag_when_limit_truncates_output() {
         let tmp = tempfile::tempdir().unwrap();
         let session_id = format!("xread-test-{}", Uuid::new_v4());
         clear_session_xfile_storage(&session_id);
@@ -1213,7 +1236,7 @@ mod tests {
                 serde_json::json!({
                     "file_path": path.display().to_string(),
                     "start_tag": head.file.content[1].tag,
-                    "length": 2
+                    "limit": 2
                 }),
                 &test_ctx(tmp.path(), &session_id),
             )
@@ -1224,10 +1247,89 @@ mod tests {
         assert!(result.content.contains("\tthree"));
         assert!(!result.content.contains("\tfour"));
         assert!(result.content.contains(&format!(
-            "File truncated, 2 lines remaining, next line tag {}",
+            "File truncated, 2 lines remaining, next line tag {}. Set `limit` field to return more lines if needed.",
             head.file.content[3].tag
         )));
         assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn xread_defaults_to_100_lines_for_open_ended_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-default-limit-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+        let path = tmp.path().join("long.txt");
+        let mut lines = String::new();
+        for idx in 0..105 {
+            lines.push_str(&format!("line {idx}\n"));
+        }
+        let head = store_written_text(&session_id, &path, &lines);
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string()
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("\tline 0"));
+        assert!(result.content.contains("\tline 99"));
+        assert!(!result.content.contains("\tline 100"));
+        assert!(result.content.contains(&format!(
+            "File truncated, 5 lines remaining, next line tag {}. Set `limit` field to return more lines if needed.",
+            head.file.content[100].tag
+        )));
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 100);
+    }
+
+    #[tokio::test]
+    async fn xread_search_defaults_to_100_lines_when_not_bounded_by_end_tag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_id = format!("xread-search-default-limit-{}", Uuid::new_v4());
+        clear_session_xfile_storage(&session_id);
+
+        let path = tmp.path().join("search.txt");
+        let mut lines = String::new();
+        for idx in 0..105 {
+            lines.push_str(&format!("match {idx}\n"));
+        }
+        let head = store_written_text(&session_id, &path, &lines);
+        tokio::fs::write(&path, &head.rendered_content)
+            .await
+            .unwrap();
+
+        let tool = XReadTool;
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "file_path": path.display().to_string(),
+                    "search": "match"
+                }),
+                &test_ctx(tmp.path(), &session_id),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result
+            .content
+            .contains(&format!("\t{}", head.file.content[0].content)));
+        assert!(result
+            .content
+            .contains(&format!("\t{}", head.file.content[49].content)));
+        assert!(!result
+            .content
+            .contains(&format!("\t{}", head.file.content[50].content)));
+        assert!(result
+            .content
+            .contains("Set `limit` field to return more lines if needed."));
+        assert_eq!(result.metadata.as_ref().unwrap()["selected_count"], 50);
     }
 
     #[tokio::test]

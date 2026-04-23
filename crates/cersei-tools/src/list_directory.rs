@@ -3,8 +3,23 @@
 use super::*;
 use serde::Deserialize;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::Path;
 
 pub struct ListDirectoryTool;
+
+fn resolve_target_path(ctx: &ToolContext, path: Option<&str>) -> PathBuf {
+    match path {
+        Some(path) => {
+            let candidate = Path::new(path);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                ctx.working_dir.join(candidate)
+            }
+        }
+        None => ctx.working_dir.clone(),
+    }
+}
 
 #[async_trait]
 impl Tool for ListDirectoryTool {
@@ -71,10 +86,7 @@ impl Tool for ListDirectoryTool {
             None => None,
         };
 
-        let target = input
-            .path
-            .map(PathBuf::from)
-            .unwrap_or_else(|| ctx.working_dir.clone());
+        let target = resolve_target_path(ctx, input.path.as_deref());
 
         let target = match target.canonicalize() {
             Ok(p) => p,
@@ -180,6 +192,68 @@ fn format_entry(path: &std::path::Path, base: &std::path::Path) -> String {
 
             format!("{} {:>8}  {}  {}  {}", type_char, size, perms, owner, name)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::permissions::AllowAll;
+    use serde_json::json;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn test_ctx(root: &Path) -> ToolContext {
+        ToolContext {
+            working_dir: root.to_path_buf(),
+            session_id: "list-directory-test".into(),
+            permissions: Arc::new(AllowAll),
+            cost_tracker: Arc::new(CostTracker::new()),
+            mcp_manager: None,
+            extensions: Extensions::default(),
+            network_policy: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn relative_paths_resolve_from_tool_working_dir() {
+        let workspace = tempfile::tempdir().unwrap();
+        let nested = workspace.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("inside.txt"), "ok").unwrap();
+
+        let tool = ListDirectoryTool;
+        let result = tool
+            .execute(json!({ "path": "nested" }), &test_ctx(workspace.path()))
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result
+            .content
+            .starts_with(&format!("{}:\n", nested.display())));
+        assert!(result.content.contains("inside.txt"));
+    }
+
+    #[tokio::test]
+    async fn absolute_paths_within_workspace_are_listed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let nested = workspace.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("inside.txt"), "ok").unwrap();
+
+        let tool = ListDirectoryTool;
+        let result = tool
+            .execute(
+                json!({ "path": nested.display().to_string() }),
+                &test_ctx(workspace.path()),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result
+            .content
+            .starts_with(&format!("{}:\n", nested.display())));
+        assert!(result.content.contains("inside.txt"));
     }
 }
 

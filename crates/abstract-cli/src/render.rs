@@ -54,15 +54,21 @@ impl ConsoleReviewRenderer {
             Print("  [Reviewer]"),
             ResetColor,
             SetForegroundColor(self.theme.dim),
-            Print(format!(" {} {} checkpoint diff", reviewer_model, session_id)),
+            Print(format!(
+                " {} {} checkpoint diff",
+                reviewer_model, session_id
+            )),
             ResetColor,
             Print("\n"),
         );
 
-        print_tool_body_static(&self.theme, &ToolConsoleBody {
-            text: diff.to_string(),
-            kind: ToolConsoleBodyKind::Diff,
-        });
+        print_tool_body_static(
+            &self.theme,
+            &ToolConsoleBody {
+                text: diff.to_string(),
+                kind: ToolConsoleBodyKind::Diff,
+            },
+        );
         let _ = execute!(io::stderr(), Print("\n"));
     }
 }
@@ -307,7 +313,6 @@ impl StreamRenderer {
     fn print_tool_body(&self, body: &ToolConsoleBody) {
         print_tool_body_static(&self.theme, body);
     }
-
 }
 
 fn print_tool_body_static(theme: &Theme, body: &ToolConsoleBody) {
@@ -544,7 +549,10 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
     let end_tag = input.get("end_tag").and_then(|v| v.as_str());
     let before = input.get("before").and_then(|v| v.as_u64()).unwrap_or(0);
     let after = input.get("after").and_then(|v| v.as_u64()).unwrap_or(0);
-    let length = input.get("length").and_then(|v| v.as_u64());
+    let limit = input
+        .get("limit")
+        .or_else(|| input.get("length"))
+        .and_then(|v| v.as_u64());
     let search = input
         .get("search")
         .and_then(|v| v.as_str())
@@ -569,8 +577,8 @@ fn read_tool_summary(input: &serde_json::Value) -> String {
     if let Some(search) = search {
         summary.push_str(&format!(" search /{}/", truncate(search, 40)));
     }
-    if let Some(length) = length {
-        summary.push_str(&format!(" len {length}"));
+    if let Some(limit) = limit {
+        summary.push_str(&format!(" limit {limit}"));
     }
 
     summary
@@ -740,16 +748,16 @@ mod tests {
     }
 
     #[test]
-    fn read_summary_includes_length_for_tag_start() {
+    fn read_summary_includes_limit_for_tag_start() {
         let summary = tool_input_summary(
             "Read",
             &serde_json::json!({
                 "file_path": "src/main.rs",
                 "start_tag": "tag:4",
-                "length": 25
+                "limit": 25
             }),
         );
-        assert_eq!(summary, "src/main.rs tag:4 len 25");
+        assert_eq!(summary, "src/main.rs tag:4 limit 25");
     }
 
     #[test]
@@ -761,12 +769,12 @@ mod tests {
                 "search": "foo.*bar",
                 "before": 1,
                 "after": 2,
-                "length": 10
+                "limit": 10
             }),
         );
         assert_eq!(
             summary,
-            "src/main.rs EOF before=1 after=2 search /foo.*bar/ len 10"
+            "src/main.rs EOF before=1 after=2 search /foo.*bar/ limit 10"
         );
     }
 
@@ -778,10 +786,10 @@ mod tests {
                 "file_path": "src/main.rs",
                 "start_tag": "tag:4",
                 "search": "todo",
-                "length": 25
+                "limit": 25
             }),
         );
-        assert_eq!(summary, "src/main.rs tag:4 search /todo/ len 25");
+        assert_eq!(summary, "src/main.rs tag:4 search /todo/ limit 25");
     }
 
     #[test]
@@ -793,7 +801,7 @@ mod tests {
                     {
                         "file_path": "src/main.rs",
                         "start_tag": "tag:4",
-                        "length": 25
+                        "limit": 25
                     },
                     {
                         "file_path": "src/lib.rs",
@@ -806,7 +814,7 @@ mod tests {
         );
         assert_eq!(
             summary,
-            "src/main.rs tag:4 len 25\nsrc/lib.rs EOF before=1 after=2 search /todo/"
+            "src/main.rs tag:4 limit 25\nsrc/lib.rs EOF before=1 after=2 search /todo/"
         );
     }
 

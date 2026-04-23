@@ -32,7 +32,7 @@ cersei::tools::none()         // empty (pure chat, no tools)
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
-| `Read` | ReadOnly | Read files with line numbers, offset/limit support |
+| `Read` | ReadOnly | Read files with line numbers and limit support (defaults to 100 lines for open-ended reads) |
 | `Write` | Write | Create or overwrite files, auto-creates parent directories |
 | `Edit` | Write | Exact string replacement, uniqueness check, `replace_all` option |
 | `Sed` | Write | Run a real GNU `sed -E --sandbox` program against one file and write stdout back to that file |

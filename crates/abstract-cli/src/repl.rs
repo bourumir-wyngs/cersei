@@ -12,18 +12,18 @@ use crate::reviewer;
 use crate::signals::SignalHandle;
 use crate::status::StatusLine;
 use crate::theme::Theme;
-use cersei::Agent;
 use cersei::events::AgentEvent;
+use cersei::Agent;
 use cersei_memory::manager::MemoryManager;
 use cersei_memory::session_storage;
+use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_tools::Extensions;
 use cersei_tools::ReviewRequest;
-use cersei_tools::xfile_storage::load_session_xfile_storage_from_path;
 use cersei_types::{Message, Role};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use chrono::Local;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 // ─── Recovery prompt ───────────────────────────────────────────────────────
 
@@ -231,6 +231,9 @@ pub async fn run_repl(
                             Ok(_) => {
                                 exit_session_name = Some(name.clone());
                                 eprintln!("\x1b[33m  Session saved as '{}'\x1b[0m", name);
+                                if !json_mode {
+                                    print_handover_waiting_banner();
+                                }
                             }
                             Err(e) => eprintln!("\x1b[31m  Save failed: {e}\x1b[0m"),
                         }
@@ -283,6 +286,9 @@ pub async fn run_repl(
                                     &current_session_id,
                                     !json_mode,
                                 );
+                                if !json_mode {
+                                    print_handover_waiting_banner();
+                                }
                             }
                             Err(e) => eprintln!("\x1b[31m  Resume failed: {e}\x1b[0m"),
                         }
@@ -412,7 +418,6 @@ pub async fn run_repl(
             let result = run_agent_streaming(
                 &agent,
                 &prompt,
-                &prompt_str,
                 &mut renderer,
                 &mut status,
                 json_mode,
@@ -538,7 +543,7 @@ pub async fn run_single_shot(
 
     running.store(true, Ordering::Relaxed);
     let result =
-        run_agent_streaming(&agent, prompt, "", &mut renderer, &mut status, json_mode, true).await;
+        run_agent_streaming(&agent, prompt, &mut renderer, &mut status, json_mode, true).await;
     running.store(false, Ordering::Relaxed);
 
     match result {
@@ -550,10 +555,13 @@ pub async fn run_single_shot(
     }
 }
 
-fn print_handover_waiting_banner(prompt: &str) {
+fn format_handover_waiting_banner(timestamp: &str) -> String {
+    format!("\x1b[32m*************** {timestamp} ***************\x1b[0m")
+}
+
+fn print_handover_waiting_banner() {
     let timestamp = Local::now().format("%H:%M:%S");
-    eprintln!("\x1b[32m*************** {timestamp} ***************\x1b[0m");
-    eprintln!("{prompt}");
+    eprintln!("{}", format_handover_waiting_banner(&timestamp.to_string()));
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
@@ -562,7 +570,6 @@ fn print_handover_waiting_banner(prompt: &str) {
 async fn run_agent_streaming(
     agent: &Agent,
     prompt: &str,
-    input_prompt: &str,
     renderer: &mut StreamRenderer,
     status: &mut StatusLine,
     json_mode: bool,
@@ -618,7 +625,7 @@ async fn run_agent_streaming(
             }
             AgentEvent::SessionSaved { .. } => {
                 if !json_mode {
-                    print_handover_waiting_banner(input_prompt);
+                    print_handover_waiting_banner();
                 }
             }
             AgentEvent::CompactEnd {
@@ -676,5 +683,16 @@ fn parse_command(input: &str) -> (&str, &str) {
         (&input[..space], input[space..].trim())
     } else {
         (input, "")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_handover_waiting_banner;
+
+    #[test]
+    fn handover_waiting_banner_uses_star_separator() {
+        let banner = format_handover_waiting_banner("12:34:56");
+        assert!(banner.contains("*************** 12:34:56 ***************"));
     }
 }
