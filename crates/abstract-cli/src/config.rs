@@ -137,6 +137,7 @@ fn default_model_tools() -> Vec<String> {
         "AskUserQuestion".to_string(),
         "Config".to_string(),
         // Docker
+        "DockerCompose".to_string(),
         "DockerAssistant".to_string(),
         "DockerExec".to_string(),
         // Math/CAS

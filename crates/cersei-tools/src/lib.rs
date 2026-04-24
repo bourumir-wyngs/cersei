@@ -10,6 +10,7 @@ pub mod cargo_tool;
 pub mod cas;
 pub mod config_tool;
 pub mod cron;
+pub mod docker_compose_tool;
 pub mod docker_exec_tool;
 pub mod docker_tool;
 pub mod file_history;
@@ -487,6 +488,7 @@ pub fn all() -> Vec<Box<dyn Tool>> {
     // SyntheticOutput is intentionally excluded from the default set — it's for SDK/coordinator
     // sessions only. Add it explicitly via AgentBuilder::tool() when needed.
     tools.push(Box::new(config_tool::ConfigTool));
+    tools.push(Box::new(docker_compose_tool::DockerComposeTool));
     tools.push(Box::new(docker_tool::DockerAssistantTool));
     tools.push(Box::new(docker_exec_tool::DockerExecTool));
     #[cfg(feature = "cas")]

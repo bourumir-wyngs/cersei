@@ -1,6 +1,6 @@
 ---
 title: Tools (cersei-tools)
-description: Tool trait, 25 built-in tools, permission system, bash classifier, skill discovery.
+description: Tool trait, built-in tools, permission system, bash classifier, skill discovery.
 ---
 
 import { Callout } from 'fumadocs-ui/components/callout';
@@ -9,7 +9,7 @@ import { TypeTable } from 'fumadocs-ui/components/type-table';
 
 # cersei-tools
 
-Tool execution system with 25 consolidated built-in tools, a granular permission model, a bash command safety classifier, and skill discovery from Claude Code and OpenCode formats.
+Tool execution system with built-in tools, a granular permission model, a bash command safety classifier, and skill discovery from Claude Code and OpenCode formats.
 
 ---
 
@@ -135,6 +135,14 @@ Convenience functions that return pre-configured tool collections:
 | `Bash` | Execute | Execute bash commands. Persistent `cwd` and `env`. |
 | `PowerShell` | Execute | Windows PowerShell execution. |
 | `Process` | Execute | Low-level process management. |
+
+**Docker**
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `DockerCompose` | Execute | Run docker compose build, up, down, logs, ps, config, images, and diagnostics with optional custom compose command and environment overrides. |
+| `DockerAssistant` | ReadOnly | Inspect Docker containers, logs, images, networks, and volumes. |
+| `DockerExec` | Execute | Run mutating Docker actions such as `exec`, `start`, `stop`, and `restart` inside containers. |
 
 **Web**
 
