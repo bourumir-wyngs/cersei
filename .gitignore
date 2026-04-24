@@ -14,3 +14,5 @@ _inspirations
 /.run/
 /..run/
 /VOLAR.md
+data/matpower_network.xlsx
+data/TYNDP_mod_aggregated_CH_base_individual_DBs.xlsx
