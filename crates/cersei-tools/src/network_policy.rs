@@ -27,6 +27,23 @@ static FIREJAIL_AVAILABLE: Lazy<bool> = Lazy::new(|| {
         .unwrap_or(false)
 });
 
+static FIREJAIL_LOCAL_SANDBOX_AVAILABLE: Lazy<bool> = Lazy::new(|| {
+    if !*FIREJAIL_AVAILABLE {
+        return false;
+    }
+
+    std::process::Command::new("firejail")
+        .args(["--quiet", "--noprofile", "--net=sandbox", "--", "true"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+});
+
+const LOCAL_NETWORK_SANDBOX_UNAVAILABLE: &str =
+    "Local network sandbox unavailable: firejail requires a network device named \
+     'sandbox'. Create the bridge described in README.md or request full network \
+     access instead.";
+
 /// Returns `true` if firejail network sandboxing is available in this environment.
 pub fn sandbox_available() -> bool {
     *FIREJAIL_AVAILABLE
@@ -141,14 +158,16 @@ impl NetworkPolicy for Arc<dyn NetworkPolicy> {
 ///               (falls back to `sh -c` if firejail is unavailable)
 /// - `Blocked` → `firejail --quiet --noprofile --net=none -- sh -c <command>`
 ///               (falls back to `sh -c` if firejail is unavailable)
-pub fn shell_command(command: &str, access: NetworkAccess) -> Command {
+pub fn shell_command(command: &str, access: NetworkAccess) -> Result<Command, String> {
+    ensure_access_supported(access)?;
+
     if access == NetworkAccess::Full || !*FIREJAIL_AVAILABLE {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", command]);
-        return cmd;
+        return Ok(cmd);
     }
 
-    firejail_shell_command(command, access, &[])
+    Ok(firejail_shell_command(command, access, &[]))
 }
 
 /// Build a shell command under Firejail when available, plus additional
@@ -160,14 +179,40 @@ pub fn firejailed_shell_command_with_extra_firejail_args(
     command: &str,
     access: NetworkAccess,
     extra_firejail_args: &[OsString],
-) -> Command {
+) -> Result<Command, String> {
+    ensure_access_supported(access)?;
+
     if !*FIREJAIL_AVAILABLE {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", command]);
-        return cmd;
+        return Ok(cmd);
     }
 
-    firejail_shell_command(command, access, extra_firejail_args)
+    Ok(firejail_shell_command(command, access, extra_firejail_args))
+}
+
+fn ensure_access_supported(access: NetworkAccess) -> Result<(), String> {
+    match unsupported_access_message(
+        access,
+        *FIREJAIL_AVAILABLE,
+        *FIREJAIL_LOCAL_SANDBOX_AVAILABLE,
+    ) {
+        Some(message) => Err(message.to_string()),
+        None => Ok(()),
+    }
+}
+
+fn unsupported_access_message(
+    access: NetworkAccess,
+    firejail_available: bool,
+    local_sandbox_available: bool,
+) -> Option<&'static str> {
+    match access {
+        NetworkAccess::Local if firejail_available && !local_sandbox_available => {
+            Some(LOCAL_NETWORK_SANDBOX_UNAVAILABLE)
+        }
+        NetworkAccess::Full | NetworkAccess::Blocked | NetworkAccess::Local => None,
+    }
 }
 
 fn firejail_shell_command(
@@ -195,7 +240,10 @@ fn firejail_shell_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{NetworkAccess, NetworkAllow, NetworkDecision, NetworkDeny, NetworkPolicy};
+    use super::{
+        unsupported_access_message, NetworkAccess, NetworkAllow, NetworkDecision, NetworkDeny,
+        NetworkPolicy, LOCAL_NETWORK_SANDBOX_UNAVAILABLE,
+    };
 
     #[test]
     fn missing_network_defaults_to_full() {
@@ -216,6 +264,22 @@ mod tests {
         assert_eq!(
             NetworkAccess::from_input(Some("none")),
             NetworkAccess::Blocked
+        );
+    }
+
+    #[test]
+    fn local_network_needs_sandbox_bridge_when_firejail_is_available() {
+        assert_eq!(
+            unsupported_access_message(NetworkAccess::Local, true, false),
+            Some(LOCAL_NETWORK_SANDBOX_UNAVAILABLE)
+        );
+    }
+
+    #[test]
+    fn local_network_is_allowed_when_firejail_is_unavailable() {
+        assert_eq!(
+            unsupported_access_message(NetworkAccess::Local, false, false),
+            None
         );
     }
 

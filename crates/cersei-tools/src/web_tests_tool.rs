@@ -161,11 +161,14 @@ impl Tool for WebTestsTool {
         let timeout_ms = input.timeout.unwrap_or(120_000).min(600_000);
         let firejail_args =
             home_entries_and_workspace_firejail_args(&workspace_root, &[".npm", ".npmrc", ".nvm"]);
-        let mut cmd = firejailed_shell_command_with_extra_firejail_args(
+        let mut cmd = match firejailed_shell_command_with_extra_firejail_args(
             &command,
             NetworkAccess::Blocked,
             &firejail_args,
-        );
+        ) {
+            Ok(cmd) => cmd,
+            Err(err) => return ToolResult::error(err),
+        };
         cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

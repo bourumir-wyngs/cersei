@@ -164,7 +164,10 @@ impl Tool for BashTool {
             None => requested,
         };
 
-        let mut cmd = shell_command(&input.command, access);
+        let mut cmd = match shell_command(&input.command, access) {
+            Ok(cmd) => cmd,
+            Err(err) => return ToolResult::error(err),
+        };
         cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

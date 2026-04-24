@@ -102,8 +102,14 @@ impl Tool for CargoTool {
 
         let firejail_args =
             home_entries_and_workspace_firejail_args(&workspace_root, &[".cargo", ".rustup"]);
-        let mut cmd =
-            firejailed_shell_command_with_extra_firejail_args(&command, access, &firejail_args);
+        let mut cmd = match firejailed_shell_command_with_extra_firejail_args(
+            &command,
+            access,
+            &firejail_args,
+        ) {
+            Ok(cmd) => cmd,
+            Err(err) => return ToolResult::error(err),
+        };
         cmd.current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

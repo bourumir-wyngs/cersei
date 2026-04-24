@@ -247,7 +247,10 @@ async fn start_process(
         None => requested,
     };
 
-    let mut cmd = shell_command(command, access);
+    let mut cmd = match shell_command(command, access) {
+        Ok(cmd) => cmd,
+        Err(err) => return ToolResult::error(err),
+    };
     cmd.current_dir(&cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

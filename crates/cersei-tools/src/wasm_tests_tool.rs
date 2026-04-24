@@ -305,8 +305,14 @@ async fn execute_shell_command(
     firejail_args: &[std::ffi::OsString],
     timeout_ms: u64,
 ) -> ToolResult {
-    let mut cmd =
-        firejailed_shell_command_with_extra_firejail_args(command, network_access, firejail_args);
+    let mut cmd = match firejailed_shell_command_with_extra_firejail_args(
+        command,
+        network_access,
+        firejail_args,
+    ) {
+        Ok(cmd) => cmd,
+        Err(err) => return ToolResult::error(err),
+    };
     cmd.current_dir(current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
