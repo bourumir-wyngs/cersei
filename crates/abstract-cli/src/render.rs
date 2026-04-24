@@ -4,6 +4,7 @@ use crate::theme::Theme;
 use crossterm::execute;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use std::io::{self, Write};
+use std::path::Path;
 use std::time::Duration;
 
 pub struct StreamRenderer {
@@ -602,13 +603,12 @@ fn write_tool_summary(input: &serde_json::Value) -> String {
         .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let char_count = input
-        .get("content")
-        .and_then(|v| v.as_str())
-        .map(|content| content.chars().count())
-        .unwrap_or(0);
 
-    format!("{file_path} {char_count} chars")
+    Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file_path)
+        .to_string()
 }
 
 fn file_tool_summary(input: &serde_json::Value) -> String {
@@ -819,21 +819,21 @@ mod tests {
     }
 
     #[test]
-    fn write_summary_includes_char_count() {
+    fn write_summary_uses_filename_only() {
         let summary = tool_input_summary(
             "Write",
             &serde_json::json!({"file_path": "src/main.rs", "content": "hello"}),
         );
-        assert_eq!(summary, "src/main.rs 5 chars");
+        assert_eq!(summary, "main.rs");
     }
 
     #[test]
-    fn write_summary_counts_unicode_chars() {
+    fn write_summary_falls_back_to_bare_filename() {
         let summary = tool_input_summary(
             "Write",
-            &serde_json::json!({"file_path": "src/main.rs", "content": "aé🙂"}),
+            &serde_json::json!({"file_path": "README.md", "content": "aé🙂"}),
         );
-        assert_eq!(summary, "src/main.rs 3 chars");
+        assert_eq!(summary, "README.md");
     }
 
     #[test]
