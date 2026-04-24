@@ -98,6 +98,21 @@ pub struct Agent {
     tool_extensions: Extensions,
 }
 
+fn duplicate_tool_names(tools: &[Box<dyn Tool>]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut duplicates = std::collections::HashSet::new();
+    let mut ordered = Vec::new();
+
+    for tool in tools {
+        let name = tool.name().to_string();
+        if !seen.insert(name.clone()) && duplicates.insert(name.clone()) {
+            ordered.push(name);
+        }
+    }
+
+    ordered
+}
+
 impl Agent {
     pub fn builder() -> AgentBuilder {
         AgentBuilder::default()
@@ -473,6 +488,13 @@ impl AgentBuilder {
         let provider = self
             .provider
             .ok_or_else(|| CerseiError::Config("Provider is required".into()))?;
+        let duplicate_tools = duplicate_tool_names(&self.tools);
+        if !duplicate_tools.is_empty() {
+            return Err(CerseiError::Config(format!(
+                "Tool names must be unique. Duplicate tools: {}",
+                duplicate_tools.join(", ")
+            )));
+        }
 
         let working_dir = self
             .working_dir
@@ -528,10 +550,141 @@ impl AgentBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cersei_provider::{CompletionRequest, CompletionStream, ProviderCapabilities};
+    use serde_json::json;
+
+    struct TestProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TestProvider {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn context_window(&self, _model: &str) -> u64 {
+            4096
+        }
+
+        fn capabilities(&self, _model: &str) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> cersei_types::Result<CompletionStream> {
+            unimplemented!("provider is not used in builder tests")
+        }
+    }
+
+    struct AlphaTool;
+    struct AlphaToolDuplicate;
+    struct BetaTool;
+
+    #[async_trait::async_trait]
+    impl Tool for AlphaTool {
+        fn name(&self) -> &str {
+            "Alpha"
+        }
+
+        fn description(&self) -> &str {
+            "Alpha tool"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &cersei_tools::ToolContext,
+        ) -> cersei_tools::ToolResult {
+            unimplemented!("tool is not used in builder tests")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for AlphaToolDuplicate {
+        fn name(&self) -> &str {
+            "Alpha"
+        }
+
+        fn description(&self) -> &str {
+            "Duplicate alpha tool"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &cersei_tools::ToolContext,
+        ) -> cersei_tools::ToolResult {
+            unimplemented!("tool is not used in builder tests")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for BetaTool {
+        fn name(&self) -> &str {
+            "Beta"
+        }
+
+        fn description(&self) -> &str {
+            "Beta tool"
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &cersei_tools::ToolContext,
+        ) -> cersei_tools::ToolResult {
+            unimplemented!("tool is not used in builder tests")
+        }
+    }
 
     #[test]
     fn agent_builder_uses_larger_tool_result_budget_by_default() {
         let builder = AgentBuilder::default();
         assert_eq!(builder.tool_result_budget, DEFAULT_TOOL_RESULT_BUDGET_CHARS);
+    }
+
+    #[test]
+    fn agent_builder_rejects_duplicate_tool_names() {
+        let err = match Agent::builder()
+            .provider(TestProvider)
+            .tool(AlphaTool)
+            .tool(AlphaToolDuplicate)
+            .build()
+        {
+            Ok(_) => panic!("builder should reject duplicate tool names"),
+            Err(err) => err,
+        };
+
+        match err {
+            CerseiError::Config(message) => {
+                assert!(message.contains("Tool names must be unique"));
+                assert!(message.contains("Alpha"));
+            }
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_builder_accepts_unique_tool_names() {
+        let result = Agent::builder()
+            .provider(TestProvider)
+            .tool(AlphaTool)
+            .tool(BetaTool)
+            .build();
+
+        assert!(result.is_ok());
     }
 }

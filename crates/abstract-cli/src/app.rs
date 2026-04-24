@@ -255,15 +255,7 @@ pub fn build_reviewer_agent(
     let selected_tools: std::collections::HashSet<&str> =
         config.reviewer_tools.iter().map(String::as_str).collect();
 
-    let mut review_tools: Vec<Box<dyn cersei_tools::Tool>> = cersei_tools::all()
-        .into_iter()
-        .filter(|tool| selected_tools.contains(tool.name()))
-        .collect();
-    if selected_tools.contains("FileHistory") {
-        review_tools.push(Box::new(
-            cersei_tools::file_history_tool::ReadOnlyFileHistoryTool,
-        ));
-    }
+    let review_tools = selected_reviewer_tools(&selected_tools);
     let mut builder = cersei::Agent::builder()
         .provider(provider)
         .tools(review_tools)
@@ -321,6 +313,26 @@ pub fn build_reviewer_agent(
     Ok((agent, resolved_model))
 }
 
+fn selected_reviewer_tools(
+    selected_tools: &std::collections::HashSet<&str>,
+) -> Vec<Box<dyn cersei_tools::Tool>> {
+    let mut tools: Vec<Box<dyn cersei_tools::Tool>> = cersei_tools::all()
+        .into_iter()
+        .filter(|tool| {
+            selected_tools.contains(tool.name())
+                && !(selected_tools.contains("FileHistory") && tool.name() == "FileHistory")
+        })
+        .collect();
+
+    if selected_tools.contains("FileHistory") {
+        tools.push(Box::new(
+            cersei_tools::file_history_tool::ReadOnlyFileHistoryTool,
+        ));
+    }
+
+    tools
+}
+
 fn build_memory_manager(config: &AppConfig) -> anyhow::Result<MemoryManager> {
     let mut mm = MemoryManager::new(&config.working_dir);
 
@@ -358,5 +370,51 @@ fn print_banner(config: &AppConfig, session_id: &str) {
 fn print_startup_warnings() {
     if let Some(warning) = sandbox_warning() {
         eprintln!("\x1b[33;1mWarning:\x1b[0m {warning}\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn reviewer_file_history_tool_is_unique_and_read_only() {
+        let selected_tools = HashSet::from(["Read", "FileHistory", "Git"]);
+        let tools = selected_reviewer_tools(&selected_tools);
+
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+        let unique_names: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique_names.len());
+        assert_eq!(
+            names.iter().filter(|name| **name == "FileHistory").count(),
+            1
+        );
+
+        let file_history = tools
+            .iter()
+            .find(|tool| tool.name() == "FileHistory")
+            .expect("reviewer should include FileHistory");
+        let schema = file_history.input_schema();
+        let actions: Vec<&str> = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("FileHistory action enum should be an array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+
+        assert_eq!(actions, vec!["list", "revisions", "get_revision", "diff"]);
+    }
+
+    #[test]
+    fn default_reviewer_tools_expand_to_unique_names() {
+        let config = AppConfig::default();
+        let selected_tools: HashSet<&str> =
+            config.reviewer_tools.iter().map(String::as_str).collect();
+        let tools = selected_reviewer_tools(&selected_tools);
+
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+        let unique_names: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique_names.len());
     }
 }
