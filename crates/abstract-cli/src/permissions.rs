@@ -100,17 +100,27 @@ pub(crate) fn command_line_from_tool_input(
             .get("args")
             .and_then(|value| value.as_str())
             .map(|args| format!("npx --yes {args}")),
-        "Pytest" => tool_input
-            .get("args")
-            .and_then(|value| value.as_str())
-            .map(|args| {
-                if args.trim().is_empty() {
-                    "pytest".to_string()
-                } else {
-                    format!("pytest {args}")
-                }
-            })
-            .or_else(|| Some("pytest".to_string())),
+        "Pytest" => {
+            let command = tool_input
+                .get("args")
+                .and_then(|value| value.as_str())
+                .map(|args| {
+                    if args.trim().is_empty() {
+                        "pytest".to_string()
+                    } else {
+                        format!("pytest {args}")
+                    }
+                })
+                .unwrap_or_else(|| "pytest".to_string());
+
+            tool_input
+                .get("pythonpath")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|pythonpath| format!("PYTHONPATH={pythonpath} {command}"))
+                .or_else(|| Some(command))
+        }
         _ => direct_command(),
     }
     .or_else(|| compact_tool_input(tool_input).map(|input| format!("{tool_name} {input}")))
@@ -892,6 +902,13 @@ mod tests {
         assert_eq!(
             command_line_from_request(&make_request("Pytest", json!({ "args": "-q tests" }))),
             "pytest -q tests"
+        );
+        assert_eq!(
+            command_line_from_request(&make_request(
+                "Pytest",
+                json!({ "args": "-q tests", "pythonpath": "backend" })
+            )),
+            "PYTHONPATH=backend pytest -q tests"
         );
         assert_eq!(
             command_line_from_request(&make_request("Pytest", json!({}))),

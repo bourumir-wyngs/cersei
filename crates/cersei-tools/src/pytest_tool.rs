@@ -74,6 +74,40 @@ fn resolve_pytest_binary(
     Ok(canonical_binary)
 }
 
+fn resolve_pythonpath(
+    workspace_root: &Path,
+    requested_pythonpath: Option<&str>,
+) -> std::result::Result<PathBuf, String> {
+    let requested_pythonpath = requested_pythonpath
+        .map(str::trim)
+        .filter(|path| !path.is_empty());
+
+    match requested_pythonpath {
+        Some(path) => {
+            let candidate = workspace_root.join(path);
+            let canonical_candidate = candidate
+                .canonicalize()
+                .map_err(|e| format!("Cannot resolve pythonpath '{}': {}", path, e))?;
+            if !canonical_candidate.starts_with(workspace_root) {
+                return Err(format!(
+                    "pythonpath '{}' is outside the allowed root '{}'",
+                    path,
+                    workspace_root.display()
+                ));
+            }
+            if !canonical_candidate.is_dir() {
+                return Err(format!(
+                    "pythonpath '{}' must resolve to a directory inside '{}'",
+                    path,
+                    workspace_root.display()
+                ));
+            }
+            Ok(canonical_candidate)
+        }
+        None => Ok(workspace_root.to_path_buf()),
+    }
+}
+
 #[async_trait]
 impl Tool for PytestTool {
     fn name(&self) -> &str {
@@ -81,7 +115,7 @@ impl Tool for PytestTool {
     }
 
     fn description(&self) -> &str {
-        "Run pytest from a workspace-local .venv. Network is always disabled. The workspace is read-only except for pytest/python cache writes under .pytest_cache."
+        "Run pytest from a workspace-local .venv. Network is always disabled. The workspace is read-only except for pytest/python cache writes under .pytest_cache. PYTHONPATH defaults to the workspace root; set `pythonpath` to a subfolder when only part of the workspace is a Python project."
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -104,6 +138,10 @@ impl Tool for PytestTool {
                     "type": "string",
                     "description": "Optional subdirectory (relative to the working root) in which to run pytest. Must not escape the root directory."
                 },
+                "pythonpath": {
+                    "type": "string",
+                    "description": "Optional subdirectory to add to PYTHONPATH, relative to the workspace root. Defaults to the workspace root. Set this to a subfolder such as \"backend\" when only part of the workspace is a Python project."
+                },
                 "timeout": {
                     "type": "integer",
                     "description": "Optional timeout in milliseconds (max 600000)"
@@ -118,6 +156,7 @@ impl Tool for PytestTool {
         struct Input {
             args: Option<String>,
             workdir: Option<String>,
+            pythonpath: Option<String>,
             timeout: Option<u64>,
         }
 
@@ -149,6 +188,10 @@ impl Tool for PytestTool {
         let pytest_binary = match resolve_pytest_binary(&cwd, &workspace_root) {
             Ok(path) => path,
             Err(err) => return err,
+        };
+        let pythonpath = match resolve_pythonpath(&workspace_root, input.pythonpath.as_deref()) {
+            Ok(path) => path,
+            Err(err) => return ToolResult::error(err),
         };
 
         let pycache_prefix = workspace_root.join(PYTHON_PYCACHE_PREFIX_REL);
@@ -191,6 +234,7 @@ impl Tool for PytestTool {
             &firejail_args,
         );
         cmd.current_dir(&cwd)
+            .env("PYTHONPATH", &pythonpath)
             .env("PYTHONPYCACHEPREFIX", &pycache_prefix)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -294,7 +338,7 @@ mod tests {
         let pytest_path = bin_dir.join("pytest");
         fs::write(
             &pytest_path,
-            "#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'pycache=%s\\n' \"$PYTHONPYCACHEPREFIX\"\nprintf 'args=%s\\n' \"$*\"\n",
+            "#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'pythonpath=%s\\n' \"$PYTHONPATH\"\nprintf 'pycache=%s\\n' \"$PYTHONPYCACHEPREFIX\"\nprintf 'args=%s\\n' \"$*\"\n",
         )
         .expect("script");
         let mut perms = fs::metadata(&pytest_path).expect("metadata").permissions();
@@ -324,11 +368,60 @@ mod tests {
         assert!(result
             .content
             .contains(&format!("cwd={}", subdir.display())));
+        assert!(result
+            .content
+            .contains(&format!("pythonpath={}", workspace.path().display())));
         assert!(result.content.contains(&format!(
             "pycache={}",
             workspace.path().join(PYTHON_PYCACHE_PREFIX_REL).display()
         )));
         assert!(result.content.contains("args=-q tests/unit"));
         assert!(workspace.path().join(PYTHON_PYCACHE_PREFIX_REL).is_dir());
+    }
+
+    #[tokio::test]
+    async fn execute_allows_pythonpath_override_from_workspace_root() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin_dir = workspace.path().join(".venv").join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+
+        let pytest_path = bin_dir.join("pytest");
+        fs::write(
+            &pytest_path,
+            "#!/bin/sh\nprintf 'cwd=%s\\n' \"$PWD\"\nprintf 'pythonpath=%s\\n' \"$PYTHONPATH\"\n",
+        )
+        .expect("script");
+        let mut perms = fs::metadata(&pytest_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&pytest_path, perms).expect("chmod");
+
+        let test_dir = workspace.path().join("tests");
+        let package_dir = workspace.path().join("backend");
+        fs::create_dir_all(&test_dir).expect("test dir");
+        fs::create_dir_all(&package_dir).expect("package dir");
+
+        let ctx = test_ctx(
+            format!("pytest-test-{}", uuid::Uuid::new_v4()),
+            workspace.path().to_path_buf(),
+        );
+        let tool = PytestTool;
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "workdir": "tests",
+                    "pythonpath": "backend"
+                }),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result
+            .content
+            .contains(&format!("cwd={}", test_dir.display())));
+        assert!(result
+            .content
+            .contains(&format!("pythonpath={}", package_dir.display())));
     }
 }

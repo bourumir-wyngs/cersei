@@ -322,6 +322,7 @@ const TOOL_USE_GUIDELINES: &str = r#"
 - Use `Read` or `Grep` before `Edit`; `Edit` operates on stable tags returned by those tools.
 - Use `Write` when creating a new file or replacing an entire file in one shot.
 - Use build/test tools such as `Cargo`, `Npm`, `Npx`, `Pytest`, or `WebTests` instead of invoking them through shell when those tools are available.
+- For `Pytest`, `PYTHONPATH` defaults to the workspace root; set `pythonpath` to a subfolder when only part of the workspace is the Python project.
 - Use `Process` for commands that need to stay running or whose output you need to inspect over time.
 - Use 'MemoryStore' to make notes that may be userful in future tasks that you can do with `MemoryRecall',.
 - Parallelize independent tool calls in a single response when possible.
