@@ -293,7 +293,10 @@ fn make_tagged_diff(old: &XFile, new: &XFile) -> String {
     while old_idx < old.content.len() || new_idx < new.content.len() {
         match (old.content.get(old_idx), new.content.get(new_idx)) {
             (Some(old_line), Some(new_line)) if old_line.tag == new_line.tag => {
-                if !line_content_eq_ignoring_trailing_whitespace(&old_line.content, &new_line.content) {
+                if !line_content_eq_ignoring_trailing_whitespace(
+                    &old_line.content,
+                    &new_line.content,
+                ) {
                     lines.push(format!("-{}\t{}", old_line.tag, old_line.content));
                     lines.push(format!("+{}\t{}", new_line.tag, new_line.content));
                 }
@@ -309,7 +312,10 @@ fn make_tagged_diff(old: &XFile, new: &XFile) -> String {
                 new_idx += 1;
             }
             (Some(old_line), Some(new_line)) => {
-                if !line_content_eq_ignoring_trailing_whitespace(&old_line.content, &new_line.content) {
+                if !line_content_eq_ignoring_trailing_whitespace(
+                    &old_line.content,
+                    &new_line.content,
+                ) {
                     lines.push(format!("-{}\t{}", old_line.tag, old_line.content));
                     lines.push(format!("+{}\t{}", new_line.tag, new_line.content));
                 }
@@ -419,7 +425,7 @@ mod tests {
     use super::*;
     use crate::permissions::AllowAll;
     use crate::xfile_storage::{
-        XLine, clear_session_xfile_storage, ensure_loaded, store_written_text, try_get_head,
+        clear_session_xfile_storage, ensure_loaded, store_written_text, try_get_head, XLine,
     };
     use std::path::Path;
     use std::sync::Arc;

@@ -35,6 +35,8 @@ use tokio::sync::{broadcast, mpsc};
 pub use events::{AgentStream, CompactReason, WarningState};
 pub use reporters::Reporter;
 
+pub(crate) const DEFAULT_TOOL_RESULT_BUDGET_CHARS: usize = 300_000;
+
 // ─── Agent output ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -321,7 +323,7 @@ impl Default for AgentBuilder {
             cancel_token: None,
             auto_compact: true,
             compact_threshold: 0.9,
-            tool_result_budget: 50_000,
+            tool_result_budget: DEFAULT_TOOL_RESULT_BUDGET_CHARS,
             initial_messages: None,
             tool_extensions: Extensions::default(),
         }
@@ -449,6 +451,8 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the cumulative character budget retained for tool results in context.
+    /// Defaults to 300_000 chars.
     pub fn tool_result_budget(mut self, chars: usize) -> Self {
         self.tool_result_budget = chars;
         self
@@ -518,5 +522,16 @@ impl AgentBuilder {
     /// Build + run in one shot.
     pub async fn run_with(self, prompt: &str) -> cersei_types::Result<AgentOutput> {
         self.build()?.run(prompt).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_builder_uses_larger_tool_result_budget_by_default() {
+        let builder = AgentBuilder::default();
+        assert_eq!(builder.tool_result_budget, DEFAULT_TOOL_RESULT_BUDGET_CHARS);
     }
 }

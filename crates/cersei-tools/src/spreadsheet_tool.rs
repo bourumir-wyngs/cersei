@@ -304,8 +304,14 @@ fn build_selection(
         b.truncated_columns = b.end_col < u_c;
         Ok(b)
     } else {
-        let sr = s_row.map(|r| s_r + r.saturating_sub(1)).unwrap_or(s_r).max(s_r);
-        let sc = s_col.map(|c| s_c + c.saturating_sub(1)).unwrap_or(s_c).max(s_c);
+        let sr = s_row
+            .map(|r| s_r + r.saturating_sub(1))
+            .unwrap_or(s_r)
+            .max(s_r);
+        let sc = s_col
+            .map(|c| s_c + c.saturating_sub(1))
+            .unwrap_or(s_c)
+            .max(s_c);
         Ok(Selection {
             start_row: sr,
             end_row: sr.saturating_add(r_lim).min(s_r + t_r),

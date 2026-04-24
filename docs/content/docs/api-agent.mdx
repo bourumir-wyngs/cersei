@@ -126,7 +126,7 @@ let agent = Agent::builder()
     '.tool_result_budget(n)': {
       type: 'usize',
       description: 'Truncate oldest tool results when total chars exceed this.',
-      default: '0 (unlimited)',
+      default: '300_000',
     },
     '.cancel_token(t)': {
       type: 'CancellationToken',
@@ -401,7 +401,7 @@ When the conversation approaches the context window limit, the agent automatical
 Agent::builder()
     .auto_compact(true)           // enable
     .compact_threshold(0.9)       // trigger at 90% of context window
-    .tool_result_budget(50_000)   // also truncate oldest tool results above 50K chars
+    .tool_result_budget(300_000)  // keep up to ~300K chars of tool results before truncating older ones
 ```
 
 The compaction pipeline:

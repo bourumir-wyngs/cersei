@@ -204,6 +204,12 @@ fn persist_local_session_state(agent: &Agent, session_id: &str) -> Result<()> {
 
 // ─── Tool result budget ──────────────────────────────────────────────────────
 
+const TOOL_RESULT_MIN_TRUNCATABLE_CHARS: usize = 200;
+const TOOL_RESULT_PREVIEW_CHAR_LIMIT: usize = 160;
+const TOOL_RESULT_PREVIEW_LINE_LIMIT: usize = 8;
+const TOOL_RESULT_TRUNCATION_MARKER: &str = "[truncated in context:";
+const MAX_TOOL_RESULT_CHARS: usize = 250_000;
+
 /// Truncate oldest tool results when cumulative size exceeds budget.
 /// Modifies messages in place.
 pub fn apply_tool_result_budget(messages: &mut [Message], budget_chars: usize) {
@@ -257,20 +263,46 @@ pub fn apply_tool_result_budget(messages: &mut [Message], budget_chars: usize) {
                     break;
                 }
                 if let ContentBlock::ToolResult { content, .. } = block {
-                    let size = match content {
-                        ToolResultContent::Text(t) => t.len(),
-                        ToolResultContent::Blocks(_) => 100,
-                    };
-                    if size > 200 {
-                        freed += size;
-                        *content = ToolResultContent::Text(
-                            "[truncated — re-read file if needed]".to_string(),
-                        );
+                    if let ToolResultContent::Text(text) = content {
+                        let size = text.len();
+                        if size <= TOOL_RESULT_MIN_TRUNCATABLE_CHARS
+                            || text.contains(TOOL_RESULT_TRUNCATION_MARKER)
+                        {
+                            continue;
+                        }
+
+                        let replacement = truncate_tool_result_preview(text);
+                        let freed_now = size.saturating_sub(replacement.len());
+                        if freed_now == 0 {
+                            continue;
+                        }
+
+                        *text = replacement;
+                        freed += freed_now;
                     }
                 }
             }
         }
     }
+}
+
+fn truncate_tool_result_preview(text: &str) -> String {
+    let preview = text_preview(
+        text,
+        TOOL_RESULT_PREVIEW_LINE_LIMIT,
+        TOOL_RESULT_PREVIEW_CHAR_LIMIT,
+    );
+    let omitted = text.chars().count().saturating_sub(preview.chars().count());
+
+    format!("{preview}\n\n{TOOL_RESULT_TRUNCATION_MARKER} {omitted} chars omitted]")
+}
+
+fn text_preview(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let mut preview = text.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+    if preview.chars().count() > max_chars {
+        preview = preview.chars().take(max_chars).collect();
+    }
+    preview.trim_end().to_string()
 }
 
 /// Run the agent without streaming (blocking until complete).
@@ -725,8 +757,7 @@ pub async fn run_agent_streaming(
                     });
 
                     // Cap individual tool result size to avoid single-result context overflow.
-                    // ~150k chars ≈ ~37k tokens, leaving room for system prompt + messages.
-                    const MAX_TOOL_RESULT_CHARS: usize = 150_000;
+                    // ~250k chars ≈ ~62k tokens, which is still workable on modern large-context models.
                     let content_text = if result.content.len() > MAX_TOOL_RESULT_CHARS {
                         let truncated = &result.content[..MAX_TOOL_RESULT_CHARS];
                         format!(
@@ -938,6 +969,124 @@ mod tests {
         ));
         assert!(!should_auto_recall_from_prompt("bargain"));
         assert!(!should_auto_recall_from_prompt("A gain of confidence"));
+    }
+
+    fn tool_result_message(tool_use_id: &str, content: impl Into<String>) -> Message {
+        Message::user_blocks(vec![ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content: ToolResultContent::Text(content.into()),
+            is_error: Some(false),
+        }])
+    }
+
+    fn tool_result_text(message: &Message) -> &str {
+        match &message.content {
+            MessageContent::Blocks(blocks) => match &blocks[0] {
+                ContentBlock::ToolResult {
+                    content: ToolResultContent::Text(text),
+                    ..
+                } => text,
+                other => panic!("expected text tool result, got {other:?}"),
+            },
+            other => panic!("expected block message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_tool_result_budget_keeps_spreadsheet_preview_when_truncating() {
+        let mut spreadsheet_result = String::from(
+            "Spreadsheet: /workspace/data/matpower_network.xlsx\n\
+Sheet: bus_names_coordinates\n\
+Rows: 1..5\n\n\
+bus_i,name,lat,lon,base_kv,zone\n",
+        );
+        for idx in 1..=20 {
+            spreadsheet_result.push_str(&format!("{idx},Bus {idx},46.{idx},7.{idx},380,CH\n"));
+        }
+
+        let mut messages = vec![
+            Message::user("inspect spreadsheet"),
+            tool_result_message("tool-1", spreadsheet_result),
+            Message::user("keep recent 1"),
+            tool_result_message("tool-2", "x".repeat(1_200)),
+            Message::user("keep recent 2"),
+            Message::assistant("not a tool result"),
+            Message::user("keep recent 3"),
+            tool_result_message("tool-3", "y".repeat(1_200)),
+        ];
+
+        apply_tool_result_budget(&mut messages, 500);
+
+        let truncated = tool_result_text(&messages[1]);
+        assert!(truncated.contains("Spreadsheet: /workspace/data/matpower_network.xlsx"));
+        assert!(truncated.contains("Sheet: bus_names_coordinates"));
+        assert!(truncated.contains("bus_i,name,lat,lon,base_kv,zone"));
+        assert!(truncated.contains(TOOL_RESULT_TRUNCATION_MARKER));
+        assert!(!truncated.contains("[truncated — re-read file if needed]"));
+    }
+
+    #[test]
+    fn apply_tool_result_budget_keeps_recent_tool_results_intact() {
+        let older = "older result ".repeat(80);
+        let recent_spreadsheet = "Spreadsheet: /workspace/data/TYNDP.xlsx\n\
+Sheet: bus_mod\n\
+Rows: 1..8\n\n\
+bus_id,bus_name,country,voltage\n\
+1,GENEVA,CH,380\n\
+2,LAUSANNE,CH,220\n"
+            .repeat(10);
+        let recent_snapshot = recent_spreadsheet.clone();
+
+        let mut messages = vec![
+            Message::user("old request"),
+            tool_result_message("tool-1", older),
+            Message::user("old request 2"),
+            tool_result_message("tool-2", "z".repeat(1_000)),
+            Message::user("recent 1"),
+            Message::assistant("recent 2"),
+            Message::user("recent 3"),
+            tool_result_message("tool-3", recent_spreadsheet),
+            Message::assistant("recent 4"),
+            Message::user("recent 5"),
+        ];
+
+        apply_tool_result_budget(&mut messages, 450);
+
+        assert!(tool_result_text(&messages[1]).contains(TOOL_RESULT_TRUNCATION_MARKER));
+        assert_eq!(tool_result_text(&messages[7]), recent_snapshot);
+    }
+
+    #[test]
+    fn apply_tool_result_budget_is_idempotent_for_already_truncated_previews() {
+        let large = "Spreadsheet: /workspace/data/matpower_network.xlsx\n\
+Sheet: bus\n\
+Rows: 1..20\n\n\
+col_a,col_b,col_c,col_d\n"
+            .to_string()
+            + &"1,2,3,4\n".repeat(40);
+
+        let mut messages = vec![
+            Message::user("old request"),
+            tool_result_message("tool-1", large),
+            Message::user("recent 1"),
+            Message::assistant("recent 2"),
+            Message::user("recent 3"),
+            Message::assistant("recent 4"),
+            Message::user("recent 5"),
+            Message::assistant("recent 6"),
+        ];
+
+        apply_tool_result_budget(&mut messages, 200);
+        let once = tool_result_text(&messages[1]).to_string();
+        apply_tool_result_budget(&mut messages, 150);
+
+        assert_eq!(tool_result_text(&messages[1]), once);
+        assert_eq!(
+            tool_result_text(&messages[1])
+                .matches(TOOL_RESULT_TRUNCATION_MARKER)
+                .count(),
+            1
+        );
     }
 
     struct PreflightTool {

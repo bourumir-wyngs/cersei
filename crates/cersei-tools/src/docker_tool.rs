@@ -1,9 +1,7 @@
 //! DockerAssistant tool: AI-friendly observability and diagnostics tool for Docker environments.
 
 use super::*;
-use bollard::container::{
-    InspectContainerOptions, ListContainersOptions, LogOutput, LogsOptions,
-};
+use bollard::container::{InspectContainerOptions, ListContainersOptions, LogOutput, LogsOptions};
 use bollard::image::ListImagesOptions;
 use bollard::network::ListNetworksOptions;
 use bollard::volume::ListVolumesOptions;
@@ -93,7 +91,9 @@ impl Tool for DockerAssistantTool {
 
         let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
-            Err(e) => return ToolResult::error(format!("Failed to connect to Docker daemon: {}", e)),
+            Err(e) => {
+                return ToolResult::error(format!("Failed to connect to Docker daemon: {}", e))
+            }
         };
 
         match input.action {
@@ -105,23 +105,29 @@ impl Tool for DockerAssistantTool {
                 match docker.list_containers(Some(options)).await {
                     Ok(containers) => {
                         // Simplify output
-                        let simplified: Vec<_> = containers.into_iter().map(|c| {
-                            serde_json::json!({
-                                "id": c.id.unwrap_or_default(),
-                                "names": c.names.unwrap_or_default(),
-                                "image": c.image.unwrap_or_default(),
-                                "state": c.state.unwrap_or_default(),
-                                "status": c.status.unwrap_or_default(),
-                                "ports": c.ports.unwrap_or_default(),
+                        let simplified: Vec<_> = containers
+                            .into_iter()
+                            .map(|c| {
+                                serde_json::json!({
+                                    "id": c.id.unwrap_or_default(),
+                                    "names": c.names.unwrap_or_default(),
+                                    "image": c.image.unwrap_or_default(),
+                                    "state": c.state.unwrap_or_default(),
+                                    "status": c.status.unwrap_or_default(),
+                                    "ports": c.ports.unwrap_or_default(),
+                                })
                             })
-                        }).collect();
+                            .collect();
                         ToolResult::success(serde_json::to_string_pretty(&simplified).unwrap())
                     }
                     Err(e) => ToolResult::error(format!("Failed to list containers: {}", e)),
                 }
             }
             DockerAction::InspectContainer { container_id } => {
-                match docker.inspect_container(&container_id, None::<InspectContainerOptions>).await {
+                match docker
+                    .inspect_container(&container_id, None::<InspectContainerOptions>)
+                    .await
+                {
                     Ok(mut info) => {
                         // Redact environment variables for safety
                         if let Some(config) = info.config.as_mut() {
@@ -166,28 +172,41 @@ impl Tool for DockerAssistantTool {
             DockerAction::GetImages => {
                 match docker.list_images(None::<ListImagesOptions<String>>).await {
                     Ok(images) => {
-                        let simplified: Vec<_> = images.into_iter().map(|img| {
-                            serde_json::json!({
-                                "id": img.id,
-                                "repo_tags": img.repo_tags,
-                                "size": img.size,
-                                "created": img.created,
+                        let simplified: Vec<_> = images
+                            .into_iter()
+                            .map(|img| {
+                                serde_json::json!({
+                                    "id": img.id,
+                                    "repo_tags": img.repo_tags,
+                                    "size": img.size,
+                                    "created": img.created,
+                                })
                             })
-                        }).collect();
+                            .collect();
                         ToolResult::success(serde_json::to_string_pretty(&simplified).unwrap())
                     }
                     Err(e) => ToolResult::error(format!("Failed to list images: {}", e)),
                 }
             }
             DockerAction::GetNetworks => {
-                match docker.list_networks(None::<ListNetworksOptions<String>>).await {
-                    Ok(networks) => ToolResult::success(serde_json::to_string_pretty(&networks).unwrap()),
+                match docker
+                    .list_networks(None::<ListNetworksOptions<String>>)
+                    .await
+                {
+                    Ok(networks) => {
+                        ToolResult::success(serde_json::to_string_pretty(&networks).unwrap())
+                    }
                     Err(e) => ToolResult::error(format!("Failed to list networks: {}", e)),
                 }
             }
             DockerAction::GetVolumes => {
-                match docker.list_volumes(None::<ListVolumesOptions<String>>).await {
-                    Ok(volumes) => ToolResult::success(serde_json::to_string_pretty(&volumes).unwrap()),
+                match docker
+                    .list_volumes(None::<ListVolumesOptions<String>>)
+                    .await
+                {
+                    Ok(volumes) => {
+                        ToolResult::success(serde_json::to_string_pretty(&volumes).unwrap())
+                    }
                     Err(e) => ToolResult::error(format!("Failed to list volumes: {}", e)),
                 }
             }

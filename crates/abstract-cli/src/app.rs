@@ -279,7 +279,11 @@ pub fn build_reviewer_agent(
         .tool_extensions(tool_extensions.clone());
 
     if let Some(mem_arc) = tool_extensions.get::<Arc<MemoryManager>>() {
-        if config.reviewer_tools.iter().any(|tool| tool == "MemoryRecall") {
+        if config
+            .reviewer_tools
+            .iter()
+            .any(|tool| tool == "MemoryRecall")
+        {
             builder = builder.tool(crate::memory_tools::MemoryRecallTool::new(
                 (*mem_arc).clone(),
             ));

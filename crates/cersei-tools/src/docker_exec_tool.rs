@@ -82,11 +82,17 @@ impl Tool for DockerExecTool {
 
         let docker = match Docker::connect_with_local_defaults() {
             Ok(d) => d,
-            Err(e) => return ToolResult::error(format!("Failed to connect to Docker daemon: {}", e)),
+            Err(e) => {
+                return ToolResult::error(format!("Failed to connect to Docker daemon: {}", e))
+            }
         };
 
         match input.action {
-            DockerExecAction::Exec { container_id, cmd, workdir } => {
+            DockerExecAction::Exec {
+                container_id,
+                cmd,
+                workdir,
+            } => {
                 let exec_options = CreateExecOptions {
                     cmd: Some(cmd),
                     attach_stdout: Some(true),
@@ -105,31 +111,58 @@ impl Tool for DockerExecTool {
                         let mut out = String::new();
                         while let Some(msg_result) = output.next().await {
                             match msg_result {
-                                Ok(msg) => out.push_str(&String::from_utf8_lossy(&msg.into_bytes())),
-                                Err(e) => return ToolResult::error(format!("Error reading exec output: {}", e)),
+                                Ok(msg) => {
+                                    out.push_str(&String::from_utf8_lossy(&msg.into_bytes()))
+                                }
+                                Err(e) => {
+                                    return ToolResult::error(format!(
+                                        "Error reading exec output: {}",
+                                        e
+                                    ))
+                                }
                             }
                         }
                         ToolResult::success(out)
                     }
-                    Ok(StartExecResults::Detached) => ToolResult::success("Exec started detached.".to_string()),
+                    Ok(StartExecResults::Detached) => {
+                        ToolResult::success("Exec started detached.".to_string())
+                    }
                     Err(e) => ToolResult::error(format!("Failed to start exec: {}", e)),
                 }
             }
             DockerExecAction::RestartContainer { container_id } => {
-                match docker.restart_container(&container_id, None::<RestartContainerOptions>).await {
-                    Ok(_) => ToolResult::success(format!("Successfully restarted container {}", container_id)),
+                match docker
+                    .restart_container(&container_id, None::<RestartContainerOptions>)
+                    .await
+                {
+                    Ok(_) => ToolResult::success(format!(
+                        "Successfully restarted container {}",
+                        container_id
+                    )),
                     Err(e) => ToolResult::error(format!("Failed to restart container: {}", e)),
                 }
             }
             DockerExecAction::StopContainer { container_id } => {
-                match docker.stop_container(&container_id, None::<StopContainerOptions>).await {
-                    Ok(_) => ToolResult::success(format!("Successfully stopped container {}", container_id)),
+                match docker
+                    .stop_container(&container_id, None::<StopContainerOptions>)
+                    .await
+                {
+                    Ok(_) => ToolResult::success(format!(
+                        "Successfully stopped container {}",
+                        container_id
+                    )),
                     Err(e) => ToolResult::error(format!("Failed to stop container: {}", e)),
                 }
             }
             DockerExecAction::StartContainer { container_id } => {
-                match docker.start_container(&container_id, None::<StartContainerOptions<String>>).await {
-                    Ok(_) => ToolResult::success(format!("Successfully started container {}", container_id)),
+                match docker
+                    .start_container(&container_id, None::<StartContainerOptions<String>>)
+                    .await
+                {
+                    Ok(_) => ToolResult::success(format!(
+                        "Successfully started container {}",
+                        container_id
+                    )),
                     Err(e) => ToolResult::error(format!("Failed to start container: {}", e)),
                 }
             }

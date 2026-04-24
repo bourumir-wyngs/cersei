@@ -160,7 +160,7 @@ When the conversation approaches the context window limit, Cersei automatically 
 Agent::builder()
     .auto_compact(true)          // enabled by default
     .compact_threshold(0.9)      // trigger at 90% context usage
-    .tool_result_budget(50_000)  // max chars of tool results before eviction
+    .tool_result_budget(300_000) // max chars of tool results before older results are truncated
 ```
 
 ### Tool Result Budget
