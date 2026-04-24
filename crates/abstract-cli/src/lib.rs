@@ -316,18 +316,36 @@ fn config_set(config: &mut config::AppConfig, key: &str, value: &str) -> anyhow:
         "model" => config.model = value.into(),
         "reviewer_model" => config.reviewer_model = value.into(),
         "model_tools" => {
-            config.model_tools = value
+            let included = value
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect()
+                .collect();
+            config::set_model_tools_from_include_list(config, included);
         }
         "reviewer_tools" => {
-            config.reviewer_tools = value
+            let included = value
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect()
+                .collect();
+            config::set_reviewer_tools_from_include_list(config, included);
+        }
+        "exclude_tools" => {
+            let excluded = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            config::set_exclude_tools(config, excluded);
+        }
+        "exclude_reviewer_tools" => {
+            let excluded = value
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            config::set_exclude_reviewer_tools(config, excluded);
         }
         "provider" => config.provider = value.into(),
         "effort" => {

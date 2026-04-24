@@ -39,8 +39,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub fallback_models: Vec<String>,
     #[serde(default)]
-    pub model_tools: Vec<String>,
+    pub exclude_tools: Vec<String>,
     #[serde(default)]
+    pub exclude_reviewer_tools: Vec<String>,
+    #[serde(default, skip_serializing)]
+    pub model_tools: Vec<String>,
+    #[serde(default, skip_serializing)]
     pub reviewer_tools: Vec<String>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerEntry>,
@@ -64,6 +68,8 @@ impl Default for AppConfig {
             permissions_mode: "interactive".into(),
             working_dir: current_dir_fallback(),
             fallback_models: Vec::new(),
+            exclude_tools: Vec::new(),
+            exclude_reviewer_tools: Vec::new(),
             model_tools: default_model_tools(),
             reviewer_tools: default_reviewer_tools(),
             mcp_servers: Vec::new(),
@@ -268,7 +274,65 @@ pub fn set_effort_budget(config: &mut AppConfig, effort: u32) {
 }
 
 fn apply_derived_values(config: &mut AppConfig) {
+    apply_tool_filters(config);
     config.max_tokens = max_tokens_for_effort(config.effort);
+}
+
+fn apply_tool_filters(config: &mut AppConfig) {
+    let default_model_tools = default_model_tools();
+    if config.exclude_tools.is_empty() && config.model_tools != default_model_tools {
+        config.exclude_tools =
+            excluded_tools_from_legacy_include_list(&default_model_tools, &config.model_tools);
+    }
+    config.model_tools = apply_excluded_tools(&default_model_tools, &config.exclude_tools);
+
+    let default_reviewer_tools = default_reviewer_tools();
+    if config.exclude_reviewer_tools.is_empty() && config.reviewer_tools != default_reviewer_tools {
+        config.exclude_reviewer_tools = excluded_tools_from_legacy_include_list(
+            &default_reviewer_tools,
+            &config.reviewer_tools,
+        );
+    }
+    config.reviewer_tools =
+        apply_excluded_tools(&default_reviewer_tools, &config.exclude_reviewer_tools);
+}
+
+fn apply_excluded_tools(base: &[String], excluded: &[String]) -> Vec<String> {
+    let excluded: std::collections::HashSet<&str> = excluded.iter().map(String::as_str).collect();
+    base.iter()
+        .filter(|tool| !excluded.contains(tool.as_str()))
+        .cloned()
+        .collect()
+}
+
+fn excluded_tools_from_legacy_include_list(base: &[String], included: &[String]) -> Vec<String> {
+    let included: std::collections::HashSet<&str> = included.iter().map(String::as_str).collect();
+    base.iter()
+        .filter(|tool| !included.contains(tool.as_str()))
+        .cloned()
+        .collect()
+}
+
+pub fn set_exclude_tools(config: &mut AppConfig, excluded: Vec<String>) {
+    config.exclude_tools = excluded;
+    apply_tool_filters(config);
+}
+
+pub fn set_exclude_reviewer_tools(config: &mut AppConfig, excluded: Vec<String>) {
+    config.exclude_reviewer_tools = excluded;
+    apply_tool_filters(config);
+}
+
+pub fn set_model_tools_from_include_list(config: &mut AppConfig, included: Vec<String>) {
+    config.exclude_tools =
+        excluded_tools_from_legacy_include_list(&default_model_tools(), &included);
+    apply_tool_filters(config);
+}
+
+pub fn set_reviewer_tools_from_include_list(config: &mut AppConfig, included: Vec<String>) {
+    config.exclude_reviewer_tools =
+        excluded_tools_from_legacy_include_list(&default_reviewer_tools(), &included);
+    apply_tool_filters(config);
 }
 
 pub fn parse_effort_budget(value: &str) -> Option<u32> {
@@ -423,6 +487,12 @@ fn merge(base: &mut AppConfig, overlay: AppConfig) {
     }
     if !overlay.fallback_models.is_empty() {
         base.fallback_models = overlay.fallback_models;
+    }
+    if overlay.exclude_tools != AppConfig::default().exclude_tools {
+        base.exclude_tools = overlay.exclude_tools;
+    }
+    if overlay.exclude_reviewer_tools != AppConfig::default().exclude_reviewer_tools {
+        base.exclude_reviewer_tools = overlay.exclude_reviewer_tools;
     }
     if overlay.model_tools != AppConfig::default().model_tools {
         base.model_tools = overlay.model_tools;
@@ -645,12 +715,14 @@ working_dir = "/definitely/not/the/runtime/workdir"
         save_to(&config, &path).unwrap();
 
         let content = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
+        let map = value.as_object().unwrap();
         assert!(!content.contains("working_dir"));
         assert!(content.contains("model: gpt-5.4"));
-        assert!(content.contains("model_tools:"));
-        assert!(content.contains("reviewer_tools:"));
-        assert!(content.contains("MemoryRecall"));
-        assert!(content.contains("MemoryStore"));
+        assert!(content.contains("exclude_tools:"));
+        assert!(content.contains("exclude_reviewer_tools:"));
+        assert!(!map.contains_key("model_tools"));
+        assert!(!map.contains_key("reviewer_tools"));
     }
 
     #[test]
@@ -663,11 +735,15 @@ working_dir = "/definitely/not/the/runtime/workdir"
         save_to(&config, &path).unwrap();
 
         let content = std::fs::read_to_string(path).unwrap();
+        let value: toml::Value = toml::from_str(&content).unwrap();
+        let table = value.as_table().unwrap();
         assert!(!content.contains("working_dir"));
         assert!(content.contains("model = \"gpt-5.4\""));
         assert!(content.contains("effort = 4096"));
-        assert!(content.contains("model_tools = ["));
-        assert!(content.contains("reviewer_tools = ["));
+        assert!(content.contains("exclude_tools = []"));
+        assert!(content.contains("exclude_reviewer_tools = []"));
+        assert!(!table.contains_key("model_tools"));
+        assert!(!table.contains_key("reviewer_tools"));
     }
 
     #[test]
@@ -700,16 +776,70 @@ working_dir = "/definitely/not/the/runtime/workdir"
         let scoped = global_config_dir().join("config_project.yaml");
         assert!(scoped.exists());
         let content = std::fs::read_to_string(scoped).unwrap();
+        let value: serde_json::Value = serde_saphyr::from_str(&content).unwrap();
+        let map = value.as_object().unwrap();
         assert!(content.contains("model: global-model"));
         assert!(content.contains("theme: light"));
         assert!(content.contains("permissions_mode: accept-edits"));
-        assert!(content.contains("model_tools:"));
-        assert!(content.contains("reviewer_tools:"));
+        assert!(content.contains("exclude_tools:"));
+        assert!(content.contains("exclude_reviewer_tools:"));
+        assert!(!map.contains_key("model_tools"));
+        assert!(!map.contains_key("reviewer_tools"));
         assert!(!content.contains("working_dir"));
 
         match previous_home {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    #[test]
+    fn load_from_paths_converts_legacy_model_tools_to_exclusions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        std::fs::write(
+            &path,
+            r#"
+model_tools = ["Read", "Git", "MemoryRecall"]
+reviewer_tools = ["Read", "Git"]
+"#,
+        )
+        .unwrap();
+
+        let config = load_from_paths(&[path.as_path()], false);
+        assert_eq!(
+            config.model_tools,
+            vec![
+                "Read".to_string(),
+                "Git".to_string(),
+                "MemoryRecall".to_string()
+            ]
+        );
+        assert!(config.exclude_tools.contains(&"Write".to_string()));
+        assert!(config.exclude_tools.contains(&"MemoryStore".to_string()));
+        assert_eq!(
+            config.reviewer_tools,
+            vec!["Read".to_string(), "Git".to_string()]
+        );
+        assert!(config
+            .exclude_reviewer_tools
+            .contains(&"MultiRead".to_string()));
+    }
+
+    #[test]
+    fn exclude_tools_are_removed_from_runtime_tool_lists() {
+        let mut config = AppConfig::default();
+        set_exclude_tools(
+            &mut config,
+            vec!["DockerCompose".to_string(), "MemoryStore".to_string()],
+        );
+        set_exclude_reviewer_tools(&mut config, vec!["Git".to_string()]);
+
+        assert!(!config.model_tools.contains(&"DockerCompose".to_string()));
+        assert!(!config.model_tools.contains(&"MemoryStore".to_string()));
+        assert!(config.model_tools.contains(&"MemoryRecall".to_string()));
+        assert!(!config.reviewer_tools.contains(&"Git".to_string()));
+        assert!(config.reviewer_tools.contains(&"Read".to_string()));
     }
 }
