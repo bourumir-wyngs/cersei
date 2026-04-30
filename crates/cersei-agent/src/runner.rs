@@ -11,14 +11,19 @@ use cersei_tools::xfile_storage::{
 };
 use cersei_tools::{ToolContext, ToolResult};
 use cersei_types::*;
+use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 const END_TURN_SUMMARY_PROMPT: &str = "Briefly summarize your progress, results, and next steps.";
 const AUTO_RECALL_LIMIT: usize = 3;
+const MID_RUN_USER_MESSAGE_HEADER: &str =
+    "User instruction received while you were working. Treat this as the latest user instruction and adjust before continuing:";
+const SKIPPED_TOOL_RESULT: &str =
+    "Tool skipped because the user provided new instructions before it ran.";
 
 fn log_turn_handoff_to_human(reason: &str, summary_missing: bool, summary_prompt_sent: bool) {
     let timestamp = chrono::Local::now().to_rfc3339();
@@ -50,6 +55,88 @@ fn append_tool_usage_log(tool_id: &str, tool_name: &str, tool_input: &serde_json
 
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
         let _ = writeln!(file, "{serialized}");
+    }
+}
+
+fn queue_injected_user_message(pending: &mut VecDeque<String>, message: String) {
+    let message = message.trim();
+    if !message.is_empty() {
+        pending.push_back(message.to_string());
+    }
+}
+
+fn handle_control_message(
+    control: AgentControl,
+    pending_user_messages: &mut VecDeque<String>,
+) -> Result<()> {
+    match control {
+        AgentControl::Cancel => Err(CerseiError::Cancelled),
+        AgentControl::InjectMessage(message) => {
+            queue_injected_user_message(pending_user_messages, message);
+            Ok(())
+        }
+        AgentControl::PermissionResponse { .. } => Ok(()),
+    }
+}
+
+fn drain_control_messages(
+    control_rx: &mut mpsc::Receiver<AgentControl>,
+    pending_user_messages: &mut VecDeque<String>,
+) -> Result<()> {
+    loop {
+        match control_rx.try_recv() {
+            Ok(control) => handle_control_message(control, pending_user_messages)?,
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn take_pending_user_message(pending_user_messages: &mut VecDeque<String>) -> Option<String> {
+    if pending_user_messages.is_empty() {
+        return None;
+    }
+
+    let messages: Vec<String> = pending_user_messages.drain(..).collect();
+    let body = if messages.len() == 1 {
+        messages[0].clone()
+    } else {
+        messages
+            .iter()
+            .enumerate()
+            .map(|(idx, message)| format!("{}. {}", idx + 1, message))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    Some(format!("{MID_RUN_USER_MESSAGE_HEADER}\n\n{body}"))
+}
+
+fn push_pending_user_message(agent: &Agent, pending_user_messages: &mut VecDeque<String>) -> bool {
+    let Some(text) = take_pending_user_message(pending_user_messages) else {
+        return false;
+    };
+    agent.messages.lock().push(Message::user(text));
+    true
+}
+
+fn append_pending_user_text_block(
+    blocks: &mut Vec<ContentBlock>,
+    pending_user_messages: &mut VecDeque<String>,
+) -> bool {
+    let Some(text) = take_pending_user_message(pending_user_messages) else {
+        return false;
+    };
+    blocks.push(ContentBlock::Text { text });
+    true
+}
+
+fn skipped_tool_result_block(tool_id: String) -> ContentBlock {
+    ContentBlock::ToolResult {
+        tool_use_id: tool_id,
+        content: ToolResultContent::Text(SKIPPED_TOOL_RESULT.to_string()),
+        is_error: Some(true),
     }
 }
 
@@ -332,7 +419,7 @@ pub async fn run_agent_streaming(
     agent: &Agent,
     prompt: &str,
     event_tx: mpsc::Sender<AgentEvent>,
-    _control_rx: mpsc::Receiver<AgentControl>,
+    mut control_rx: mpsc::Receiver<AgentControl>,
 ) -> Result<AgentOutput> {
     // Load session history (skip if messages were pre-populated via with_messages)
     if agent.messages.lock().is_empty() {
@@ -366,6 +453,8 @@ pub async fn run_agent_streaming(
     let mut last_stop_reason = StopReason::EndTurn;
     let mut _last_usage = Usage::default();
     let mut auto_summary_requested = false;
+    let mut pending_user_messages = VecDeque::new();
+    let mut control_open = true;
 
     // Build tool context
     let tool_ctx = ToolContext {
@@ -404,6 +493,8 @@ pub async fn run_agent_streaming(
         if agent.cancel_token.is_cancelled() {
             return Err(CerseiError::Cancelled);
         }
+        drain_control_messages(&mut control_rx, &mut pending_user_messages)?;
+        push_pending_user_message(agent, &mut pending_user_messages);
 
         let _ = event_tx.send(AgentEvent::TurnStart { turn }).await;
         agent.emit(AgentEvent::TurnStart { turn });
@@ -524,29 +615,48 @@ pub async fn run_agent_streaming(
             .await;
 
         // Process stream events
-        while let Some(event) = rx.recv().await {
+        loop {
             // Check cancellation during streaming
             if agent.cancel_token.is_cancelled() {
                 return Err(CerseiError::Cancelled);
             }
-            match &event {
-                StreamEvent::TextDelta { text, .. } => {
-                    let _ = event_tx.send(AgentEvent::TextDelta(text.clone())).await;
-                    agent.emit(AgentEvent::TextDelta(text.clone()));
+
+            tokio::select! {
+                control = control_rx.recv(), if control_open => {
+                    match control {
+                        Some(control) => {
+                            handle_control_message(control, &mut pending_user_messages)?;
+                        }
+                        None => {
+                            control_open = false;
+                        }
+                    }
                 }
-                StreamEvent::ThinkingDelta { thinking, .. } => {
-                    let _ = event_tx
-                        .send(AgentEvent::ThinkingDelta(thinking.clone()))
-                        .await;
-                    agent.emit(AgentEvent::ThinkingDelta(thinking.clone()));
+                maybe_event = rx.recv() => {
+                    let Some(event) = maybe_event else {
+                        break;
+                    };
+                    match &event {
+                        StreamEvent::TextDelta { text, .. } => {
+                            let _ = event_tx.send(AgentEvent::TextDelta(text.clone())).await;
+                            agent.emit(AgentEvent::TextDelta(text.clone()));
+                        }
+                        StreamEvent::ThinkingDelta { thinking, .. } => {
+                            let _ = event_tx
+                                .send(AgentEvent::ThinkingDelta(thinking.clone()))
+                                .await;
+                            agent.emit(AgentEvent::ThinkingDelta(thinking.clone()));
+                        }
+                        StreamEvent::Error { message } => {
+                            return Err(CerseiError::Provider(message.clone()));
+                        }
+                        _ => {}
+                    }
+                    accumulator.process_event(event);
                 }
-                StreamEvent::Error { message } => {
-                    return Err(CerseiError::Provider(message.clone()));
-                }
-                _ => {}
             }
-            accumulator.process_event(event);
         }
+        drain_control_messages(&mut control_rx, &mut pending_user_messages)?;
 
         // Convert accumulated response
         let response = accumulator.into_response()?;
@@ -612,6 +722,10 @@ pub async fn run_agent_streaming(
         // Handle stop reason
         match &response.stop_reason {
             StopReason::EndTurn => {
+                if push_pending_user_message(agent, &mut pending_user_messages) {
+                    continue;
+                }
+
                 if !assistant_message_has_progress_summary(&response.message) {
                     if !auto_summary_requested {
                         agent
@@ -649,10 +763,48 @@ pub async fn run_agent_streaming(
 
                 let mut result_blocks: Vec<ContentBlock> = Vec::new();
 
-                for (tool_id, tool_name, tool_input) in tool_use_blocks {
+                if !pending_user_messages.is_empty() {
+                    for (tool_id, tool_name, tool_input) in tool_use_blocks {
+                        result_blocks.push(skipped_tool_result_block(tool_id.clone()));
+                        tool_calls.push(ToolCallRecord {
+                            name: tool_name,
+                            id: tool_id,
+                            input: tool_input,
+                            result: SKIPPED_TOOL_RESULT.to_string(),
+                            is_error: true,
+                            duration: Duration::ZERO,
+                        });
+                    }
+                    append_pending_user_text_block(&mut result_blocks, &mut pending_user_messages);
+                    agent
+                        .messages
+                        .lock()
+                        .push(Message::user_blocks(result_blocks));
+                    continue;
+                }
+
+                for idx in 0..tool_use_blocks.len() {
+                    let (tool_id, tool_name, tool_input) = tool_use_blocks[idx].clone();
                     // Check cancellation before each tool execution
                     if agent.cancel_token.is_cancelled() {
                         return Err(CerseiError::Cancelled);
+                    }
+                    drain_control_messages(&mut control_rx, &mut pending_user_messages)?;
+                    if !pending_user_messages.is_empty() {
+                        for (remaining_id, remaining_name, remaining_input) in
+                            tool_use_blocks[idx..].iter().cloned()
+                        {
+                            result_blocks.push(skipped_tool_result_block(remaining_id.clone()));
+                            tool_calls.push(ToolCallRecord {
+                                name: remaining_name,
+                                id: remaining_id,
+                                input: remaining_input,
+                                result: SKIPPED_TOOL_RESULT.to_string(),
+                                is_error: true,
+                                duration: Duration::ZERO,
+                            });
+                        }
+                        break;
                     }
 
                     let _ = event_tx
@@ -674,58 +826,89 @@ pub async fn run_agent_streaming(
                     // Find the tool
                     let tool = agent.tools.iter().find(|t| t.name() == tool_name);
 
-                    let result = if let Some(tool) = tool {
-                        if let Some(preflight_result) = tool.preflight(&tool_input, &tool_ctx) {
-                            preflight_result
-                        } else {
-                            // Check permissions
-                            let perm_req = PermissionRequest {
-                                tool_name: tool_name.clone(),
-                                tool_input: tool_input.clone(),
-                                permission_level: tool.permission_level(),
-                                description: format!("Execute tool '{}'", tool_name),
-                                id: tool_id.clone(),
-                                working_dir: tool_ctx.working_dir.clone(),
-                            };
+                    let exec_tool_id = tool_id.clone();
+                    let exec_tool_name = tool_name.clone();
+                    let exec_tool_input = tool_input.clone();
+                    let tool_execution = async {
+                        if let Some(tool) = tool {
+                            if let Some(preflight_result) =
+                                tool.preflight(&exec_tool_input, &tool_ctx)
+                            {
+                                preflight_result
+                            } else {
+                                // Check permissions
+                                let perm_req = PermissionRequest {
+                                    tool_name: exec_tool_name.clone(),
+                                    tool_input: exec_tool_input.clone(),
+                                    permission_level: tool.permission_level(),
+                                    description: format!("Execute tool '{}'", exec_tool_name),
+                                    id: exec_tool_id,
+                                    working_dir: tool_ctx.working_dir.clone(),
+                                };
 
-                            let decision = agent.permission_policy.check(&perm_req).await;
+                                let decision = agent.permission_policy.check(&perm_req).await;
 
-                            match decision {
-                                PermissionDecision::Allow
-                                | PermissionDecision::AllowOnce
-                                | PermissionDecision::AllowForSession => {
-                                    // Fire PreToolUse hooks
-                                    let hook_ctx = HookContext {
-                                        event: HookEvent::PreToolUse,
-                                        tool_name: Some(tool_name.clone()),
-                                        tool_input: Some(tool_input.clone()),
-                                        tool_result: None,
-                                        tool_is_error: None,
-                                        turn,
-                                        cumulative_cost_usd: cumulative.cost_usd.unwrap_or(0.0),
-                                        message_count: agent.messages.lock().len(),
-                                    };
-                                    let hook_action =
-                                        cersei_hooks::run_hooks(&agent.hooks, &hook_ctx).await;
+                                match decision {
+                                    PermissionDecision::Allow
+                                    | PermissionDecision::AllowOnce
+                                    | PermissionDecision::AllowForSession => {
+                                        // Fire PreToolUse hooks
+                                        let hook_ctx = HookContext {
+                                            event: HookEvent::PreToolUse,
+                                            tool_name: Some(exec_tool_name.clone()),
+                                            tool_input: Some(exec_tool_input.clone()),
+                                            tool_result: None,
+                                            tool_is_error: None,
+                                            turn,
+                                            cumulative_cost_usd: cumulative.cost_usd.unwrap_or(0.0),
+                                            message_count: agent.messages.lock().len(),
+                                        };
+                                        let hook_action =
+                                            cersei_hooks::run_hooks(&agent.hooks, &hook_ctx).await;
 
-                                    match hook_action {
-                                        HookAction::Block(reason) => ToolResult::error(format!(
-                                            "Blocked by hook: {}",
-                                            reason
-                                        )),
-                                        HookAction::ModifyInput(new_input) => {
-                                            tool.execute(new_input, &tool_ctx).await
+                                        match hook_action {
+                                            HookAction::Block(reason) => ToolResult::error(
+                                                format!("Blocked by hook: {}", reason),
+                                            ),
+                                            HookAction::ModifyInput(new_input) => {
+                                                tool.execute(new_input, &tool_ctx).await
+                                            }
+                                            _ => {
+                                                tool.execute(exec_tool_input.clone(), &tool_ctx)
+                                                    .await
+                                            }
                                         }
-                                        _ => tool.execute(tool_input.clone(), &tool_ctx).await,
+                                    }
+                                    PermissionDecision::Deny(reason) => {
+                                        ToolResult::error(format!("Permission denied: {}", reason))
                                     }
                                 }
-                                PermissionDecision::Deny(reason) => {
-                                    ToolResult::error(format!("Permission denied: {}", reason))
+                            }
+                        } else {
+                            ToolResult::error(format!("Unknown tool: {}", exec_tool_name))
+                        }
+                    };
+                    tokio::pin!(tool_execution);
+
+                    let result = loop {
+                        if agent.cancel_token.is_cancelled() {
+                            return Err(CerseiError::Cancelled);
+                        }
+                        tokio::select! {
+                            control = control_rx.recv(), if control_open => {
+                                match control {
+                                    Some(control) => {
+                                        handle_control_message(control, &mut pending_user_messages)?;
+                                    }
+                                    None => {
+                                        control_open = false;
+                                    }
                                 }
                             }
+                            result = &mut tool_execution => {
+                                break result;
+                            }
                         }
-                    } else {
-                        ToolResult::error(format!("Unknown tool: {}", tool_name))
                     };
 
                     let duration = start.elapsed();
@@ -773,8 +956,27 @@ pub async fn run_agent_streaming(
                         content: ToolResultContent::Text(content_text),
                         is_error: Some(result.is_error),
                     });
+
+                    drain_control_messages(&mut control_rx, &mut pending_user_messages)?;
+                    if !pending_user_messages.is_empty() {
+                        for (remaining_id, remaining_name, remaining_input) in
+                            tool_use_blocks[idx + 1..].iter().cloned()
+                        {
+                            result_blocks.push(skipped_tool_result_block(remaining_id.clone()));
+                            tool_calls.push(ToolCallRecord {
+                                name: remaining_name,
+                                id: remaining_id,
+                                input: remaining_input,
+                                result: SKIPPED_TOOL_RESULT.to_string(),
+                                is_error: true,
+                                duration: Duration::ZERO,
+                            });
+                        }
+                        break;
+                    }
                 }
 
+                append_pending_user_text_block(&mut result_blocks, &mut pending_user_messages);
                 // Add tool results as user message
                 agent
                     .messages
@@ -782,6 +984,10 @@ pub async fn run_agent_streaming(
                     .push(Message::user_blocks(result_blocks));
             }
             StopReason::MaxTokens => {
+                if push_pending_user_message(agent, &mut pending_user_messages) {
+                    continue;
+                }
+
                 // Inject continuation message
                 if !auto_summary_requested {
                     agent
@@ -796,6 +1002,10 @@ pub async fn run_agent_streaming(
                     .push(Message::user("Continue from where you left off."));
             }
             _ => {
+                if push_pending_user_message(agent, &mut pending_user_messages) {
+                    continue;
+                }
+
                 let reason = format!("{:?}", response.stop_reason);
                 let summary_prompt_sent = auto_summary_requested;
                 log_turn_handoff_to_human(&reason, false, summary_prompt_sent);
@@ -856,6 +1066,7 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tokio::sync::Notify;
 
     struct TwoStepProvider {
         calls: AtomicUsize,
@@ -1158,6 +1369,419 @@ col_a,col_b,col_c,col_d\n"
         assert_eq!(output.tool_calls.len(), 1);
         assert!(output.tool_calls[0].is_error);
         assert!(output.tool_calls[0].result.contains("preflight blocked"));
+    }
+
+    struct CountingTool {
+        name: &'static str,
+        executed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Tool used to verify injected-message control flow."
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            PermissionLevel::None
+        }
+
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            ToolResult::success(format!("{} result", self.name))
+        }
+    }
+
+    struct BlockingTool {
+        finish: Arc<Notify>,
+        executed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for BlockingTool {
+        fn name(&self) -> &str {
+            "BlockingTool"
+        }
+
+        fn description(&self) -> &str {
+            "Tool that waits until the test releases it."
+        }
+
+        fn input_schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            PermissionLevel::None
+        }
+
+        async fn execute(&self, _input: serde_json::Value, _ctx: &ToolContext) -> ToolResult {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            self.finish.notified().await;
+            ToolResult::success("blocking result")
+        }
+    }
+
+    fn assert_injected_tool_message(
+        message: &Message,
+        expected_results: &[(&str, &str, bool)],
+        expected_user_text: &str,
+    ) {
+        let MessageContent::Blocks(blocks) = &message.content else {
+            panic!("expected user block message, got {:?}", message.content);
+        };
+
+        for (tool_id, expected_text, expected_error) in expected_results {
+            let Some(ContentBlock::ToolResult {
+                content: ToolResultContent::Text(text),
+                is_error,
+                ..
+            }) = blocks.iter().find(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == tool_id
+                )
+            })
+            else {
+                panic!("missing tool result for {tool_id}");
+            };
+            assert!(
+                text.contains(expected_text),
+                "tool result for {tool_id} did not contain {expected_text:?}: {text:?}"
+            );
+            assert_eq!(is_error.unwrap_or(false), *expected_error);
+        }
+
+        let text = blocks
+            .iter()
+            .filter_map(|block| {
+                if let ContentBlock::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains(MID_RUN_USER_MESSAGE_HEADER));
+        assert!(
+            text.contains(expected_user_text),
+            "injected text did not contain {expected_user_text:?}: {text:?}"
+        );
+    }
+
+    async fn send_tool_use_response(
+        tx: mpsc::Sender<StreamEvent>,
+        message_id: String,
+        tools: Vec<(&'static str, &'static str)>,
+    ) {
+        let _ = tx
+            .send(StreamEvent::MessageStart {
+                id: message_id,
+                model: "test".into(),
+            })
+            .await;
+        for (index, (tool_id, tool_name)) in tools.into_iter().enumerate() {
+            let _ = tx
+                .send(StreamEvent::ContentBlockStart {
+                    index,
+                    block_type: "tool_use".into(),
+                    id: Some(tool_id.into()),
+                    name: Some(tool_name.into()),
+                    thought_signature: None,
+                })
+                .await;
+            let _ = tx
+                .send(StreamEvent::InputJsonDelta {
+                    index,
+                    partial_json: "{}".into(),
+                })
+                .await;
+            let _ = tx.send(StreamEvent::ContentBlockStop { index }).await;
+        }
+        let _ = tx
+            .send(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage: Some(Usage::default()),
+            })
+            .await;
+        let _ = tx.send(StreamEvent::MessageStop).await;
+    }
+
+    async fn send_text_response(tx: mpsc::Sender<StreamEvent>, message_id: String, text: &str) {
+        let _ = tx
+            .send(StreamEvent::MessageStart {
+                id: message_id,
+                model: "test".into(),
+            })
+            .await;
+        let _ = tx
+            .send(StreamEvent::ContentBlockStart {
+                index: 0,
+                block_type: "text".into(),
+                id: None,
+                name: None,
+                thought_signature: None,
+            })
+            .await;
+        let _ = tx
+            .send(StreamEvent::TextDelta {
+                index: 0,
+                text: text.into(),
+            })
+            .await;
+        let _ = tx.send(StreamEvent::ContentBlockStop { index: 0 }).await;
+        let _ = tx
+            .send(StreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::EndTurn),
+                usage: Some(Usage::default()),
+            })
+            .await;
+        let _ = tx.send(StreamEvent::MessageStop).await;
+    }
+
+    struct InjectBeforeToolProvider {
+        calls: AtomicUsize,
+        release_first: Arc<Notify>,
+        saw_injected_request: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for InjectBeforeToolProvider {
+        fn name(&self) -> &str {
+            "inject-before-tool"
+        }
+
+        fn context_window(&self, _model: &str) -> u64 {
+            4096
+        }
+
+        fn capabilities(&self, _model: &str) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tool_use: true,
+                ..Default::default()
+            }
+        }
+
+        async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 1 {
+                let last = request
+                    .messages
+                    .last()
+                    .expect("missing injected user message");
+                assert_injected_tool_message(
+                    last,
+                    &[("tool-1", SKIPPED_TOOL_RESULT, true)],
+                    "change course",
+                );
+                self.saw_injected_request.fetch_add(1, Ordering::SeqCst);
+            }
+
+            let (tx, rx) = mpsc::channel(16);
+            let release_first = Arc::clone(&self.release_first);
+            tokio::spawn(async move {
+                if call == 0 {
+                    release_first.notified().await;
+                    send_tool_use_response(
+                        tx,
+                        "inject-before-tool-0".into(),
+                        vec![("tool-1", "SkippedTool")],
+                    )
+                    .await;
+                } else {
+                    send_text_response(
+                        tx,
+                        "inject-before-tool-1".into(),
+                        "Summary: changed course\nNext steps: continue with the user's update",
+                    )
+                    .await;
+                }
+            });
+
+            Ok(CompletionStream::new(rx))
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_message_before_tool_execution_skips_stale_tool_call() {
+        let release_first = Arc::new(Notify::new());
+        let saw_injected_request = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+
+        let agent = Agent::builder()
+            .provider(InjectBeforeToolProvider {
+                calls: AtomicUsize::new(0),
+                release_first: Arc::clone(&release_first),
+                saw_injected_request: Arc::clone(&saw_injected_request),
+            })
+            .tool(CountingTool {
+                name: "SkippedTool",
+                executed: Arc::clone(&executed),
+            })
+            .working_dir(std::env::temp_dir())
+            .model("test-model")
+            .max_turns(4)
+            .build()
+            .unwrap();
+
+        let mut stream = agent.run_stream("original request");
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::ModelResponseStart { turn: 1, .. } => {
+                    stream.inject_message("change course".into());
+                    release_first.notify_one();
+                    break;
+                }
+                AgentEvent::Error(err) => panic!("agent errored before injection: {err}"),
+                _ => {}
+            }
+        }
+
+        let output = loop {
+            match stream.next().await {
+                Some(AgentEvent::ToolStart { name, .. }) => {
+                    panic!("stale tool should have been skipped, started {name}");
+                }
+                Some(AgentEvent::Complete(output)) => break output,
+                Some(AgentEvent::Error(err)) => panic!("agent errored: {err}"),
+                Some(_) => {}
+                None => panic!("agent stream ended without completion"),
+            }
+        };
+
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+        assert_eq!(saw_injected_request.load(Ordering::SeqCst), 1);
+        assert!(output.message.get_all_text().contains("Summary:"));
+    }
+
+    struct InjectDuringToolProvider {
+        calls: AtomicUsize,
+        saw_injected_request: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for InjectDuringToolProvider {
+        fn name(&self) -> &str {
+            "inject-during-tool"
+        }
+
+        fn context_window(&self, _model: &str) -> u64 {
+            4096
+        }
+
+        fn capabilities(&self, _model: &str) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tool_use: true,
+                ..Default::default()
+            }
+        }
+
+        async fn complete(&self, request: CompletionRequest) -> Result<CompletionStream> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call == 1 {
+                let last = request
+                    .messages
+                    .last()
+                    .expect("missing injected user message");
+                assert_injected_tool_message(
+                    last,
+                    &[
+                        ("tool-1", "blocking result", false),
+                        ("tool-2", SKIPPED_TOOL_RESULT, true),
+                    ],
+                    "stop after this tool",
+                );
+                self.saw_injected_request.fetch_add(1, Ordering::SeqCst);
+            }
+
+            let (tx, rx) = mpsc::channel(16);
+            tokio::spawn(async move {
+                if call == 0 {
+                    send_tool_use_response(
+                        tx,
+                        "inject-during-tool-0".into(),
+                        vec![("tool-1", "BlockingTool"), ("tool-2", "SecondTool")],
+                    )
+                    .await;
+                } else {
+                    send_text_response(
+                        tx,
+                        "inject-during-tool-1".into(),
+                        "Summary: stopped after the first tool\nNext steps: follow the update",
+                    )
+                    .await;
+                }
+            });
+
+            Ok(CompletionStream::new(rx))
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_message_during_tool_execution_keeps_result_and_skips_remaining_tools() {
+        let finish_blocking_tool = Arc::new(Notify::new());
+        let blocking_executed = Arc::new(AtomicUsize::new(0));
+        let second_executed = Arc::new(AtomicUsize::new(0));
+        let saw_injected_request = Arc::new(AtomicUsize::new(0));
+
+        let agent = Agent::builder()
+            .provider(InjectDuringToolProvider {
+                calls: AtomicUsize::new(0),
+                saw_injected_request: Arc::clone(&saw_injected_request),
+            })
+            .tool(BlockingTool {
+                finish: Arc::clone(&finish_blocking_tool),
+                executed: Arc::clone(&blocking_executed),
+            })
+            .tool(CountingTool {
+                name: "SecondTool",
+                executed: Arc::clone(&second_executed),
+            })
+            .working_dir(std::env::temp_dir())
+            .model("test-model")
+            .max_turns(4)
+            .build()
+            .unwrap();
+
+        let mut stream = agent.run_stream("run two tools");
+        let output = loop {
+            match stream.next().await {
+                Some(AgentEvent::ToolStart { name, .. }) if name == "BlockingTool" => {
+                    stream.inject_message("stop after this tool".into());
+                    finish_blocking_tool.notify_one();
+                }
+                Some(AgentEvent::ToolStart { name, .. }) if name == "SecondTool" => {
+                    panic!("second tool should have been skipped, started {name}");
+                }
+                Some(AgentEvent::Complete(output)) => break output,
+                Some(AgentEvent::Error(err)) => panic!("agent errored: {err}"),
+                Some(_) => {}
+                None => panic!("agent stream ended without completion"),
+            }
+        };
+
+        assert_eq!(blocking_executed.load(Ordering::SeqCst), 1);
+        assert_eq!(second_executed.load(Ordering::SeqCst), 0);
+        assert_eq!(saw_injected_request.load(Ordering::SeqCst), 1);
+        assert!(output.message.get_all_text().contains("Summary:"));
     }
 
     struct SummaryProvider {

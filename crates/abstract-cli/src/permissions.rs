@@ -355,6 +355,7 @@ impl PermissionPolicy for CliPermissionPolicy {
         let scope_notice = session_scope.map(SessionPermissionScope::session_notice);
 
         loop {
+            let _prompt_guard = crate::terminal_input::prompt_active_guard();
             let _ = execute!(
                 io::stderr(),
                 Print("\n"),
@@ -474,7 +475,9 @@ impl PermissionPolicy for CliPermissionPolicy {
                     );
                     let _ = io::stderr().flush();
                     let mut explanation = String::new();
-                    let _ = io::stdin().read_line(&mut explanation);
+                    crate::terminal_input::with_input_lock(|| {
+                        let _ = io::stdin().read_line(&mut explanation);
+                    });
                     return PermissionDecision::Deny(format!(
                         "User denied: {}",
                         explanation.trim()
@@ -800,50 +803,52 @@ fn save_persisted_file_to(path: &Path, persisted: &PersistedPermissions) {
 }
 
 fn read_permission_char(valid_chars: &str) -> char {
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-    use crossterm::terminal;
+    crate::terminal_input::with_input_lock(|| {
+        use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+        use crossterm::terminal;
 
-    if terminal::enable_raw_mode().is_ok() {
-        let result = loop {
-            if let Ok(Event::Key(KeyEvent {
-                code, modifiers, ..
-            })) = event::read()
-            {
-                // Ctrl-C: exit raw mode and raise SIGINT so the signal handler
-                // can cancel the running agent turn.
-                if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                    let _ = terminal::disable_raw_mode();
-                    eprintln!();
-                    unsafe { libc::raise(libc::SIGINT) };
-                    return 'n';
-                }
-                break match code {
-                    KeyCode::Char(c) => {
-                        if valid_chars.contains(c) {
-                            c
-                        } else {
-                            continue;
-                        }
+        if terminal::enable_raw_mode().is_ok() {
+            let result = loop {
+                if let Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) = event::read()
+                {
+                    // Ctrl-C: exit raw mode and raise SIGINT so the signal handler
+                    // can cancel the running agent turn.
+                    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                        let _ = terminal::disable_raw_mode();
+                        eprintln!();
+                        unsafe { libc::raise(libc::SIGINT) };
+                        return 'n';
                     }
-                    KeyCode::Enter => 'y',
-                    KeyCode::Esc => 'n',
-                    _ => continue,
-                };
-            }
-        };
-        let _ = terminal::disable_raw_mode();
-        eprint!("\n");
-        result
-    } else {
-        // Fallback: read a line
-        let mut input = String::new();
-        let _ = io::stdin().read_line(&mut input);
-        input
-            .trim()
-            .chars()
-            .find(|c| valid_chars.contains(*c))
-            .unwrap_or('n')
-    }
+                    break match code {
+                        KeyCode::Char(c) => {
+                            if valid_chars.contains(c) {
+                                c
+                            } else {
+                                continue;
+                            }
+                        }
+                        KeyCode::Enter => 'y',
+                        KeyCode::Esc => 'n',
+                        _ => continue,
+                    };
+                }
+            };
+            let _ = terminal::disable_raw_mode();
+            eprint!("\n");
+            result
+        } else {
+            // Fallback: read a line
+            let mut input = String::new();
+            let _ = io::stdin().read_line(&mut input);
+            input
+                .trim()
+                .chars()
+                .find(|c| valid_chars.contains(*c))
+                .unwrap_or('n')
+        }
+    })
 }
 
 #[cfg(test)]

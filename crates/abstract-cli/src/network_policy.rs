@@ -144,6 +144,7 @@ impl NetworkPolicy for CliNetworkPolicy {
         };
 
         loop {
+            let _prompt_guard = crate::terminal_input::prompt_active_guard();
             let _ = execute!(
                 io::stderr(),
                 Print("\n"),
@@ -264,39 +265,41 @@ fn indent_review_text(s: &str) -> String {
 }
 
 fn read_char() -> char {
-    use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-    use crossterm::terminal;
+    crate::terminal_input::with_input_lock(|| {
+        use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+        use crossterm::terminal;
 
-    if terminal::enable_raw_mode().is_ok() {
-        let result = loop {
-            if let Ok(Event::Key(KeyEvent {
-                code, modifiers, ..
-            })) = event::read()
-            {
-                // Ctrl-C: exit raw mode and raise SIGINT so the signal handler
-                // can cancel the running agent turn.
-                if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                    let _ = terminal::disable_raw_mode();
-                    eprintln!();
-                    unsafe { libc::raise(libc::SIGINT) };
-                    return 'n';
+        if terminal::enable_raw_mode().is_ok() {
+            let result = loop {
+                if let Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) = event::read()
+                {
+                    // Ctrl-C: exit raw mode and raise SIGINT so the signal handler
+                    // can cancel the running agent turn.
+                    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                        let _ = terminal::disable_raw_mode();
+                        eprintln!();
+                        unsafe { libc::raise(libc::SIGINT) };
+                        return 'n';
+                    }
+                    break match code {
+                        KeyCode::Char(c) => c,
+                        KeyCode::Enter => '\n',
+                        KeyCode::Esc => 'n',
+                        _ => continue,
+                    };
                 }
-                break match code {
-                    KeyCode::Char(c) => c,
-                    KeyCode::Enter => '\n',
-                    KeyCode::Esc => 'n',
-                    _ => continue,
-                };
-            }
-        };
-        let _ = terminal::disable_raw_mode();
-        eprint!("\n");
-        result
-    } else {
-        let mut input = String::new();
-        let _ = io::stdin().read_line(&mut input);
-        input.trim().chars().next().unwrap_or('n')
-    }
+            };
+            let _ = terminal::disable_raw_mode();
+            eprint!("\n");
+            result
+        } else {
+            let mut input = String::new();
+            let _ = io::stdin().read_line(&mut input);
+            input.trim().chars().next().unwrap_or('n')
+        }
+    })
 }
 
 fn normalize_tool_name(tool_name: &str) -> String {

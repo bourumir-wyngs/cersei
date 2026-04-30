@@ -17,6 +17,7 @@ mod reviewer;
 mod sessions;
 mod signals;
 mod status;
+mod terminal_input;
 mod theme;
 mod tools_config;
 

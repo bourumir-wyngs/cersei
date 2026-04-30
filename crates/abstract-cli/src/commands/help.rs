@@ -2,6 +2,7 @@ pub fn run() -> anyhow::Result<()> {
     eprintln!("\x1b[36;1mCommands:\x1b[0m");
     eprintln!("  /help, /h, /?     Show this help");
     eprintln!("  Trailing \\        Continue onto the next line (\\\\ does not)");
+    eprintln!("  Ctrl+F            Add an instruction while the agent is running");
     eprintln!("  /clear            Clear conversation history");
     eprintln!("  /checkpoint       Save a file-history checkpoint");
     eprintln!("  /changes          Show tracked changes since the latest checkpoint");

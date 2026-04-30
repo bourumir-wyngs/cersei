@@ -364,7 +364,9 @@ fn print_banner(config: &AppConfig, session_id: &str) {
         config.effort,
         short_id,
     );
-    eprintln!("\x1b[90mType /help for commands, Ctrl+C to cancel, Ctrl+C×2 to exit\x1b[0m\n");
+    eprintln!(
+        "\x1b[90mType /help for commands, Ctrl+F to add instructions while running, Ctrl+C to cancel, Ctrl+C×2 to exit\x1b[0m\n"
+    );
 }
 
 fn print_startup_warnings() {

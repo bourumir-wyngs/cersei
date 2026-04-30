@@ -21,9 +21,12 @@ use cersei_tools::Extensions;
 use cersei_tools::ReviewRequest;
 use cersei_types::{Message, Role};
 use chrono::Local;
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 // ─── Recovery prompt ───────────────────────────────────────────────────────
 
@@ -103,34 +106,148 @@ fn read_choice() -> String {
     use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
     use crossterm::terminal;
 
-    if terminal::enable_raw_mode().is_ok() {
-        let result = loop {
-            if let Ok(Event::Key(KeyEvent {
-                code, modifiers, ..
-            })) = event::read()
-            {
-                // Ctrl-C: exit raw mode and return empty to skip recovery.
-                if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                    let _ = terminal::disable_raw_mode();
-                    eprintln!();
-                    return String::new();
+    crate::terminal_input::with_input_lock(|| {
+        if terminal::enable_raw_mode().is_ok() {
+            let result = loop {
+                if let Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) = event::read()
+                {
+                    // Ctrl-C: exit raw mode and return empty to skip recovery.
+                    if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                        let _ = terminal::disable_raw_mode();
+                        eprintln!();
+                        return String::new();
+                    }
+                    break match code {
+                        KeyCode::Char(c) => c.to_string(),
+                        KeyCode::Enter => String::new(),
+                        KeyCode::Esc => String::new(),
+                        _ => continue,
+                    };
                 }
-                break match code {
-                    KeyCode::Char(c) => c.to_string(),
-                    KeyCode::Enter => String::new(),
-                    KeyCode::Esc => String::new(),
-                    _ => continue,
+            };
+            let _ = terminal::disable_raw_mode();
+            eprint!("\n");
+            result
+        } else {
+            let mut input = String::new();
+            let _ = std::io::stdin().read_line(&mut input);
+            input.trim().to_string()
+        }
+    })
+}
+
+// ─── Mid-stream user input ─────────────────────────────────────────────────
+
+enum MidstreamInputEvent {
+    PromptRequested,
+}
+
+struct MidstreamInputListener {
+    running: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl MidstreamInputListener {
+    fn start(enabled: bool, tx: mpsc::UnboundedSender<MidstreamInputEvent>) -> Option<Self> {
+        if !enabled || !io::stdin().is_terminal() {
+            return None;
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        let paused = Arc::new(AtomicBool::new(false));
+        let thread_running = Arc::clone(&running);
+        let thread_paused = Arc::clone(&paused);
+
+        let handle = thread::spawn(move || {
+            use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+            use crossterm::terminal;
+
+            while thread_running.load(Ordering::Relaxed) {
+                if thread_paused.load(Ordering::Relaxed) || crate::terminal_input::prompt_active() {
+                    let _ = terminal::disable_raw_mode();
+                    thread::sleep(Duration::from_millis(25));
+                    continue;
+                }
+
+                let Some(_guard) = crate::terminal_input::try_input_lock() else {
+                    thread::sleep(Duration::from_millis(25));
+                    continue;
                 };
+
+                if !terminal::is_raw_mode_enabled().unwrap_or(false) {
+                    let _ = terminal::enable_raw_mode();
+                }
+
+                let has_event = event::poll(Duration::from_millis(25)).unwrap_or(false);
+                if !has_event {
+                    continue;
+                }
+
+                let Ok(Event::Key(KeyEvent {
+                    code, modifiers, ..
+                })) = event::read()
+                else {
+                    continue;
+                };
+
+                if code == KeyCode::Char('f') && modifiers.contains(KeyModifiers::CONTROL) {
+                    thread_paused.store(true, Ordering::Relaxed);
+                    let _ = terminal::disable_raw_mode();
+                    if tx.send(MidstreamInputEvent::PromptRequested).is_err() {
+                        thread_running.store(false, Ordering::Relaxed);
+                    }
+                } else if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+                    let _ = terminal::disable_raw_mode();
+                    unsafe { libc::raise(libc::SIGINT) };
+                }
             }
-        };
-        let _ = terminal::disable_raw_mode();
-        eprint!("\n");
-        result
-    } else {
-        let mut input = String::new();
-        let _ = std::io::stdin().read_line(&mut input);
-        input.trim().to_string()
+
+            let _ = terminal::disable_raw_mode();
+        });
+
+        Some(Self {
+            running,
+            paused,
+            handle: Some(handle),
+        })
     }
+
+    fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Drop for MidstreamInputListener {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        self.paused.store(false, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn prompt_midstream_instruction() -> Option<String> {
+    crate::terminal_input::with_input_lock(|| {
+        let _ = crossterm::terminal::disable_raw_mode();
+        eprint!("\n  Instruction> ");
+        let _ = io::stderr().flush();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            return None;
+        }
+
+        let input = input.trim().to_string();
+        if input.is_empty() {
+            None
+        } else {
+            Some(input)
+        }
+    })
 }
 
 // ─── REPL ──────────────────────────────────────────────────────────────────
@@ -600,8 +717,40 @@ async fn run_agent_streaming(
     _is_first: bool,
 ) -> Result<(), String> {
     let mut stream = agent.run_stream(prompt);
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let mut midstream_input = MidstreamInputListener::start(!json_mode, input_tx);
 
-    while let Some(event) = stream.next().await {
+    loop {
+        let event = tokio::select! {
+            event = stream.next() => event,
+            input_event = input_rx.recv(), if midstream_input.is_some() => {
+                match input_event {
+                    Some(MidstreamInputEvent::PromptRequested) => {
+                        renderer.flush();
+                        if let Some(instruction) = prompt_midstream_instruction() {
+                            stream.inject_message(instruction);
+                            if !json_mode {
+                                eprintln!(
+                                    "\x1b[90m  Instruction queued for the next model turn.\x1b[0m"
+                                );
+                            }
+                        }
+                        if let Some(listener) = &midstream_input {
+                            listener.resume();
+                        }
+                    }
+                    None => {
+                        midstream_input = None;
+                    }
+                }
+                continue;
+            }
+        };
+
+        let Some(event) = event else {
+            break;
+        };
+
         if json_mode {
             render::print_json_event(&event);
         }
