@@ -150,6 +150,51 @@ struct MidstreamInputListener {
     handle: Option<thread::JoinHandle<()>>,
 }
 
+struct ListenerRawModeGuard {
+    restore: bool,
+}
+
+impl ListenerRawModeGuard {
+    fn enable_if_needed() -> Option<Self> {
+        let was_enabled = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+        if !was_enabled && crossterm::terminal::enable_raw_mode().is_err() {
+            return None;
+        }
+        if !was_enabled {
+            restore_terminal_output_processing();
+        }
+
+        Some(Self {
+            restore: !was_enabled,
+        })
+    }
+}
+
+impl Drop for ListenerRawModeGuard {
+    fn drop(&mut self) {
+        if self.restore {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn restore_terminal_output_processing() {
+    unsafe {
+        let mut termios = std::mem::zeroed();
+        if libc::tcgetattr(libc::STDIN_FILENO, &mut termios) != 0 {
+            return;
+        }
+
+        termios.c_oflag |= libc::OPOST;
+        termios.c_oflag |= libc::ONLCR;
+        let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &termios);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_terminal_output_processing() {}
+
 impl MidstreamInputListener {
     fn start(enabled: bool, tx: mpsc::UnboundedSender<MidstreamInputEvent>) -> Option<Self> {
         if !enabled || !io::stdin().is_terminal() {
@@ -163,11 +208,9 @@ impl MidstreamInputListener {
 
         let handle = thread::spawn(move || {
             use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-            use crossterm::terminal;
 
             while thread_running.load(Ordering::Relaxed) {
                 if thread_paused.load(Ordering::Relaxed) || crate::terminal_input::prompt_active() {
-                    let _ = terminal::disable_raw_mode();
                     thread::sleep(Duration::from_millis(25));
                     continue;
                 }
@@ -177,9 +220,10 @@ impl MidstreamInputListener {
                     continue;
                 };
 
-                if !terminal::is_raw_mode_enabled().unwrap_or(false) {
-                    let _ = terminal::enable_raw_mode();
-                }
+                let Some(_raw_mode) = ListenerRawModeGuard::enable_if_needed() else {
+                    thread::sleep(Duration::from_millis(25));
+                    continue;
+                };
 
                 let has_event = event::poll(Duration::from_millis(25)).unwrap_or(false);
                 if !has_event {
@@ -195,17 +239,13 @@ impl MidstreamInputListener {
 
                 if code == KeyCode::Char('f') && modifiers.contains(KeyModifiers::CONTROL) {
                     thread_paused.store(true, Ordering::Relaxed);
-                    let _ = terminal::disable_raw_mode();
                     if tx.send(MidstreamInputEvent::PromptRequested).is_err() {
                         thread_running.store(false, Ordering::Relaxed);
                     }
                 } else if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
-                    let _ = terminal::disable_raw_mode();
                     unsafe { libc::raise(libc::SIGINT) };
                 }
             }
-
-            let _ = terminal::disable_raw_mode();
         });
 
         Some(Self {
