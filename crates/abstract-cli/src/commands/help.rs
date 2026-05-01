@@ -12,6 +12,7 @@ pub fn run() -> anyhow::Result<()> {
     eprintln!("  /commit           Generate a git commit with AI message");
     eprintln!("  /review           AI code review of current changes");
     eprintln!("  /reviewer [name]  List reviewer models or switch the reviewer model");
+    eprintln!("  /tools            List model-visible tools for coding and reviewer agents");
     eprintln!("  /effort [value]   Show or set effort: tokens or low, medium, high, max");
     eprintln!("  /memory, /mem     Show memory status");
     eprintln!("  /model [name]     List Anthropic/OpenAI/Google/xAI models or switch immediately");

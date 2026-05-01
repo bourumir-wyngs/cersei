@@ -352,6 +352,18 @@ pub async fn run_repl(
                     .await
                 {
                     Ok(commands::CommandAction::None) => None,
+                    Ok(commands::CommandAction::ShowTools) => {
+                        let coding_tools = agent.available_tools();
+                        let reviewer_tools = app::reviewer_tool_infos(&repl_config);
+                        if let Err(err) = commands::tools::print_report(
+                            &repl_config,
+                            &coding_tools,
+                            &reviewer_tools,
+                        ) {
+                            eprintln!("\x1b[31m  Tools report failed: {err}\x1b[0m");
+                        }
+                        None
+                    }
                     Ok(commands::CommandAction::RunReviewer { diff, hint }) => {
                         match reviewer::review_service(tool_extensions) {
                             Some(service) => {

@@ -1,10 +1,31 @@
 use async_trait::async_trait;
 use cersei_memory::manager::MemoryManager;
 use cersei_memory::memdir::MemoryType;
-use cersei_tools::{PermissionLevel, Tool, ToolContext, ToolResult};
+use cersei_tools::{PermissionLevel, Tool, ToolCategory, ToolContext, ToolInfo, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+
+const MEMORY_RECALL_DESCRIPTION: &str = "Recall relevant memories using the graph memory system. This tool is always available without permission approval. Use this to find prior project conventions, debugging steps, or user preferences.";
+const MEMORY_STORE_DESCRIPTION: &str = "Store a durable memory. This tool is always available without permission approval. Use this to remember important project facts, recurring issues, or user preferences. Only stores when the graph feature is active.";
+
+pub fn memory_recall_tool_info() -> ToolInfo {
+    ToolInfo {
+        name: "MemoryRecall".to_string(),
+        description: MEMORY_RECALL_DESCRIPTION.to_string(),
+        permission_level: PermissionLevel::None,
+        category: ToolCategory::Memory,
+    }
+}
+
+pub fn memory_store_tool_info() -> ToolInfo {
+    ToolInfo {
+        name: "MemoryStore".to_string(),
+        description: MEMORY_STORE_DESCRIPTION.to_string(),
+        permission_level: PermissionLevel::None,
+        category: ToolCategory::Memory,
+    }
+}
 
 pub struct MemoryRecallTool {
     manager: Arc<MemoryManager>,
@@ -22,10 +43,13 @@ impl Tool for MemoryRecallTool {
         "MemoryRecall"
     }
     fn description(&self) -> &str {
-        "Recall relevant memories using the graph memory system. This tool is always available without permission approval. Use this to find prior project conventions, debugging steps, or user preferences."
+        MEMORY_RECALL_DESCRIPTION
     }
     fn permission_level(&self) -> PermissionLevel {
         PermissionLevel::None
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
     }
     fn input_schema(&self) -> Value {
         serde_json::json!({
@@ -80,10 +104,13 @@ impl Tool for MemoryStoreTool {
         "MemoryStore"
     }
     fn description(&self) -> &str {
-        "Store a durable memory. This tool is always available without permission approval. Use this to remember important project facts, recurring issues, or user preferences. Only stores when the graph feature is active."
+        MEMORY_STORE_DESCRIPTION
     }
     fn permission_level(&self) -> PermissionLevel {
         PermissionLevel::None
+    }
+    fn category(&self) -> ToolCategory {
+        ToolCategory::Memory
     }
     fn input_schema(&self) -> Value {
         serde_json::json!({

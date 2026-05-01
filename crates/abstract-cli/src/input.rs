@@ -33,6 +33,7 @@ impl AbstractHelper {
             "/commit",
             "/review",
             "/reviewer",
+            "/tools",
             "/effort",
             "/memory",
             "/model",

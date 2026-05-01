@@ -17,7 +17,7 @@ use cersei_memory::manager::MemoryManager;
 use cersei_tools::file_history::FileHistory;
 use cersei_tools::network_policy::sandbox_warning;
 use cersei_tools::permissions::AllowAll;
-use cersei_tools::Extensions;
+use cersei_tools::{Extensions, ToolInfo};
 use cersei_types::Message;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -313,6 +313,25 @@ pub fn build_reviewer_agent(
     Ok((agent, resolved_model))
 }
 
+pub fn reviewer_tool_infos(config: &AppConfig) -> Vec<ToolInfo> {
+    let selected_tools: std::collections::HashSet<&str> =
+        config.reviewer_tools.iter().map(String::as_str).collect();
+    let mut infos: Vec<ToolInfo> = selected_reviewer_tools(&selected_tools)
+        .iter()
+        .map(|tool| ToolInfo::from_tool(tool.as_ref()))
+        .collect();
+
+    if config
+        .reviewer_tools
+        .iter()
+        .any(|tool| tool == "MemoryRecall")
+    {
+        infos.push(crate::memory_tools::memory_recall_tool_info());
+    }
+
+    infos
+}
+
 fn selected_reviewer_tools(
     selected_tools: &std::collections::HashSet<&str>,
 ) -> Vec<Box<dyn cersei_tools::Tool>> {
@@ -418,5 +437,26 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
         let unique_names: HashSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique_names.len());
+    }
+
+    #[test]
+    fn reviewer_tool_infos_include_read_only_file_history_and_memory() {
+        let config = AppConfig::default();
+        let infos = reviewer_tool_infos(&config);
+
+        let file_history = infos
+            .iter()
+            .find(|info| info.name == "FileHistory")
+            .expect("reviewer should report FileHistory");
+        assert_eq!(
+            file_history.permission_level,
+            cersei_tools::PermissionLevel::ReadOnly
+        );
+
+        let memory_recall = infos
+            .iter()
+            .find(|info| info.name == "MemoryRecall")
+            .expect("reviewer should report MemoryRecall");
+        assert_eq!(memory_recall.category, cersei_tools::ToolCategory::Memory);
     }
 }

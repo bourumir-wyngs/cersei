@@ -161,6 +161,14 @@ impl Agent {
         self.messages.lock().clone()
     }
 
+    /// Access the model-visible tools currently attached to this agent.
+    pub fn available_tools(&self) -> Vec<cersei_tools::ToolInfo> {
+        self.tools
+            .iter()
+            .map(|tool| cersei_tools::ToolInfo::from_tool(tool.as_ref()))
+            .collect()
+    }
+
     /// Clear the conversation history.
     pub fn clear_messages(&self) {
         self.messages.lock().clear();
@@ -686,5 +694,20 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn agent_reports_attached_tool_infos() {
+        let agent = Agent::builder()
+            .provider(TestProvider)
+            .tool(AlphaTool)
+            .tool(BetaTool)
+            .build()
+            .unwrap();
+
+        let infos = agent.available_tools();
+        let names: Vec<&str> = infos.iter().map(|info| info.name.as_str()).collect();
+
+        assert_eq!(names, vec!["Alpha", "Beta"]);
     }
 }

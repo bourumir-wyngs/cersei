@@ -15,6 +15,7 @@ mod model;
 mod resume;
 mod review;
 mod rollback;
+pub(crate) mod tools;
 
 use crate::config::AppConfig;
 
@@ -47,6 +48,7 @@ pub enum CommandAction {
     SaveSession {
         name: String,
     },
+    ShowTools,
 }
 
 impl CommandRegistry {
@@ -71,6 +73,7 @@ impl CommandRegistry {
             "commit" => commit::run(config).await.map(|_| CommandAction::None),
             "review" => review::run(args, config).await,
             "reviewer" => model::run_reviewer(args, config).await,
+            "tools" => tools::run(args),
             "effort" => effort::run(args, config),
             "memory" | "mem" => memory::run(config).map(|_| CommandAction::None),
             "model" => model::run(args, config).await,

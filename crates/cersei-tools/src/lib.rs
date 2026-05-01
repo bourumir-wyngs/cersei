@@ -113,6 +113,25 @@ pub trait Tool: Send + Sync {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+    pub permission_level: PermissionLevel,
+    pub category: ToolCategory,
+}
+
+impl ToolInfo {
+    pub fn from_tool(tool: &dyn Tool) -> Self {
+        Self {
+            name: tool.name().to_string(),
+            description: tool.description().to_string(),
+            permission_level: tool.permission_level(),
+            category: tool.category(),
+        }
+    }
+}
+
 /// Typed tool execution trait — used with `#[derive(Tool)]`.
 #[async_trait]
 pub trait ToolExecute: Send + Sync {
@@ -135,7 +154,7 @@ pub enum PermissionLevel {
 
 // ─── Tool categories ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolCategory {
     FileSystem,
     Shell,
